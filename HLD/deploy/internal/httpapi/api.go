@@ -14,34 +14,46 @@ import (
 	"printgateway/internal/printgw"
 )
 
-// API holds this service's shared, request-independent dependencies.
-//
-// NOTE: logger/metaData/errorHandler are still constructed once and reused
-// across all requests — the same pattern main.go used as package globals,
-// just moved onto a struct. The per-request metadata fix (so a correlation
-// id can be added without a data race) is a separate, later step.
+// API holds this service's shared, request-independent dependencies. The
+// logger itself is safe to share (it was never the problem); a
+// *logs.LogMetaData and its paired error_handler.ErrorHandler are not, since
+// error_handler.NewErrorHandler binds metadata at construction and mutating
+// it per request would be a data race across concurrent requests (P0-5).
+// Those are built fresh per request instead — see requestMeta.
 type API struct {
-	cfg          config.Config
-	logger       logs.Logger
-	metaData     *logs.LogMetaData
-	errorHandler error_handler.ErrorHandler
-	svc          *printgw.Service
+	cfg    config.Config
+	logger logs.Logger
+	svc    *printgw.Service
 }
 
 func New(cfg config.Config, logger logs.Logger, svc *printgw.Service) *API {
-	metaData := &logs.LogMetaData{Service: config.ServiceName}
 	return &API{
-		cfg:          cfg,
-		logger:       logger,
-		metaData:     metaData,
-		errorHandler: error_handler.NewErrorHandler(logger, metaData),
-		svc:          svc,
+		cfg:    cfg,
+		logger: logger,
+		svc:    svc,
 	}
 }
 
-// MetaData is exposed so main's startup/shutdown log lines can reuse it
-// instead of constructing a second logs.LogMetaData.
-func (a *API) MetaData() *logs.LogMetaData { return a.metaData }
+// requestMeta builds a *logs.LogMetaData/error_handler.ErrorHandler pair
+// scoped to one request, correlated by the id requestContext attached to
+// the request context. A pointer reachable only from the request that
+// created it, on the single goroutine net/http runs it on, is ordinary
+// single-threaded mutation rather than shared state. The plan's
+// 50-concurrent -race test is what will keep that true as the handler chain
+// grows; it is not written yet, so for now the invariant rests on nothing
+// hoisting this pair onto the API struct.
+//
+// Caveat on JobId: it is set correctly here, but main.go currently builds
+// logs.GetConsoleLogger(), and every consoleLogger method discards its
+// metadata argument (logs@v1.5.2/console_logger.go) — so the id reaches the
+// response header and not the log text. That is not a defect in this code:
+// it is why Workstream D (the logstash logger, where all 12 LogMetaData
+// fields become real structured fields) is the step that makes correlation
+// observable. What this file fixes is the data race that blocked it (P0-5).
+func (a *API) requestMeta(r *http.Request) (*logs.LogMetaData, error_handler.ErrorHandler) {
+	md := &logs.LogMetaData{Service: config.ServiceName, JobId: requestIDFrom(r.Context())}
+	return md, error_handler.NewErrorHandler(a.logger, md)
+}
 
 // fail translates err into an HTTP response. If err is (or wraps) an
 // *apperr.HTTPError, its Internal detail — which may contain filesystem
@@ -50,12 +62,13 @@ func (a *API) MetaData() *logs.LogMetaData { return a.metaData }
 // error_handler.HandleError logs again internally, but by then Err.Error()
 // is already just the public text, so the sensitive detail is logged
 // exactly once, by us.
-func (a *API) fail(w http.ResponseWriter, err error) {
+func (a *API) fail(w http.ResponseWriter, r *http.Request, err error) {
+	md, eh := a.requestMeta(r)
 	var httpErr *apperr.HTTPError
 	if errors.As(err, &httpErr) && httpErr.Internal != nil {
-		a.logger.LogError(httpErr.Internal.Error(), a.metaData)
+		a.logger.LogError(httpErr.Internal.Error(), md)
 	}
-	a.errorHandler.HandleError(error_handler.APIError{
+	eh.HandleError(error_handler.APIError{
 		StatusCode: apperr.StatusCodeOf(err),
 		Err:        err,
 	}, w)

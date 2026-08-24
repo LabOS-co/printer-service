@@ -17,7 +17,7 @@ import (
 //     a presigned S3/MinIO URL, but works with any plain HTTP(S) URL.
 func (a *API) printHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		a.fail(w, &apperr.HTTPError{Status: http.StatusMethodNotAllowed, Public: "use POST"})
+		a.fail(w, r, &apperr.HTTPError{Status: http.StatusMethodNotAllowed, Public: "use POST"})
 		return
 	}
 
@@ -29,7 +29,7 @@ func (a *API) printHandler(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(contentType, "application/json"):
 		a.handleURLReference(w, r)
 	default:
-		a.fail(w, &apperr.HTTPError{
+		a.fail(w, r, &apperr.HTTPError{
 			Status: http.StatusUnsupportedMediaType,
 			Public: "Content-Type must be multipart/form-data (direct file) or application/json (file_url)",
 		})
@@ -45,28 +45,29 @@ func (a *API) printHandler(w http.ResponseWriter, r *http.Request) {
 // network and must stay out of the response body (see apperr.HTTPError).
 func (a *API) handleMultipart(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseMultipartForm(64 << 20); err != nil { // 64MB in-memory threshold, rest spills to disk
-		a.fail(w, &apperr.HTTPError{Status: http.StatusBadRequest, Public: fmt.Sprintf("invalid multipart body: %v", err)})
+		a.fail(w, r, &apperr.HTTPError{Status: http.StatusBadRequest, Public: fmt.Sprintf("invalid multipart body: %v", err)})
 		return
 	}
 	printer := r.FormValue("printer")
 	if printer == "" {
-		a.errorHandler.ThrowMissingParameterError(w, "printer")
+		_, eh := a.requestMeta(r)
+		eh.ThrowMissingParameterError(w, "printer")
 		return
 	}
 
 	file, header, err := r.FormFile("file")
 	if err != nil {
-		a.fail(w, &apperr.HTTPError{Status: http.StatusBadRequest, Public: fmt.Sprintf("missing file part: %v", err)})
+		a.fail(w, r, &apperr.HTTPError{Status: http.StatusBadRequest, Public: fmt.Sprintf("missing file part: %v", err)})
 		return
 	}
 	defer file.Close()
 
 	result, err := a.svc.PrintReader(r.Context(), printer, header.Filename, file)
 	if err != nil {
-		a.fail(w, err)
+		a.fail(w, r, err)
 		return
 	}
-	a.writeSuccess(w, printer, result)
+	a.writeSuccess(w, r, printer, result)
 }
 
 type urlPrintRequest struct {
@@ -78,24 +79,25 @@ type urlPrintRequest struct {
 func (a *API) handleURLReference(w http.ResponseWriter, r *http.Request) {
 	var req urlPrintRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		a.fail(w, &apperr.HTTPError{Status: http.StatusBadRequest, Public: fmt.Sprintf("invalid JSON body: %v", err)})
+		a.fail(w, r, &apperr.HTTPError{Status: http.StatusBadRequest, Public: fmt.Sprintf("invalid JSON body: %v", err)})
 		return
 	}
 	if req.Printer == "" || req.FileURL == "" {
-		a.fail(w, &apperr.HTTPError{Status: http.StatusBadRequest, Public: "both printer and file_url are required"})
+		a.fail(w, r, &apperr.HTTPError{Status: http.StatusBadRequest, Public: "both printer and file_url are required"})
 		return
 	}
 
 	result, err := a.svc.PrintURL(r.Context(), req.Printer, req.FileURL)
 	if err != nil {
-		a.fail(w, err)
+		a.fail(w, r, err)
 		return
 	}
-	a.writeSuccess(w, req.Printer, result)
+	a.writeSuccess(w, r, req.Printer, result)
 }
 
-func (a *API) writeSuccess(w http.ResponseWriter, printer string, result printgw.SubmitResult) {
-	a.logger.LogInfo(fmt.Sprintf("print submitted: printer=%q output=%s", printer, result.Output), a.metaData)
+func (a *API) writeSuccess(w http.ResponseWriter, r *http.Request, printer string, result printgw.SubmitResult) {
+	md, _ := a.requestMeta(r)
+	a.logger.LogInfo(fmt.Sprintf("print submitted: printer=%q output=%s", printer, result.Output), md)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
 		"status": "submitted",

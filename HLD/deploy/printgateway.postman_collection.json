@@ -1,0 +1,202 @@
+{
+  "info": {
+    "name": "Print Gateway (LAB-16894 POC)",
+    "description": "Exercises every scenario currently reachable on POST /print. See the 'baseUrl' collection variable — point it at wherever the gateway is actually listening (see the README's 'Building and running' section: it needs to run where CUPS is, i.e. inside WSL, to actually print). The 'Auth & validation' and 'Contract' folders never touch a real printer; only 'Real print (multipart)' does.\n\nFor the file-attach requests, Postman will show the file part as unselected after import (it does not trust a collection-supplied absolute path) — click the field and re-attach printDemo.pdf from the repo root (C:\\GitProjects\\printer-server\\printDemo.pdf) once per request.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://127.0.0.1:8090" },
+    { "key": "token", "value": "W21AYM5zr0kOYt1vnfxBZ2W2KiqPIjYc" },
+    { "key": "printer", "value": "brother-direct" }
+  ],
+  "item": [
+    {
+      "name": "Auth & validation (safe — no printer contacted)",
+      "item": [
+        {
+          "name": "No token -> 401",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/print",
+            "description": "Expect 401 Unauthorized. Body is the standard error_handler JSON envelope."
+          }
+        },
+        {
+          "name": "Wrong token -> 401",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-Labos-Print-Token", "value": "not-the-real-token" }
+            ],
+            "url": "{{baseUrl}}/print",
+            "description": "Expect 401. Constant-time compare, so timing does not distinguish this from 'no token'."
+          }
+        },
+        {
+          "name": "GET instead of POST -> 405",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-Labos-Print-Token", "value": "{{token}}" }
+            ],
+            "url": "{{baseUrl}}/print",
+            "description": "Expect 405 Method Not Allowed."
+          }
+        },
+        {
+          "name": "Unsupported Content-Type -> 415",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-Labos-Print-Token", "value": "{{token}}" },
+              { "key": "Content-Type", "value": "text/plain" }
+            ],
+            "body": { "mode": "raw", "raw": "printer=x" },
+            "url": "{{baseUrl}}/print",
+            "description": "Expect 415. Content-Type must be multipart/form-data or application/json."
+          }
+        },
+        {
+          "name": "Multipart missing printer field -> 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-Labos-Print-Token", "value": "{{token}}" }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "file", "type": "file", "src": "C:\\GitProjects\\printer-server\\printDemo.pdf" }
+              ]
+            },
+            "url": "{{baseUrl}}/print",
+            "description": "Expect 400 — goes through error_handler.ThrowMissingParameterError for 'printer'."
+          }
+        },
+        {
+          "name": "Multipart missing file part -> 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-Labos-Print-Token", "value": "{{token}}" }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "printer", "value": "{{printer}}", "type": "text" }
+              ]
+            },
+            "url": "{{baseUrl}}/print",
+            "description": "Expect 400 'missing file part'."
+          }
+        },
+        {
+          "name": "JSON missing fields -> 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-Labos-Print-Token", "value": "{{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\"printer\": \"{{printer}}\"}" },
+            "url": "{{baseUrl}}/print",
+            "description": "Expect 400 'both printer and file_url are required' (file_url omitted)."
+          }
+        },
+        {
+          "name": "JSON malformed body -> 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-Labos-Print-Token", "value": "{{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{ not valid json " },
+            "url": "{{baseUrl}}/print",
+            "description": "Expect 400 'invalid JSON body'."
+          }
+        },
+        {
+          "name": "JSON file_url unreachable -> 502",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-Labos-Print-Token", "value": "{{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\": \"{{printer}}\", \"file_url\": \"http://127.0.0.1:1/nope.pdf\"}"
+            },
+            "url": "{{baseUrl}}/print",
+            "description": "Expect a fetch failure (5xx). Port 1 has nothing listening, so this exercises the fetch-error path without downloading or printing anything."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Known gap — SSRF (P0-4, unmitigated as of this build)",
+      "item": [
+        {
+          "name": "JSON file_url targets loopback CUPS admin (demonstrates the gap — do not run against a shared/production instance)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-Labos-Print-Token", "value": "{{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\": \"{{printer}}\", \"file_url\": \"http://127.0.0.1:631/\"}"
+            },
+            "url": "{{baseUrl}}/print",
+            "description": "The plan's P0-4 finding: no scheme/host/port allowlist and no private-IP block exist yet (that's Workstream A5, not yet implemented), so the server will fetch this local CUPS admin page and hand its HTML to `lp` as if it were the document to print — i.e. it will actually attempt to print CUPS's own admin page. Safe to run against this dev box as a demonstration since 127.0.0.1 here just means 'this WSL instance', but do not point it at anything you would not want printed, and do not treat a 200 here as a bug in this collection — it is the documented, not-yet-fixed gap."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Real print (multipart) — needs the gateway running where CUPS is",
+      "item": [
+        {
+          "name": "Print printDemo.pdf to brother-direct -> 200",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-Labos-Print-Token", "value": "{{token}}" },
+              { "key": "X-Laas-Identifier", "value": "postman-sanity-{{$timestamp}}" }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "printer", "value": "{{printer}}", "type": "text" },
+                { "key": "file", "type": "file", "src": "C:\\GitProjects\\printer-server\\printDemo.pdf" }
+              ]
+            },
+            "url": "{{baseUrl}}/print",
+            "description": "The actual sanity test: attaches the repo's printDemo.pdf and prints it via the working brother-direct CUPS queue (192.168.252.210, confirmed printing correctly on the real Brother MFC-L2700DW). Expect 200 with {\"status\":\"submitted\",\"output\":...}; the response's `output` should contain 'request id is brother-direct-N (1 file(s))'. Check the response header X-Laas-Identifier is echoed back, and check the physical printer for output."
+          }
+        },
+        {
+          "name": "Print printDemo.pdf to nonexistent-queue -> 5xx",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-Labos-Print-Token", "value": "{{token}}" }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "printer", "value": "there-is-no-such-queue", "type": "text" },
+                { "key": "file", "type": "file", "src": "C:\\GitProjects\\printer-server\\printDemo.pdf" }
+              ]
+            },
+            "url": "{{baseUrl}}/print",
+            "description": "Expect a failure status with the generic public message only (\"print submission failed\") — confirms `lp`'s stderr/the real error never reaches the client (apperr's Public/Internal split)."
+          }
+        }
+      ]
+    }
+  ]
+}

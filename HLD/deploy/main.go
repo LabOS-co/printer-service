@@ -27,14 +27,15 @@ import (
 func main() {
 	cfg := config.Load(os.Args, os.Getenv)
 	logger := logs.GetConsoleLogger()
+	startupMeta := &logs.LogMetaData{Service: config.ServiceName}
 
 	svc := printgw.NewService(cups.NewLPSubmitter(), fetch.NewHTTPFetcher())
 	api := httpapi.New(cfg, logger, svc)
 	server := httpapi.NewServer(api)
 
-	logger.LogInfo(fmt.Sprintf("print gateway (prototype) listening on %s", cfg.Addr), api.MetaData())
+	logger.LogInfo(fmt.Sprintf("print gateway (prototype) listening on %s", cfg.Addr), startupMeta)
 	if err := server.ListenAndServe(); err != nil {
-		logger.LogError(fmt.Sprintf("server exited: %v", err), api.MetaData())
+		logger.LogError(fmt.Sprintf("server exited: %v", err), startupMeta)
 		os.Exit(1)
 	}
 }

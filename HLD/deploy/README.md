@@ -97,6 +97,23 @@ The token never appears in this repository or in the labOS source. On the
 labOS side it comes from `gSecretManager` (`config/print_gateway`,
 key `auth-token`); here it comes from the environment.
 
+### Correlation ID
+
+Every response carries an `X-Laas-Identifier` header — the labOS-wide
+correlation id convention. Send one on the request and the server adopts it,
+so a print can be traced back to the caller's own transaction; send nothing
+and the server generates one. Either way the value comes back on the
+response, including on a `401`.
+
+A supplied id is accepted only if it is printable ASCII and at most 128
+bytes. Anything else is replaced with a generated id and a log line saying
+so — it is never echoed back or written into a log field as given.
+
+Note the id is currently visible in the response header only, not in the
+server's log text: the prototype logs via `logs.GetConsoleLogger()`, whose
+methods ignore log metadata. Attaching the logstash logger is what turns the
+id into a queryable `job_id` field.
+
 ```bash
 PRINT_GATEWAY_TOKEN='<the shared secret>' ./printgateway-linux-amd64
 ```
@@ -167,8 +184,11 @@ works, not to be run in production:
   isn't resolved here either way.
 - **No idempotency key / retry / DLQ** (section 9-10) — if `lp` fails, the
   caller finds out immediately and has to decide what to do.
-- **No Audit trail or correlation IDs** (section 8) — only a plain log
-  line per request.
+- **No audit trail** (section 8) — nothing is persisted; the log line per
+  request is all there is. Correlation IDs *are* now assigned (see
+  "Correlation ID" above), but they are not yet visible in the log text,
+  because the console logger discards log metadata — that arrives with the
+  logstash logger.
 - **No SSRF protection on `file_url`** (section 11.3) — the server will
   fetch whatever URL it's given, with no allowlist or internal-IP
   blocking yet. Fine for testing, not for anything reachable by an
