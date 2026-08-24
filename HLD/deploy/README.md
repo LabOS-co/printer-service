@@ -118,6 +118,30 @@ id into a queryable `job_id` field.
 PRINT_GATEWAY_TOKEN='<the shared secret>' ./printgateway-linux-amd64
 ```
 
+### Timeouts, limits, and shutdown
+
+The server no longer runs with `net/http`'s zero-value timeouts — unset,
+a slow or silent client could hold a connection open forever. Each value
+below has a default and an env var to override it without a rebuild; a
+malformed override (e.g. an unparsable duration) makes the process refuse
+to start rather than silently keep the default:
+
+| Setting | Default | Env var |
+| :--- | :--- | :--- |
+| Read header timeout | 10s | `PRINT_GATEWAY_READ_HEADER_TIMEOUT` |
+| Read timeout | 5m | `PRINT_GATEWAY_READ_TIMEOUT` |
+| Write timeout | 1m | `PRINT_GATEWAY_WRITE_TIMEOUT` |
+| Idle timeout | 60s | `PRINT_GATEWAY_IDLE_TIMEOUT` |
+| Max header bytes | 64 KiB | `PRINT_GATEWAY_MAX_HEADER_BYTES` |
+| Shutdown grace period | 2m | `PRINT_GATEWAY_SHUTDOWN_GRACE` |
+
+On `SIGINT`/`SIGTERM` the server stops accepting new connections and waits
+up to the shutdown grace period for in-flight requests to finish before the
+process exits — a print already spooling is allowed to complete rather than
+being cut off mid-upload. `net/http`'s own error lines (e.g. a client that
+tripped the read header timeout) are routed through the same logger as
+every request instead of `net/http`'s default stderr logger.
+
 ## Building and running
 
 This needs to run where CUPS is, i.e. inside the WSL Ubuntu install (see

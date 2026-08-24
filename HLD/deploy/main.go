@@ -8,12 +8,18 @@
 // configuration (already set up, static PPD, ippfix if that printer needs
 // it) handles all of that. See internal/httpapi for the request contract.
 //
-// This file is wiring only: build the dependencies, then start the server.
+// This file is wiring only: build the dependencies, start the server, and
+// wait for either it to fail or a shutdown signal to arrive.
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/LabOS-co/go-packages/logs"
 
@@ -25,17 +31,45 @@ import (
 )
 
 func main() {
-	cfg := config.Load(os.Args, os.Getenv)
 	logger := logs.GetConsoleLogger()
 	startupMeta := &logs.LogMetaData{Service: config.ServiceName}
+
+	cfg, err := config.Load(os.Args, os.Getenv)
+	if err != nil {
+		logger.LogError(fmt.Sprintf("invalid configuration: %v", err), startupMeta)
+		os.Exit(1)
+	}
 
 	svc := printgw.NewService(cups.NewLPSubmitter(), fetch.NewHTTPFetcher())
 	api := httpapi.New(cfg, logger, svc)
 	server := httpapi.NewServer(api)
 
-	logger.LogInfo(fmt.Sprintf("print gateway (prototype) listening on %s", cfg.Addr), startupMeta)
-	if err := server.ListenAndServe(); err != nil {
-		logger.LogError(fmt.Sprintf("server exited: %v", err), startupMeta)
-		os.Exit(1)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	serveErr := make(chan error, 1)
+	go func() {
+		logger.LogInfo(fmt.Sprintf("print gateway (prototype) listening on %s", cfg.Addr), startupMeta)
+		serveErr <- server.ListenAndServe()
+	}()
+
+	select {
+	case err := <-serveErr:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.LogError(fmt.Sprintf("server exited: %v", err), startupMeta)
+			os.Exit(1)
+		}
+
+	case <-ctx.Done():
+		stop() // restore default signal behavior so a second signal can force-kill
+		logger.LogInfo("shutdown signal received, draining in-flight requests", startupMeta)
+
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownGrace)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			logger.LogError(fmt.Sprintf("graceful shutdown did not complete within %s: %v", cfg.ShutdownGrace, err), startupMeta)
+			os.Exit(1)
+		}
+		logger.LogInfo("shutdown complete", startupMeta)
 	}
 }
