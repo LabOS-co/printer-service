@@ -1,0 +1,13 @@
+# Normalize text files to LF in the repo; let git decide checkout behavior per-OS.
+* text=auto eol=lf
+
+# Windows-only scripts must keep CRLF.
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+
+# Binary deliverables and fixtures — never diff/merge as text.
+*.pdf binary
+*.docx binary
+*.bin binary
+*.png binary
+*.exe binary

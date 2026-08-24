@@ -1,0 +1,824 @@
+{
+  "attrs": [
+    {
+      "tag": 33,
+      "name": "copies-default",
+      "values": [
+        "AAAAAQ=="
+      ]
+    },
+    {
+      "tag": 35,
+      "name": "finishings-default",
+      "values": [
+        "AAAAAw=="
+      ]
+    },
+    {
+      "tag": 68,
+      "name": "media-default",
+      "values": [
+        "aXNvX2E0XzIxMHgyOTdtbQ=="
+      ]
+    },
+    {
+      "tag": 52,
+      "name": "media-col-default",
+      "values": [
+        "",
+        "bWVkaWEtdHlwZQ==",
+        "c3RhdGlvbmVyeQ==",
+        "bWVkaWEtc2l6ZQ==",
+        "",
+        "eC1kaW1lbnNpb24=",
+        "AABSCA==",
+        "eS1kaW1lbnNpb24=",
+        "AAB0BA==",
+        "",
+        "bWVkaWEtYm90dG9tLW1hcmdpbg==",
+        "AAABsA==",
+        "bWVkaWEtbGVmdC1tYXJnaW4=",
+        "AAABsA==",
+        "bWVkaWEtcmlnaHQtbWFyZ2lu",
+        "AAABsA==",
+        "bWVkaWEtdG9wLW1hcmdpbg==",
+        "AAABsA==",
+        "bWVkaWEtc291cmNl",
+        "YXV0bw==",
+        "bWVkaWEtc291cmNlLXByb3BlcnRpZXM=",
+        "",
+        "bWVkaWEtc291cmNlLWZlZWQtZGlyZWN0aW9u",
+        "c2hvcnQtZWRnZS1maXJzdA==",
+        "bWVkaWEtc291cmNlLWZlZWQtb3JpZW50YXRpb24=",
+        "AAAAAw==",
+        "",
+        ""
+      ]
+    },
+    {
+      "tag": 35,
+      "name": "orientation-requested-default",
+      "values": [
+        "AAAAAw=="
+      ]
+    },
+    {
+      "tag": 68,
+      "name": "output-bin-default",
+      "values": [
+        "ZmFjZS1kb3du"
+      ]
+    },
+    {
+      "tag": 68,
+      "name": "output-mode-default",
+      "values": [
+        "bW9ub2Nocm9tZQ=="
+      ]
+    },
+    {
+      "tag": 35,
+      "name": "print-quality-default",
+      "values": [
+        "AAAABA=="
+      ]
+    },
+    {
+      "tag": 50,
+      "name": "printer-resolution-default",
+      "values": [
+        "AAACWAAAAlgD"
+      ]
+    },
+    {
+      "tag": 68,
+      "name": "sides-default",
+      "values": [
+        "b25lLXNpZGVk"
+      ]
+    },
+    {
+      "tag": 68,
+      "name": "print-color-mode-default",
+      "values": [
+        "bW9ub2Nocm9tZQ=="
+      ]
+    },
+    {
+      "tag": 68,
+      "name": "print-content-optimize-default",
+      "values": [
+        "YXV0bw=="
+      ]
+    },
+    {
+      "tag": 68,
+      "name": "print-scaling-default",
+      "values": [
+        "YXV0bw=="
+      ]
+    },
+    {
+      "tag": 51,
+      "name": "copies-supported",
+      "values": [
+        "AAAAAQAAAGM="
+      ]
+    },
+    {
+      "tag": 35,
+      "name": "finishings-supported",
+      "values": [
+        "AAAAAw=="
+      ]
+    },
+    {
+      "tag": 68,
+      "name": "media-supported",
+      "values": [
+        "aXNvX2E0XzIxMHgyOTdtbQ==",
+        "bmFfbGV0dGVyXzguNXgxMWlu",
+        "bmFfbGVnYWxfOC41eDE0aW4=",
+        "bmFfZXhlY3V0aXZlXzcuMjV4MTAuNWlu",
+        "aXNvX2E1XzE0OHgyMTBtbQ==",
+        "aXNvX2E2XzEwNXgxNDhtbQ==",
+        "aXNvX2I1XzE3NngyNTBtbQ==",
+        "bmFfbnVtYmVyLTEwXzQuMTI1eDkuNWlu",
+        "aXNvX2RsXzExMHgyMjBtbQ==",
+        "aXNvX2M1XzE2MngyMjltbQ==",
+        "bmFfbW9uYXJjaF8zLjg3NXg3LjVpbg==",
+        "bmFfaW5kZXgtM3g1XzN4NWlu",
+        "bmFfZm9vbHNjYXBfOC41eDEzaW4=",
+        "Y3VzdG9tX21pbl83Ni4yeDEyN21t",
+        "Y3VzdG9tX21heF8yMTUuOXgzNTUuNm1t"
+      ]
+    },
+    {
+      "tag": 68,
+      "name": "media-col-supported",
+      "values": [
+        "bWVkaWEtdHlwZQ==",
+        "bWVkaWEtc2l6ZQ==",
+        "bWVkaWEtdG9wLW1hcmdpbg==",
+        "bWVkaWEtbGVmdC1tYXJnaW4=",
+        "bWVkaWEtcmlnaHQtbWFyZ2lu",
+        "bWVkaWEtYm90dG9tLW1hcmdpbg==",
+        "bWVkaWEtc291cmNl"
+      ]
+    },
+    {
+      "tag": 35,
+      "name": "orientation-requested-supported",
+      "values": [
+        "AAAAAw==",
+        "AAAABA=="
+      ]
+    },
+    {
+      "tag": 68,
+      "name": "output-bin-supported",
+      "values": [
+        "ZmFjZS1kb3du"
+      ]
+    },
+    {
+      "tag": 68,
+      "name": "output-mode-supported",
+      "values": [
+        "bW9ub2Nocm9tZQ==",
+        "YXV0bw=="
+      ]
+    },
+    {
+      "tag": 35,
+      "name": "print-quality-supported",
+      "values": [
+        "AAAABA=="
+      ]
+    },
+    {
+      "tag": 50,
+      "name": "printer-resolution-supported",
+      "values": [
+        "AAACWAAAAlgD",
+        "AAAJYAAAAlgD",
+        "AAABLAAAASwD"
+      ]
+    },
+    {
+      "tag": 68,
+      "name": "sides-supported",
+      "values": [
+        "b25lLXNpZGVk",
+        "dHdvLXNpZGVkLWxvbmctZWRnZQ==",
+        "dHdvLXNpZGVkLXNob3J0LWVkZ2U="
+      ]
+    },
+    {
+      "tag": 68,
+      "name": "print-color-mode-supported",
+      "values": [
+        "bW9ub2Nocm9tZQ==",
+        "YXV0bw=="
+      ]
+    },
+    {
+      "tag": 68,
+      "name": "print-content-optimize-supported",
+      "values": [
+        "YXV0bw=="
+      ]
+    },
+    {
+      "tag": 68,
+      "name": "print-scaling-supported",
+      "values": [
+        "YXV0bw==",
+        "YXV0by1maXQ=",
+        "ZmlsbA==",
+        "Zml0",
+        "bm9uZQ=="
+      ]
+    },
+    {
+      "tag": 72,
+      "name": "generated-natural-language-supported",
+      "values": [
+        "ZW4tdXM="
+      ]
+    },
+    {
+      "tag": 69,
+      "name": "printer-uri-supported",
+      "values": [
+        "aXBwOi8vMTkyLjE2OC4yNTIuMjEwL2lwcC9wcmludA=="
+      ]
+    },
+    {
+      "tag": 68,
+      "name": "uri-security-supported",
+      "values": [
+        "bm9uZQ=="
+      ]
+    },
+    {
+      "tag": 68,
+      "name": "uri-authentication-supported",
+      "values": [
+        "bm9uZQ=="
+      ]
+    },
+    {
+      "tag": 54,
+      "name": "printer-name",
+      "values": [
+        "AAJlbgAOQlJPVEhFUk1GQzI3MDA="
+      ]
+    },
+    {
+      "tag": 53,
+      "name": "printer-location",
+      "values": [
+        "AAJlbgAA"
+      ]
+    },
+    {
+      "tag": 53,
+      "name": "printer-info",
+      "values": [
+        "AAAAGkJyb3RoZXIgTUZDLUwyNzAwRFcgc2VyaWVz"
+      ]
+    },
+    {
+      "tag": 53,
+      "name": "printer-make-and-model",
+      "values": [
+        "AAJlbgAaQnJvdGhlciBNRkMtTDI3MDBEVyBzZXJpZXM="
+      ]
+    },
+    {
+      "tag": 35,
+      "name": "printer-state",
+      "values": [
+        "AAAAAw=="
+      ]
+    },
+    {
+      "tag": 68,
+      "name": "printer-state-reasons",
+      "values": [
+        "bm9uZQ=="
+      ]
+    },
+    {
+      "tag": 68,
+      "name": "ipp-versions-supported",
+      "values": [
+        "MS4w",
+        "MS4x",
+        "Mi4w"
+      ]
+    },
+    {
+      "tag": 35,
+      "name": "operations-supported",
+      "values": [
+        "AAAAAg==",
+        "AAAABA==",
+        "AAAABQ==",
+        "AAAABg==",
+        "AAAACA==",
+        "AAAACQ==",
+        "AAAACg==",
+        "AAAACw==",
+        "AAAAPA=="
+      ]
+    },
+    {
+      "tag": 34,
+      "name": "multiple-document-jobs-supported",
+      "values": [
+        "AA=="
+      ]
+    },
+    {
+      "tag": 33,
+      "name": "multiple-operation-time-out",
+      "values": [
+        "AAAAlg=="
+      ]
+    },
+    {
+      "tag": 72,
+      "name": "natural-language-configured",
+      "values": [
+        "ZW4tdXM="
+      ]
+    },
+    {
+      "tag": 71,
+      "name": "charset-configured",
+      "values": [
+        "dXRmLTg="
+      ]
+    },
+    {
+      "tag": 71,
+      "name": "charset-supported",
+      "values": [
+        "dXRmLTg="
+      ]
+    },
+    {
+      "tag": 73,
+      "name": "document-format-supported",
+      "values": [
+        "YXBwbGljYXRpb24vb2N0ZXQtc3RyZWFt",
+        "aW1hZ2UvdXJm",
+        "aW1hZ2UvcHdnLXJhc3Rlcg=="
+      ]
+    },
+    {
+      "tag": 73,
+      "name": "document-format-default",
+      "values": [
+        "YXBwbGljYXRpb24vb2N0ZXQtc3RyZWFt"
+      ]
+    },
+    {
+      "tag": 34,
+      "name": "printer-is-accepting-jobs",
+      "values": [
+        "AQ=="
+      ]
+    },
+    {
+      "tag": 33,
+      "name": "queued-job-count",
+      "values": [
+        "AAAAAA=="
+      ]
+    },
+    {
+      "tag": 68,
+      "name": "pdl-override-supported",
+      "values": [
+        "YXR0ZW1wdGVk"
+      ]
+    },
+    {
+      "tag": 33,
+      "name": "printer-up-time",
+      "values": [
+        "AAL/ww=="
+      ]
+    },
+    {
+      "tag": 68,
+      "name": "compression-supported",
+      "values": [
+        "bm9uZQ=="
+      ]
+    },
+    {
+      "tag": 34,
+      "name": "color-supported",
+      "values": [
+        "AA=="
+      ]
+    },
+    {
+      "tag": 68,
+      "name": "job-creation-attributes-supported",
+      "values": [
+        "Y29waWVz",
+        "ZmluaXNoaW5ncw==",
+        "aXBwLWF0dHJpYnV0ZS1maWRlbGl0eQ==",
+        "am9iLW5hbWU=",
+        "bWVkaWE=",
+        "bWVkaWEtY29s",
+        "b3JpZW50YXRpb24tcmVxdWVzdGVk",
+        "b3V0cHV0LWJpbg==",
+        "b3V0cHV0LW1vZGU=",
+        "cHJpbnQtcXVhbGl0eQ==",
+        "cHJpbnRlci1yZXNvbHV0aW9u",
+        "cmVxdWVzdGluZy11c2VyLW5hbWU=",
+        "c2lkZXM=",
+        "cHJpbnQtY29sb3ItbW9kZQ=="
+      ]
+    },
+    {
+      "tag": 35,
+      "name": "landscape-orientation-requested-preferred",
+      "values": [
+        "AAAABQ=="
+      ]
+    },
+    {
+      "tag": 54,
+      "name": "marker-colors",
+      "values": [
+        "AAJlbgAHIzAwMDAwMA=="
+      ]
+    },
+    {
+      "tag": 33,
+      "name": "marker-high-levels",
+      "values": [
+        "AAAAZA=="
+      ]
+    },
+    {
+      "tag": 33,
+      "name": "marker-levels",
+      "values": [
+        "AAAAHg=="
+      ]
+    },
+    {
+      "tag": 33,
+      "name": "marker-low-levels",
+      "values": [
+        "AAAACg=="
+      ]
+    },
+    {
+      "tag": 54,
+      "name": "marker-names",
+      "values": [
+        "AAJlbgACQks="
+      ]
+    },
+    {
+      "tag": 68,
+      "name": "marker-types",
+      "values": [
+        "dG9uZXI="
+      ]
+    },
+    {
+      "tag": 33,
+      "name": "media-bottom-margin-supported",
+      "values": [
+        "AAABsA=="
+      ]
+    },
+    {
+      "tag": 33,
+      "name": "media-left-margin-supported",
+      "values": [
+        "AAABsA=="
+      ]
+    },
+    {
+      "tag": 33,
+      "name": "media-right-margin-supported",
+      "values": [
+        "AAABsA=="
+      ]
+    },
+    {
+      "tag": 68,
+      "name": "media-source-supported",
+      "values": [
+        "YXV0bw==",
+        "bWFudWFs",
+        "dHJheS0x"
+      ]
+    },
+    {
+      "tag": 33,
+      "name": "media-top-margin-supported",
+      "values": [
+        "AAABsA=="
+      ]
+    },
+    {
+      "tag": 68,
+      "name": "media-type-supported",
+      "values": [
+        "c3RhdGlvbmVyeQ==",
+        "c3RhdGlvbmVyeS1saWdodHdlaWdodA==",
+        "c3RhdGlvbmVyeS1oZWF2eXdlaWdodA==",
+        "c3RhdGlvbmVyeS1jb3Zlcg==",
+        "ZW52ZWxvcGU=",
+        "ZW52ZWxvcGUtaGVhdnl3ZWlnaHQ=",
+        "ZW52ZWxvcGUtbGlnaHR3ZWlnaHQ=",
+        "c3RhdGlvbmVyeS1yZWN5Y2xlZA==",
+        "bGFiZWxz",
+        "c3RhdGlvbmVyeS1ib25k"
+      ]
+    },
+    {
+      "tag": 52,
+      "name": "media-size-supported",
+      "values": [
+        "",
+        "eC1kaW1lbnNpb24=",
+        "AABSCA==",
+        "eS1kaW1lbnNpb24=",
+        "AAB0BA==",
+        "",
+        "",
+        "eC1kaW1lbnNpb24=",
+        "AABUVg==",
+        "eS1kaW1lbnNpb24=",
+        "AABtJA==",
+        "",
+        "",
+        "eC1kaW1lbnNpb24=",
+        "AABUVg==",
+        "eS1kaW1lbnNpb24=",
+        "AACK6A==",
+        "",
+        "",
+        "eC1kaW1lbnNpb24=",
+        "AABH7w==",
+        "eS1kaW1lbnNpb24=",
+        "AABoLg==",
+        "",
+        "",
+        "eC1kaW1lbnNpb24=",
+        "AAA50A==",
+        "eS1kaW1lbnNpb24=",
+        "AABSCA==",
+        "",
+        "",
+        "eC1kaW1lbnNpb24=",
+        "AAApBA==",
+        "eS1kaW1lbnNpb24=",
+        "AAA50A==",
+        "",
+        "",
+        "eC1kaW1lbnNpb24=",
+        "AABEwA==",
+        "eS1kaW1lbnNpb24=",
+        "AABhqA==",
+        "",
+        "",
+        "eC1kaW1lbnNpb24=",
+        "AAAo7Q==",
+        "eS1kaW1lbnNpb24=",
+        "AABeQg==",
+        "",
+        "",
+        "eC1kaW1lbnNpb24=",
+        "AAAq+A==",
+        "eS1kaW1lbnNpb24=",
+        "AABV8A==",
+        "",
+        "",
+        "eC1kaW1lbnNpb24=",
+        "AAA/SA==",
+        "eS1kaW1lbnNpb24=",
+        "AABZdA==",
+        "",
+        "",
+        "eC1kaW1lbnNpb24=",
+        "AAAmcg==",
+        "eS1kaW1lbnNpb24=",
+        "AABKag==",
+        "",
+        "",
+        "eC1kaW1lbnNpb24=",
+        "AAAdxA==",
+        "eS1kaW1lbnNpb24=",
+        "AAAxnA==",
+        "",
+        "",
+        "eC1kaW1lbnNpb24=",
+        "AABUVg==",
+        "eS1kaW1lbnNpb24=",
+        "AACA/A==",
+        "",
+        "",
+        "eC1kaW1lbnNpb24=",
+        "AAAdxAAAVFY=",
+        "eS1kaW1lbnNpb24=",
+        "AAAxnAAAiug=",
+        ""
+      ]
+    },
+    {
+      "tag": 33,
+      "name": "pages-per-minute",
+      "values": [
+        "AAAAGg=="
+      ]
+    },
+    {
+      "tag": 68,
+      "name": "pdf-versions-supported",
+      "values": [
+        "bm9uZQ=="
+      ]
+    },
+    {
+      "tag": 53,
+      "name": "printer-device-id",
+      "values": [
+        "AAJlbgCUTUZHOkJyb3RoZXI7Q01EOlBKTCxIQlAsVVJGO01ETDpNRkMtTDI3MDBEVyBzZXJpZXM7Q0xTOlBSSU5URVI7Q0lEOkJyb3RoZXIgTGFzZXIgVHlwZTE7VVJGOlc4LENQMSxJUzQtMSxNVDEtMy00LTUtOCxPQjEwLFBRNCxSUzIwMC0zMDAtNjAwLFYxLjMsRE0xOw=="
+      ]
+    },
+    {
+      "tag": 69,
+      "name": "printer-icons",
+      "values": [
+        "aHR0cDovLzE5Mi4xNjguMjUyLjIxMC9pcHAvcHJpbnRlci1pY29ucy0xMjgucG5n",
+        "aHR0cDovLzE5Mi4xNjguMjUyLjIxMC9pcHAvcHJpbnRlci1pY29ucy01MTIucG5n"
+      ]
+    },
+    {
+      "tag": 69,
+      "name": "printer-more-info",
+      "values": [
+        "aHR0cDovLzE5Mi4xNjguMjUyLjIxMC9uZXQvbmV0L2FpcnByaW50Lmh0bWw="
+      ]
+    },
+    {
+      "tag": 69,
+      "name": "printer-uuid",
+      "values": [
+        "dXJuOnV1aWQ6ZTMyNDgwMDAtODBjZS0xMWRiLTgwMDAtMzAwNTVjNzNhYWQ4"
+      ]
+    },
+    {
+      "tag": 68,
+      "name": "urf-supported",
+      "values": [
+        "Vzg=",
+        "Q1Ax",
+        "SVM0LTE=",
+        "TVQxLTMtNC01LTg=",
+        "T0IxMA==",
+        "UFE0",
+        "UlMyMDAtMzAwLTYwMA==",
+        "VjEuMw==",
+        "RE0x"
+      ]
+    },
+    {
+      "tag": 51,
+      "name": "job-impressions-supported",
+      "values": [
+        "AAAAAQAAA+c="
+      ]
+    },
+    {
+      "tag": 18,
+      "name": "printer-geo-location",
+      "values": [
+        ""
+      ]
+    },
+    {
+      "tag": 54,
+      "name": "printer-dns-sd-name",
+      "values": [
+        "AAAAGkJyb3RoZXIgTUZDLUwyNzAwRFcgc2VyaWVz"
+      ]
+    },
+    {
+      "tag": 69,
+      "name": "printer-supply-info-uri",
+      "values": [
+        "aHR0cDovLzE5Mi4xNjguMjUyLjIxMC9nZW5lcmFsL3N0YXR1cy5odG1s"
+      ]
+    },
+    {
+      "tag": 68,
+      "name": "media-ready",
+      "values": [
+        "aXNvX2E0XzIxMHgyOTdtbQ=="
+      ]
+    },
+    {
+      "tag": 52,
+      "name": "media-col-ready",
+      "values": [
+        "",
+        "bWVkaWEtc2l6ZQ==",
+        "",
+        "eC1kaW1lbnNpb24=",
+        "AABSCA==",
+        "eS1kaW1lbnNpb24=",
+        "AAB0BA==",
+        "",
+        "bWVkaWEtYm90dG9tLW1hcmdpbg==",
+        "AAABsA==",
+        "bWVkaWEtbGVmdC1tYXJnaW4=",
+        "AAABsA==",
+        "bWVkaWEtcmlnaHQtbWFyZ2lu",
+        "AAABsA==",
+        "bWVkaWEtdG9wLW1hcmdpbg==",
+        "AAABsA==",
+        "bWVkaWEtc291cmNl",
+        "dHJheS0x",
+        "bWVkaWEtc291cmNlLXByb3BlcnRpZXM=",
+        "",
+        "bWVkaWEtc291cmNlLWZlZWQtZGlyZWN0aW9u",
+        "c2hvcnQtZWRnZS1maXJzdA==",
+        "bWVkaWEtc291cmNlLWZlZWQtb3JpZW50YXRpb24=",
+        "AAAAAw==",
+        "",
+        ""
+      ]
+    },
+    {
+      "tag": 68,
+      "name": "printer-kind",
+      "values": [
+        "ZG9jdW1lbnQ=",
+        "ZW52ZWxvcGU=",
+        "bGFiZWw="
+      ]
+    },
+    {
+      "tag": 68,
+      "name": "identify-actions-default",
+      "values": [
+        "Zmxhc2g=",
+        "c291bmQ="
+      ]
+    },
+    {
+      "tag": 68,
+      "name": "identify-actions-supported",
+      "values": [
+        "Zmxhc2g=",
+        "c291bmQ="
+      ]
+    },
+    {
+      "tag": 68,
+      "name": "ipp-features-supported",
+      "values": [
+        "YWlycHJpbnQtMS4z",
+        "ZmF4b3V0",
+        "d2Zkcy1wcmludC0xLjA="
+      ]
+    },
+    {
+      "tag": 50,
+      "name": "pwg-raster-document-resolution-supported",
+      "values": [
+        "AAACWAAAAlgD"
+      ]
+    },
+    {
+      "tag": 68,
+      "name": "pwg-raster-document-sheet-back-supported",
+      "values": [
+        "Um90YXRlZA=="
+      ]
+    },
+    {
+      "tag": 68,
+      "name": "pwg-raster-document-type-supported",
+      "values": [
+        "c3JnYl84",
+        "c2dyYXlfOA=="
+      ]
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+# Compiled binaries (each module is rebuilt locally per CLAUDE.md's build instructions)
+*.exe
+/printersearch
+/ippfix/ippfix-linux
+/HLD/WSL/printersearch
+/HLD/WSL/printersearch-linux
+/HLD/WSL/ippfix/ippfix
+/HLD/deploy/printgateway-linux-amd64
+
+# Node (HLD/*.docx generator scripts)
+/HLD/node_modules/
+
+# Generated/scratch output from WSL load-test and printer-emulator runs
+/HLD/WSL/emu-spool/
+/HLD/WSL/emu15-spool/
+/HLD/WSL/work/
+/HLD/WSL/bench-payload.bin
+/HLD/win-bench/out.prn
+
+# MS Word lock files (created while a .docx deliverable is open)
+~$*
+
+# OS/editor cruft
+.DS_Store
+Thumbs.db
