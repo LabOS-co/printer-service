@@ -63,6 +63,21 @@ const (
 	ShutdownGraceEnv     = "PRINT_GATEWAY_SHUTDOWN_GRACE"
 )
 
+// DefaultSubmitTimeout bounds how long a single `lp` invocation may run
+// (P0-1). Without it, a wedged CUPS queue hangs the handler goroutine
+// forever: defer cleanup() never runs, leaking the goroutine, the lp
+// process, the spooled temp file, and the client connection, permanently,
+// per request. printgw.Service applies this as a context.WithTimeout around
+// the Submit call, and cups.LPSubmitter's exec.CommandContext is what turns
+// that expiry into the child process actually being killed.
+//
+// NOTE: not yet included in a ShutdownGrace-vs-budget startup assertion —
+// that needs FetchTimeout too, which isn't wired to real cancellation until
+// a later step (SSRF hardening).
+const DefaultSubmitTimeout = 30 * time.Second
+
+const SubmitTimeoutEnv = "PRINT_GATEWAY_SUBMIT_TIMEOUT"
+
 // Config holds the service's runtime configuration.
 type Config struct {
 	Addr string
@@ -80,6 +95,9 @@ type Config struct {
 	// ShutdownGrace bounds how long Shutdown waits for in-flight requests
 	// to finish before main forces an exit.
 	ShutdownGrace time.Duration
+
+	// SubmitTimeout bounds a single lp invocation (P0-1).
+	SubmitTimeout time.Duration
 }
 
 // Load builds Config from argv (an address override, matching the original
@@ -102,6 +120,7 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 		IdleTimeout:       DefaultIdleTimeout,
 		MaxHeaderBytes:    DefaultMaxHeaderBytes,
 		ShutdownGrace:     DefaultShutdownGrace,
+		SubmitTimeout:     DefaultSubmitTimeout,
 	}
 
 	// Table rather than one if-block per value: the repeated form made the
@@ -117,6 +136,7 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 		{WriteTimeoutEnv, &cfg.WriteTimeout},
 		{IdleTimeoutEnv, &cfg.IdleTimeout},
 		{ShutdownGraceEnv, &cfg.ShutdownGrace},
+		{SubmitTimeoutEnv, &cfg.SubmitTimeout},
 	} {
 		v, err := overrideDuration(getenv, d.name, *d.dst)
 		if err != nil {

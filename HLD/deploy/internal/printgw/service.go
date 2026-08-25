@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"printgateway/internal/apperr"
 )
@@ -13,12 +14,22 @@ import (
 // document onto local disk (from an already-open reader or by fetching a
 // URL), hand it to a Submitter, then always clean up.
 type Service struct {
-	submitter Submitter
-	fetcher   Fetcher
+	submitter     Submitter
+	fetcher       Fetcher
+	submitTimeout time.Duration // bounds the Submit call; see ports.go (P0-1)
 }
 
-func NewService(submitter Submitter, fetcher Fetcher) *Service {
-	return &Service{submitter: submitter, fetcher: fetcher}
+func NewService(submitter Submitter, fetcher Fetcher, submitTimeout time.Duration) *Service {
+	return &Service{submitter: submitter, fetcher: fetcher, submitTimeout: submitTimeout}
+}
+
+// submit bounds ctx to submitTimeout before handing job to the Submitter, so
+// a wedged CUPS queue fails the request instead of hanging the handler
+// goroutine forever (P0-1).
+func (s *Service) submit(ctx context.Context, job SubmitJob) (SubmitResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, s.submitTimeout)
+	defer cancel()
+	return s.submitter.Submit(ctx, job)
 }
 
 // PrintReader spools src — an already-open uploaded file named filename,
@@ -40,7 +51,7 @@ func (s *Service) PrintReader(ctx context.Context, printer, filename string, src
 		return SubmitResult{}, err
 	}
 
-	return s.submitter.Submit(ctx, SubmitJob{Printer: printer, Path: path})
+	return s.submit(ctx, SubmitJob{Printer: printer, Path: path, Title: sanitizeName(filename)})
 }
 
 // PrintURL downloads rawURL via the configured Fetcher, spools it, and
@@ -61,5 +72,5 @@ func (s *Service) PrintURL(ctx context.Context, printer, rawURL string) (SubmitR
 		return SubmitResult{}, err
 	}
 
-	return s.submitter.Submit(ctx, SubmitJob{Printer: printer, Path: path})
+	return s.submit(ctx, SubmitJob{Printer: printer, Path: path, Title: "download"})
 }

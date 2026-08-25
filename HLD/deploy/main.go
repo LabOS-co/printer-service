@@ -40,7 +40,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	svc := printgw.NewService(cups.NewLPSubmitter(), fetch.NewHTTPFetcher())
+	svc := printgw.NewService(cups.NewLPSubmitter(), fetch.NewHTTPFetcher(), cfg.SubmitTimeout)
 	api := httpapi.New(cfg, logger, svc)
 	server := httpapi.NewServer(api)
 

@@ -16,6 +16,11 @@ import (
 type SubmitJob struct {
 	Printer string
 	Path    string
+
+	// Title is a sanitized, human-readable job name (lp's -t). It exists so
+	// an operator can tell jobs apart in `lpstat`/logs now that Path is no
+	// longer passed as a lp argument (see cups.LPSubmitter).
+	Title string
 }
 
 // SubmitResult is returned after a successful submission.
@@ -23,11 +28,10 @@ type SubmitResult struct {
 	Output string // raw stdout+stderr from the print command, verbatim
 }
 
-// Submitter hands a spooled file to the underlying print system.
-//
-// ctx is accepted for interface stability but not yet wired to cancellation
-// by the production implementation — that lands in a later hardening step
-// together with the exec.CommandContext timeout.
+// Submitter hands a spooled file to the underlying print system. ctx is
+// bounded by Service to config.SubmitTimeout (P0-1) and the production
+// implementation (cups.LPSubmitter) uses exec.CommandContext, so expiry or
+// caller cancellation actually kills the child process.
 type Submitter interface {
 	Submit(ctx context.Context, job SubmitJob) (SubmitResult, error)
 }
