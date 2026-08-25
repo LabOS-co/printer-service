@@ -32,11 +32,29 @@ func spoolTo(namePattern string, fill func(io.Writer) error) (path string, clean
 		return "", cleanup, fillErr
 	}
 
-	// The Close() error is intentionally ignored here: on ENOSPC a
-	// truncated file can be handed to the printer while this reports
-	// success. This is the single site for that gap — both PrintReader and
-	// PrintURL spool through here — fixed in a later hardening step (P0-3).
-	tmp.Close()
+	// Sync before Close: on ENOSPC a buffered write's failure often only
+	// surfaces here (or at Close), not at the earlier io.Copy — and both
+	// PrintReader and PrintURL spool through this one function, so this is
+	// the single site that must catch it (P0-3). Left unchecked, a
+	// truncated file gets physically printed while this reports success.
+	if syncErr := tmp.Sync(); syncErr != nil {
+		tmp.Close()
+		cleanup()
+		return "", cleanup, &apperr.HTTPError{
+			Status:   http.StatusInternalServerError,
+			Public:   "internal server error",
+			Internal: fmt.Errorf("syncing spooled file: %w", syncErr),
+		}
+	}
+
+	if closeErr := tmp.Close(); closeErr != nil {
+		cleanup()
+		return "", cleanup, &apperr.HTTPError{
+			Status:   http.StatusInternalServerError,
+			Public:   "internal server error",
+			Internal: fmt.Errorf("closing spooled file: %w", closeErr),
+		}
+	}
 
 	return tmp.Name(), cleanup, nil
 }
