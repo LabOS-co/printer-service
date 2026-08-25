@@ -33,10 +33,11 @@ const (
 
 // IPP delimiter tags
 const (
-	tagOperationAttributes byte = 0x01
-	tagJobAttributes       byte = 0x02
-	tagEndOfAttributes     byte = 0x03
-	tagPrinterAttributes   byte = 0x04
+	tagOperationAttributes   byte = 0x01
+	tagJobAttributes         byte = 0x02
+	tagEndOfAttributes       byte = 0x03
+	tagPrinterAttributes     byte = 0x04
+	tagUnsupportedAttributes byte = 0x05 // names which requested attributes the printer rejected
 )
 
 // IPP operation ids
@@ -52,6 +53,7 @@ type ippAttribute struct {
 	Tag   byte
 	Name  string
 	Value string
+	Group byte // the delimiter tag (tagJobAttributes etc.) this attribute was found under
 }
 
 type ippResponse struct {
@@ -174,14 +176,21 @@ func parseResponse(raw []byte) (*ippResponse, error) {
 
 	pos := 8
 	var lastName string
+	var group byte
 	for pos < len(raw) {
 		tag := raw[pos]
 		pos++
 		if tag == tagEndOfAttributes {
 			break
 		}
-		// delimiter tags for attribute groups (operation/job/printer/unsupported) - skip marker
+		// delimiter tags mark the start of an attribute group (operation/job/
+		// printer/unsupported). Track which one is open so each attribute can
+		// carry it - in particular so an attribute under
+		// tagUnsupportedAttributes (the printer naming what it rejected) can be
+		// told apart from a normal printer/job attribute once parsed.
 		if tag <= 0x0F {
+			group = tag
+			lastName = "" // a new group starts a new attribute, per ippfix's reference parser
 			continue
 		}
 		if pos+2 > len(raw) {
@@ -215,6 +224,7 @@ func parseResponse(raw []byte) (*ippResponse, error) {
 			Tag:   tag,
 			Name:  name,
 			Value: decodeValue(tag, value),
+			Group: group,
 		})
 	}
 
@@ -254,9 +264,22 @@ func decodeValue(tag byte, raw []byte) string {
 	return string(raw)
 }
 
+// statusName names an IPP status code. 0x0001/0x0002 are distinguished from
+// 0x0000 rather than collapsed into "successful-ok": the printer accepted the
+// job but ignored, substituted, or found conflicting job attributes - exactly
+// the failure mode (a silently dropped media/printer-resolution pin) this
+// project spent weeks diagnosing.
 func statusName(code uint16) string {
-	if code < 0x0100 {
+	switch code {
+	case 0x0000:
 		return "successful-ok"
+	case 0x0001:
+		return "successful-ok-ignored-or-substituted-attributes"
+	case 0x0002:
+		return "successful-ok-conflicting-attributes"
+	}
+	if code < 0x0100 {
+		return fmt.Sprintf("successful-ok-0x%04x", code)
 	}
 	return fmt.Sprintf("error-0x%04x", code)
 }

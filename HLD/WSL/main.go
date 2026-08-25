@@ -57,6 +57,19 @@ func httpEndpoint(host string, port int, path string) string {
 	return fmt.Sprintf("http://%s:%d%s", host, port, path)
 }
 
+// printAttributes prints one line per attribute, flagging the ones the
+// printer placed under the unsupported-attributes group - the protocol's own
+// way of naming which requested attributes it rejected.
+func printAttributes(attrs []ippAttribute) {
+	for _, a := range attrs {
+		marker := ""
+		if a.Group == tagUnsupportedAttributes {
+			marker = "  [REJECTED BY PRINTER]"
+		}
+		fmt.Printf("  %-30s = %s%s\n", a.Name, a.Value, marker)
+	}
+}
+
 func runInfo(args []string) {
 	fs := flag.NewFlagSet("info", flag.ExitOnError)
 	host := fs.String("host", "", "printer IP or hostname (required)")
@@ -83,9 +96,7 @@ func runInfo(args []string) {
 
 	fmt.Printf("IPP version: %d.%d\n", resp.Version>>8, resp.Version&0xFF)
 	fmt.Printf("Status: %s (0x%04x)\n", statusName(resp.StatusCode), resp.StatusCode)
-	for _, a := range resp.Attributes {
-		fmt.Printf("  %-30s = %s\n", a.Name, a.Value)
-	}
+	printAttributes(resp.Attributes)
 }
 
 func runPrint(args []string) {
@@ -156,11 +167,14 @@ func runPrint(args []string) {
 	}
 
 	fmt.Printf("Status: %s (0x%04x)\n", statusName(resp.StatusCode), resp.StatusCode)
-	for _, a := range resp.Attributes {
-		fmt.Printf("  %-30s = %s\n", a.Name, a.Value)
-	}
+	printAttributes(resp.Attributes)
 
-	if resp.StatusCode >= 0x0100 {
+	// Only 0x0000 is a clean success. 0x0001/0x0002 mean the printer accepted
+	// the job but ignored, substituted, or found conflicting job attributes -
+	// the exact way a pinned media/printer-resolution attribute can be
+	// silently dropped and produce a corrupt print while looking like success.
+	if resp.StatusCode != 0x0000 {
+		fmt.Printf("FAILED: printer reported %s, not a clean success - check for [REJECTED BY PRINTER] attributes above.\n", statusName(resp.StatusCode))
 		os.Exit(1)
 	}
 	fmt.Println("Print job submitted successfully.")
@@ -197,9 +211,7 @@ func runJobs(args []string) {
 	}
 
 	fmt.Printf("Status: %s (0x%04x)\n", statusName(resp.StatusCode), resp.StatusCode)
-	for _, a := range resp.Attributes {
-		fmt.Printf("  %-30s = %s\n", a.Name, a.Value)
-	}
+	printAttributes(resp.Attributes)
 }
 
 func runCancel(args []string) {
@@ -229,7 +241,5 @@ func runCancel(args []string) {
 	}
 
 	fmt.Printf("Status: %s (0x%04x)\n", statusName(resp.StatusCode), resp.StatusCode)
-	for _, a := range resp.Attributes {
-		fmt.Printf("  %-30s = %s\n", a.Name, a.Value)
-	}
+	printAttributes(resp.Attributes)
 }
