@@ -24,15 +24,36 @@ const (
 // Server timeouts and limits (P0-6). A zero-value *http.Server has none of
 // these, which is what let a slow or silent client hold a connection open
 // forever with nothing to notice or reclaim it. Each has an env var so an
-// operator can tune it without a rebuild; a malformed value is a startup
-// error rather than a silently-ignored override.
+// operator can tune it without a rebuild; a malformed, non-positive, or
+// mutually inconsistent value is a startup error rather than a
+// silently-ignored override (see Load and validate).
 const (
 	DefaultReadHeaderTimeout = 10 * time.Second
 	DefaultReadTimeout       = 5 * time.Minute // uploads are large; the one value where too tight breaks real clients
-	DefaultWriteTimeout      = 1 * time.Minute
-	DefaultIdleTimeout       = 60 * time.Second
-	DefaultMaxHeaderBytes    = 64 << 10 // 64 KiB
-	DefaultShutdownGrace     = 2 * time.Minute
+
+	// DefaultWriteTimeout must dominate DefaultReadTimeout, and by enough to
+	// cover the work the handler does after the body is in.
+	//
+	// net/http does NOT start the write deadline when the response starts. In
+	// conn.readRequest (net/http/server.go, Go 1.25) the deadline is armed in
+	// a defer that fires as soon as the *headers* are parsed:
+	//
+	//	if d := c.server.WriteTimeout; d > 0 {
+	//		defer func() { c.rwc.SetWriteDeadline(time.Now().Add(d)) }()
+	//	}
+	//
+	// so WriteTimeout is the budget for reading the body, spooling it to
+	// disk, downloading file_url, running lp, AND writing the response — not
+	// just the last of those. At the 1m this originally shipped with, any
+	// request slower than a minute was read successfully and submitted to
+	// CUPS, and then failed on the response write: the caller saw a reset
+	// connection, retried, and the document printed twice. Keep the
+	// WriteTimeout > ReadTimeout invariant that validate enforces.
+	DefaultWriteTimeout = 6 * time.Minute
+
+	DefaultIdleTimeout    = 60 * time.Second
+	DefaultMaxHeaderBytes = 64 << 10 // 64 KiB
+	DefaultShutdownGrace  = 2 * time.Minute
 
 	ReadHeaderTimeoutEnv = "PRINT_GATEWAY_READ_HEADER_TIMEOUT"
 	ReadTimeoutEnv       = "PRINT_GATEWAY_READ_TIMEOUT"
@@ -83,27 +104,65 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 		ShutdownGrace:     DefaultShutdownGrace,
 	}
 
-	var err error
-	if cfg.ReadHeaderTimeout, err = overrideDuration(getenv, ReadHeaderTimeoutEnv, cfg.ReadHeaderTimeout); err != nil {
+	// Table rather than one if-block per value: the repeated form made the
+	// env-var/field pairing a copy-paste field, where writing ReadTimeoutEnv
+	// into &cfg.WriteTimeout would compile, vet clean, and be invisible in
+	// review. Here each pairing appears exactly once, on one line.
+	for _, d := range []struct {
+		name string
+		dst  *time.Duration
+	}{
+		{ReadHeaderTimeoutEnv, &cfg.ReadHeaderTimeout},
+		{ReadTimeoutEnv, &cfg.ReadTimeout},
+		{WriteTimeoutEnv, &cfg.WriteTimeout},
+		{IdleTimeoutEnv, &cfg.IdleTimeout},
+		{ShutdownGraceEnv, &cfg.ShutdownGrace},
+	} {
+		v, err := overrideDuration(getenv, d.name, *d.dst)
+		if err != nil {
+			return Config{}, err
+		}
+		*d.dst = v
+	}
+
+	n, err := overrideBytes(getenv, MaxHeaderBytesEnv, cfg.MaxHeaderBytes)
+	if err != nil {
 		return Config{}, err
 	}
-	if cfg.ReadTimeout, err = overrideDuration(getenv, ReadTimeoutEnv, cfg.ReadTimeout); err != nil {
-		return Config{}, err
-	}
-	if cfg.WriteTimeout, err = overrideDuration(getenv, WriteTimeoutEnv, cfg.WriteTimeout); err != nil {
-		return Config{}, err
-	}
-	if cfg.IdleTimeout, err = overrideDuration(getenv, IdleTimeoutEnv, cfg.IdleTimeout); err != nil {
-		return Config{}, err
-	}
-	if cfg.ShutdownGrace, err = overrideDuration(getenv, ShutdownGraceEnv, cfg.ShutdownGrace); err != nil {
-		return Config{}, err
-	}
-	if cfg.MaxHeaderBytes, err = overrideBytes(getenv, MaxHeaderBytesEnv, cfg.MaxHeaderBytes); err != nil {
+	cfg.MaxHeaderBytes = n
+
+	if err := validate(cfg); err != nil {
 		return Config{}, err
 	}
 
 	return cfg, nil
+}
+
+// validate enforces the relationships *between* values. Each one is
+// individually plausible and only the combination is wrong, which is
+// exactly the class of mistake nothing downstream reports: net/http simply
+// applies whichever deadline expires first, leaving an operator to work out
+// from a reset connection why a request that was clearly inside the read
+// budget died anyway.
+func validate(cfg Config) error {
+	// A header deadline that outlives the whole-request deadline can never
+	// be the one that fires, so setting it is a no-op the operator will
+	// believe took effect.
+	if cfg.ReadHeaderTimeout > cfg.ReadTimeout {
+		return fmt.Errorf("%s (%s) must not exceed %s (%s)",
+			ReadHeaderTimeoutEnv, cfg.ReadHeaderTimeout, ReadTimeoutEnv, cfg.ReadTimeout)
+	}
+
+	// See DefaultWriteTimeout: the write deadline is armed at header-parse
+	// time, so it has to cover the body read too. If it does not, a slow
+	// upload is accepted and printed and then fails on the response write —
+	// the caller sees failure for a job that succeeded, and retries it.
+	if cfg.WriteTimeout <= cfg.ReadTimeout {
+		return fmt.Errorf("%s (%s) must exceed %s (%s): the write deadline starts when request headers are parsed, so it must cover reading the body as well as sending the response",
+			WriteTimeoutEnv, cfg.WriteTimeout, ReadTimeoutEnv, cfg.ReadTimeout)
+	}
+
+	return nil
 }
 
 func overrideDuration(getenv func(string) string, name string, def time.Duration) (time.Duration, error) {
@@ -115,6 +174,15 @@ func overrideDuration(getenv func(string) string, name string, def time.Duration
 	if err != nil {
 		return 0, fmt.Errorf("%s: invalid duration %q: %w", name, raw, err)
 	}
+	// A non-positive duration is not a tuning choice. net/http guards every
+	// timeout with `if d > 0`, so "0" or "-5s" — a plausible typo — does not
+	// mean "very short", it means *no timeout at all*, silently restoring the
+	// exact exposure these values exist to close. Reject it the same way a
+	// non-positive byte size is rejected, rather than inheriting net/http's
+	// semantics as an undocumented escape hatch.
+	if d <= 0 {
+		return 0, fmt.Errorf("%s: %q must be positive; net/http reads a non-positive timeout as no timeout at all", name, raw)
+	}
 	return d, nil
 }
 
@@ -125,7 +193,7 @@ func overrideBytes(getenv func(string) string, name string, def int) (int, error
 	}
 	n, err := strconv.Atoi(raw)
 	if err != nil || n <= 0 {
-		return 0, fmt.Errorf("%s: invalid byte size %q, want a positive integer", name, raw)
+		return 0, fmt.Errorf("%s: invalid byte size %q, want a positive integer number of bytes", name, raw)
 	}
 	return n, nil
 }

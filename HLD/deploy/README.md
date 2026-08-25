@@ -122,25 +122,55 @@ PRINT_GATEWAY_TOKEN='<the shared secret>' ./printgateway-linux-amd64
 
 The server no longer runs with `net/http`'s zero-value timeouts — unset,
 a slow or silent client could hold a connection open forever. Each value
-below has a default and an env var to override it without a rebuild; a
-malformed override (e.g. an unparsable duration) makes the process refuse
-to start rather than silently keep the default:
+below has a default and an env var to override it without a rebuild. The
+process refuses to start, naming the offending variable, on an override
+that is unparsable, non-positive, or inconsistent with the others — rather
+than silently keeping the default:
 
-| Setting | Default | Env var |
-| :--- | :--- | :--- |
-| Read header timeout | 10s | `PRINT_GATEWAY_READ_HEADER_TIMEOUT` |
-| Read timeout | 5m | `PRINT_GATEWAY_READ_TIMEOUT` |
-| Write timeout | 1m | `PRINT_GATEWAY_WRITE_TIMEOUT` |
-| Idle timeout | 60s | `PRINT_GATEWAY_IDLE_TIMEOUT` |
-| Max header bytes | 64 KiB | `PRINT_GATEWAY_MAX_HEADER_BYTES` |
-| Shutdown grace period | 2m | `PRINT_GATEWAY_SHUTDOWN_GRACE` |
+| Setting | Default | Env var | Accepted value |
+| :--- | :--- | :--- | :--- |
+| Read header timeout | 10s | `PRINT_GATEWAY_READ_HEADER_TIMEOUT` | Go duration, positive, `<=` read timeout |
+| Read timeout | 5m | `PRINT_GATEWAY_READ_TIMEOUT` | Go duration, positive |
+| Write timeout | 6m | `PRINT_GATEWAY_WRITE_TIMEOUT` | Go duration, positive, **`>` read timeout** |
+| Idle timeout | 60s | `PRINT_GATEWAY_IDLE_TIMEOUT` | Go duration, positive |
+| Max header bytes | 64 KiB | `PRINT_GATEWAY_MAX_HEADER_BYTES` | plain integer **number of bytes** (`65536`, not `64KiB`) |
+| Shutdown grace period | 2m | `PRINT_GATEWAY_SHUTDOWN_GRACE` | Go duration, positive |
+
+Zero and negative durations are rejected on purpose: `net/http` guards every
+timeout with `if d > 0`, so `0` or `-5s` does not mean "very short", it means
+*no timeout at all* — a typo would silently restore the exposure these values
+exist to close.
+
+**Why the write timeout is the largest value.** `net/http` arms the write
+deadline when the request *headers* are parsed, not when the response starts
+(`conn.readRequest` sets it in a `defer`). So it is the budget for reading the
+body, spooling it, downloading `file_url`, running `lp`, *and* sending the
+response. Set below the read timeout, a slow upload is accepted and printed
+and then fails on the response write — the caller sees a failure for a job
+that actually succeeded, retries, and the document prints twice. Startup
+enforces `write timeout > read timeout` for that reason.
 
 On `SIGINT`/`SIGTERM` the server stops accepting new connections and waits
 up to the shutdown grace period for in-flight requests to finish before the
 process exits — a print already spooling is allowed to complete rather than
-being cut off mid-upload. `net/http`'s own error lines (e.g. a client that
-tripped the read header timeout) are routed through the same logger as
-every request instead of `net/http`'s default stderr logger.
+being cut off mid-upload.
+
+> **Caveat until per-operation timeouts land.** `Shutdown` can only wait for
+> handlers; it cannot interrupt them. `fetch.HTTPFetcher` still uses
+> `http.Get` with no timeout and ignores its context, and `cups.LPSubmitter`
+> still uses `exec.Command` rather than `exec.CommandContext`. A handler
+> blocked on an unresponsive `file_url` host therefore cannot be drained: it
+> holds the full grace period, `Shutdown` returns `DeadlineExceeded`, the
+> process exits non-zero, and that request's temp spool file is left behind.
+> Wiring `FetchTimeout`/`SubmitTimeout` to real cancellation is what closes
+> this.
+
+`net/http`'s own error lines (e.g. a client that tripped the read header
+timeout) are routed through the same logger as every request instead of
+`net/http`'s default stderr logger. They carry no `X-Laas-Identifier`
+correlation id — `net/http` raises them below the layer where a request
+context exists, so there is nothing to correlate them to; only the
+per-request lines from the handler chain are traceable by id.
 
 ## Building and running
 
