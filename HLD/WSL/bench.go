@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"math"
@@ -23,19 +24,42 @@ type target struct {
 
 func (t target) label() string { return fmt.Sprintf("%d%s", t.port, t.path) }
 
+// completionOutcome enumerates what -wait-completion observed for one
+// successfully-accepted job. This used to be two independent bools
+// (completedOK/gaveUp), which left a third real outcome - the job was
+// accepted but its job-id couldn't be parsed from the response, so completion
+// could not even be attempted - with no bucket of its own: it silently
+// vanished from both the "measured" and "gave up" counts (P0-8 follow-up). An
+// enum makes the outcome set closed: every accepted job under
+// -wait-completion lands in exactly one of these, and report() can switch
+// on it exhaustively instead of relying on boolean combinations that don't
+// enumerate their own states.
+type completionOutcome int
+
+const (
+	completionNotAttempted completionOutcome = iota // -wait-completion was off, or the request itself failed
+	completionMeasured                              // job-state reached a terminal value before -poll-timeout
+	completionGaveUp                                // -poll-timeout was hit before a terminal job-state was observed
+	completionNoJobID                               // job accepted, but job-id could not be parsed from the response
+)
+
 // benchResult is one submitted job's outcome. `elapsed` is the time to
 // *accept* the job (Print-Job round trip only - this is what a queue-based
 // architecture returns to the client immediately). `completed`, when
-// -wait-completion is set, is the additional time observed until the job
-// actually finished processing server-side (job-state reaches a terminal
-// value) - this is the fair number to compare against a synchronous path
-// like SumatraPDF -print-to, which blocks until rendering+dispatch is done.
+// `completion == completionMeasured`, is the additional time observed until
+// the job actually finished processing server-side (job-state reaches a
+// terminal value) - this is the fair number to compare against a synchronous
+// path like SumatraPDF -print-to, which blocks until rendering+dispatch is
+// done. Any other `completion` value means `completed` is not a latency
+// measurement and must never be folded into the completion latency stats
+// (P0-8): a give-up is "we don't know", not "it took this long."
 type benchResult struct {
-	target    target
-	elapsed   time.Duration
-	completed time.Duration // 0 if -wait-completion was not set or polling failed
-	ok        bool
-	status    string
+	target     target
+	elapsed    time.Duration
+	completed  time.Duration // meaningful only when completion == completionMeasured
+	completion completionOutcome
+	ok         bool
+	status     string
 }
 
 func runBench(args []string) {
@@ -55,6 +79,7 @@ func runBench(args []string) {
 	waitCompletion := fs.Bool("wait-completion", false, "after Print-Job is accepted, poll Get-Job-Attributes until job-state reaches a terminal value, and report that as a separate 'completed' latency (fair comparison against a synchronous print path)")
 	pollInterval := fs.Duration("poll-interval", 20*time.Millisecond, "how often to poll job-state when -wait-completion is set")
 	pollTimeout := fs.Duration("poll-timeout", 30*time.Second, "give up waiting for job completion after this long")
+	jsonOutput := fs.Bool("json", false, "emit the report as JSON instead of human-readable text (for diffing numbers across runs)")
 	fs.Parse(args)
 
 	if *requests <= 0 {
@@ -104,8 +129,10 @@ func runBench(args []string) {
 	for i, t := range targets {
 		labels[i] = t.label()
 	}
-	fmt.Printf("bench: %d requests, concurrency=%d, %d target(s) (%v), file=%s (%d bytes)\n",
-		*requests, *concurrency, len(targets), labels, *file, len(data))
+	if !*jsonOutput {
+		fmt.Printf("bench: %d requests, concurrency=%d, %d target(s) (%v), file=%s (%d bytes)\n",
+			*requests, *concurrency, len(targets), labels, *file, len(data))
+	}
 
 	jobs := make(chan int, *requests)
 	for i := 0; i < *requests; i++ {
@@ -156,7 +183,15 @@ func runBench(args []string) {
 				if r.ok && *waitCompletion {
 					jobID := findIntAttr(resp.Attributes, "job-id")
 					if jobID > 0 {
-						r.completed = pollJobCompletion(*host, tgt.port, tgt.path, jobID, *pollInterval, *pollTimeout) + elapsed
+						waited, ok := pollJobCompletion(*host, tgt.port, tgt.path, jobID, *pollInterval, *pollTimeout)
+						r.completed = waited + elapsed
+						if ok {
+							r.completion = completionMeasured
+						} else {
+							r.completion = completionGaveUp
+						}
+					} else {
+						r.completion = completionNoJobID
 					}
 				}
 
@@ -169,7 +204,7 @@ func runBench(args []string) {
 	close(results)
 	total := time.Since(start)
 
-	report(results, total, targets)
+	report(results, total, targets, *jsonOutput, *waitCompletion)
 }
 
 func findIntAttr(attrs []ippAttribute, name string) int32 {
@@ -185,8 +220,12 @@ func findIntAttr(attrs []ippAttribute, name string) int32 {
 
 // pollJobCompletion polls Get-Job-Attributes until job-state reaches a
 // terminal value (7=canceled, 8=aborted, 9=completed) or the timeout is
-// reached, returning the time spent polling.
-func pollJobCompletion(host string, port int, path string, jobID int32, interval, timeout time.Duration) time.Duration {
+// reached. The bool return distinguishes a real measurement from a give-up
+// (P0-8): the old single-Duration return made `return timeout` on the
+// give-up path indistinguishable from "the job actually took this long",
+// so a completely unresponsive target could report a fabricated
+// p50=p95=poll-timeout with fail=0 instead of the failure it is.
+func pollJobCompletion(host string, port int, path string, jobID int32, interval, timeout time.Duration) (time.Duration, bool) {
 	endpoint := httpEndpoint(host, port, path)
 	uri := printerURI(host, port, path)
 	start := time.Now()
@@ -200,100 +239,274 @@ func pollJobCompletion(host string, port int, path string, jobID int32, interval
 		if err == nil && resp.StatusCode < 0x0100 {
 			state := findIntAttr(resp.Attributes, "job-state")
 			if state == 7 || state == 8 || state == 9 {
-				return time.Since(start)
+				return time.Since(start), true
 			}
 		}
 		time.Sleep(interval)
 	}
-	return timeout
+	return timeout, false
 }
 
-func report(results <-chan benchResult, total time.Duration, targets []target) {
-	type stat struct {
-		count, fail int
-		durations   []time.Duration
+// targetStat accumulates one target's (or the overall) results.
+// successDurations/completedDurations hold ONLY successful/completed samples
+// (P0-7, P0-8): a failed request's accept-latency, and a give-up's wait time,
+// are counted (fail/gaveUp/noJobID) but never blended into the percentile
+// arrays, since a fast connection-refused failure or a poll-timeout give-up
+// is not a latency measurement and mixing it in silently drags (or flatters)
+// the reported tail depending on which way the contaminating values skew.
+type targetStat struct {
+	successDurations   []time.Duration
+	completedDurations []time.Duration
+	fail               int
+	gaveUp             int
+	noJobID            int
+}
+
+// statSummary is the percentile computation shared by both the human-readable
+// and -json report paths, so they can never silently diverge on the numbers
+// themselves (formatting/labeling still lives separately in each renderer).
+type statSummary struct {
+	hasSamples              bool
+	min, avg, p50, p95, max time.Duration
+}
+
+func summarize(durations []time.Duration) statSummary {
+	if len(durations) == 0 {
+		return statSummary{}
 	}
-	byTarget := map[string]*stat{}
-	completedByTarget := map[string]*stat{}
-	overall := &stat{}
-	completedOverall := &stat{}
-	sawCompletion := false
+	sorted := append([]time.Duration(nil), durations...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	// Nearest-rank (ceiling), not a floor-truncated index: with n<21 samples
+	// the old `int((n-1)*p)` could never select the slowest sample for p95,
+	// biasing the reported tail low - the direction that flatters the result.
+	pct := func(p float64) time.Duration {
+		idx := int(math.Ceil(p*float64(len(sorted)))) - 1
+		if idx < 0 {
+			idx = 0
+		}
+		return sorted[idx]
+	}
+	var sum time.Duration
+	for _, d := range sorted {
+		sum += d
+	}
+	return statSummary{
+		hasSamples: true,
+		min:        sorted[0],
+		max:        sorted[len(sorted)-1],
+		avg:        sum / time.Duration(len(sorted)),
+		p50:        pct(0.50),
+		p95:        pct(0.95),
+	}
+}
+
+// throughputNote explains what the printed req/s figure actually measures.
+// Under -wait-completion each worker submits a job and then blocks polling it
+// to completion before picking up the next one, so wall time is dominated by
+// completion polling, not submission - reporting that as a clean "Print-Job
+// requests only" rate would repeat the exact mistake (a number whose label
+// doesn't match what it measures) this workstream exists to eliminate.
+func throughputNote(waitCompletion bool) string {
+	if waitCompletion {
+		return "end-to-end rate: wall time INCLUDES completion polling (-wait-completion is set) - NOT the Print-Job submission rate"
+	}
+	return "Print-Job submission rate"
+}
+
+func report(results <-chan benchResult, total time.Duration, targets []target, jsonOutput, waitCompletion bool) {
+	byTarget := map[string]*targetStat{}
+	overall := &targetStat{}
 
 	for r := range results {
 		key := r.target.label()
 		s, ok := byTarget[key]
 		if !ok {
-			s = &stat{}
+			s = &targetStat{}
 			byTarget[key] = s
 		}
-		s.count++
-		overall.count++
-		s.durations = append(s.durations, r.elapsed)
-		overall.durations = append(overall.durations, r.elapsed)
 		if !r.ok {
 			s.fail++
 			overall.fail++
-			fmt.Printf("  [FAIL] target=%s status=%s elapsed=%v\n", key, r.status, r.elapsed)
-		} else if r.completed > 0 {
-			sawCompletion = true
-			completedOverall.count++
-			completedOverall.durations = append(completedOverall.durations, r.completed)
-			cs, ok := completedByTarget[key]
-			if !ok {
-				cs = &stat{}
-				completedByTarget[key] = cs
+			if !jsonOutput {
+				fmt.Printf("  [FAIL] target=%s status=%s elapsed=%v\n", key, r.status, r.elapsed)
 			}
-			cs.count++
-			cs.durations = append(cs.durations, r.completed)
+			continue
+		}
+		s.successDurations = append(s.successDurations, r.elapsed)
+		overall.successDurations = append(overall.successDurations, r.elapsed)
+		switch r.completion {
+		case completionMeasured:
+			s.completedDurations = append(s.completedDurations, r.completed)
+			overall.completedDurations = append(overall.completedDurations, r.completed)
+		case completionGaveUp:
+			s.gaveUp++
+			overall.gaveUp++
+		case completionNoJobID:
+			s.noJobID++
+			overall.noJobID++
+		case completionNotAttempted:
+			// -wait-completion was off for this run; nothing to record.
 		}
 	}
 
-	printStat := func(label string, s *stat) {
-		if s.count == 0 {
+	// Throughput counts accepted Print-Job requests only (success + fail);
+	// -wait-completion polling traffic is not counted in the numerator - see
+	// throughputNote for why the denominator still isn't a clean number.
+	throughput := float64(len(overall.successDurations)+overall.fail) / total.Seconds()
+	note := throughputNote(waitCompletion)
+
+	if jsonOutput {
+		printJSONReport(total, throughput, note, targets, byTarget, overall, waitCompletion)
+		return
+	}
+	printTextReport(total, throughput, note, targets, byTarget, overall, waitCompletion)
+}
+
+func printTextReport(total time.Duration, throughput float64, throughputNote string, targets []target, byTarget map[string]*targetStat, overall *targetStat, waitCompletion bool) {
+	// count is always the number of samples backing the printed percentiles;
+	// fail/gaveup/nojobid are reported alongside as separate, explicit
+	// columns rather than blended into count or into the percentiles.
+	printAcceptStat := func(label string, fail int, durations []time.Duration) {
+		count := len(durations)
+		if count == 0 && fail == 0 {
 			return
 		}
-		sort.Slice(s.durations, func(i, j int) bool { return s.durations[i] < s.durations[j] })
-		// Nearest-rank (ceiling), not a floor-truncated index: with n<21 samples
-		// the old `int((n-1)*p)` could never select the slowest sample for p95,
-		// biasing the reported tail low - the direction that flatters the result.
-		pct := func(p float64) time.Duration {
-			idx := int(math.Ceil(p*float64(len(s.durations)))) - 1
-			if idx < 0 {
-				idx = 0
-			}
-			return s.durations[idx]
+		s := summarize(durations)
+		if !s.hasSamples {
+			fmt.Printf("%-20s count=%-4d fail=%-3d (no samples)\n", label, count, fail)
+			return
 		}
-		var sum time.Duration
-		for _, d := range s.durations {
-			sum += d
-		}
-		avg := sum / time.Duration(len(s.durations))
 		fmt.Printf("%-20s count=%-4d fail=%-3d min=%-8v avg=%-8v p50=%-8v p95=%-8v max=%-8v\n",
-			label, s.count, s.fail, s.durations[0], avg, pct(0.50), pct(0.95), s.durations[len(s.durations)-1])
+			label, count, fail, s.min, s.avg, s.p50, s.p95, s.max)
+	}
+	// Unlike printAcceptStat, this never skips a target present in byTarget,
+	// even when count/gaveup/nojobid are all zero: under -wait-completion a
+	// target that never produced a single measured/gaveup/nojobid outcome
+	// (e.g. every job to it failed outright) still gets an explicit
+	// all-zero row instead of silently vanishing from the section (P0-8
+	// follow-up finding).
+	printCompletionStat := func(label string, gaveup, nojobid int, durations []time.Duration) {
+		count := len(durations)
+		s := summarize(durations)
+		if !s.hasSamples {
+			fmt.Printf("%-20s count=%-4d gaveup=%-3d nojobid=%-3d (no samples)\n", label, count, gaveup, nojobid)
+			return
+		}
+		fmt.Printf("%-20s count=%-4d gaveup=%-3d nojobid=%-3d min=%-8v avg=%-8v p50=%-8v p95=%-8v max=%-8v\n",
+			label, count, gaveup, nojobid, s.min, s.avg, s.p50, s.p95, s.max)
 	}
 
 	fmt.Println()
-	fmt.Println("=== per-target ===")
+	fmt.Println("=== per-target (accept latency - time until Print-Job returns; successes only) ===")
 	for _, t := range targets {
 		if s, ok := byTarget[t.label()]; ok {
-			printStat(t.label(), s)
+			printAcceptStat(t.label(), s.fail, s.successDurations)
 		}
 	}
 	fmt.Println()
-	fmt.Println("=== overall (accept latency - time until Print-Job returns) ===")
-	printStat("all", overall)
-	fmt.Printf("total wall time: %v, throughput: %.1f req/s\n", total, float64(overall.count)/total.Seconds())
+	fmt.Println("=== overall (accept latency - time until Print-Job returns; successes only) ===")
+	printAcceptStat("all", overall.fail, overall.successDurations)
+	fmt.Printf("total wall time: %v, throughput: %.1f req/s (%s)\n", total, throughput, throughputNote)
 
-	if sawCompletion {
+	if waitCompletion {
 		fmt.Println()
-		fmt.Println("=== per-target (completion latency - time until job-state reaches a terminal value) ===")
+		fmt.Println("=== per-target (completion latency - time until job-state reaches a terminal value; give-ups/unknown-job-id excluded) ===")
 		for _, t := range targets {
-			if s, ok := completedByTarget[t.label()]; ok {
-				printStat(t.label(), s)
+			if s, ok := byTarget[t.label()]; ok {
+				printCompletionStat(t.label(), s.gaveUp, s.noJobID, s.completedDurations)
 			}
 		}
 		fmt.Println()
-		fmt.Println("=== overall (completion latency - time until job-state reaches a terminal value) ===")
-		printStat("all", completedOverall)
+		fmt.Println("=== overall (completion latency - time until job-state reaches a terminal value; give-ups/unknown-job-id excluded) ===")
+		printCompletionStat("all", overall.gaveUp, overall.noJobID, overall.completedDurations)
+	}
+}
+
+// latencyStats is the JSON shape of a statSummary; embedded (not nested) into
+// jsonAcceptStat/jsonCompletionStat so its fields marshal at the top level of
+// each. *_ms fields are nil (omitted) when there were no samples to
+// summarize - distinct from a genuine 0ms measurement.
+type latencyStats struct {
+	MinMS *float64 `json:"min_ms,omitempty"`
+	AvgMS *float64 `json:"avg_ms,omitempty"`
+	P50MS *float64 `json:"p50_ms,omitempty"`
+	P95MS *float64 `json:"p95_ms,omitempty"`
+	MaxMS *float64 `json:"max_ms,omitempty"`
+}
+
+func newLatencyStats(s statSummary) latencyStats {
+	if !s.hasSamples {
+		return latencyStats{}
+	}
+	ms := func(d time.Duration) *float64 { v := d.Seconds() * 1000; return &v }
+	return latencyStats{MinMS: ms(s.min), AvgMS: ms(s.avg), P50MS: ms(s.p50), P95MS: ms(s.p95), MaxMS: ms(s.max)}
+}
+
+// jsonAcceptStat/jsonCompletionStat are deliberately separate types, each
+// with its own constructor below, rather than one struct discriminated by a
+// string/enum field - that removes the possibility (present in an earlier
+// version of this fix) of a typo'd discriminator silently producing an empty
+// fail/gaveup/nojobid count with no error. Fail/GaveUp/NoJobID have no
+// `omitempty`: for a format whose stated purpose is diffing numbers across
+// runs, a real 0 must render as `0`, not as an absent key indistinguishable
+// from "this field doesn't apply here".
+type jsonAcceptStat struct {
+	Count int `json:"count"`
+	Fail  int `json:"fail"`
+	latencyStats
+}
+
+type jsonCompletionStat struct {
+	Count   int `json:"count"`
+	GaveUp  int `json:"gaveup"`
+	NoJobID int `json:"nojobid"`
+	latencyStats
+}
+
+func newAcceptStat(fail int, durations []time.Duration) jsonAcceptStat {
+	return jsonAcceptStat{Count: len(durations), Fail: fail, latencyStats: newLatencyStats(summarize(durations))}
+}
+
+func newCompletionStat(gaveup, nojobid int, durations []time.Duration) jsonCompletionStat {
+	return jsonCompletionStat{Count: len(durations), GaveUp: gaveup, NoJobID: nojobid, latencyStats: newLatencyStats(summarize(durations))}
+}
+
+type jsonReport struct {
+	TotalWallMS       float64                       `json:"total_wall_ms"`
+	ThroughputReqSec  float64                       `json:"throughput_req_per_s"`
+	ThroughputNote    string                        `json:"throughput_note"`
+	AcceptLatency     map[string]jsonAcceptStat     `json:"accept_latency"`
+	CompletionLatency map[string]jsonCompletionStat `json:"completion_latency,omitempty"`
+}
+
+func printJSONReport(total time.Duration, throughput float64, throughputNote string, targets []target, byTarget map[string]*targetStat, overall *targetStat, waitCompletion bool) {
+	rep := jsonReport{
+		TotalWallMS:      total.Seconds() * 1000,
+		ThroughputReqSec: throughput,
+		ThroughputNote:   throughputNote,
+		AcceptLatency:    map[string]jsonAcceptStat{},
+	}
+	for _, t := range targets {
+		if s, ok := byTarget[t.label()]; ok {
+			rep.AcceptLatency[t.label()] = newAcceptStat(s.fail, s.successDurations)
+		}
+	}
+	rep.AcceptLatency["all"] = newAcceptStat(overall.fail, overall.successDurations)
+
+	if waitCompletion {
+		rep.CompletionLatency = map[string]jsonCompletionStat{}
+		for _, t := range targets {
+			if s, ok := byTarget[t.label()]; ok {
+				rep.CompletionLatency[t.label()] = newCompletionStat(s.gaveUp, s.noJobID, s.completedDurations)
+			}
+		}
+		rep.CompletionLatency["all"] = newCompletionStat(overall.gaveUp, overall.noJobID, overall.completedDurations)
+	}
+
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(rep); err != nil {
+		fmt.Fprintf(os.Stderr, "error encoding JSON report: %v\n", err)
+		os.Exit(1)
 	}
 }

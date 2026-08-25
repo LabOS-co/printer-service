@@ -275,6 +275,74 @@ just the bare distro. Everything below was rebuilt from scratch this session:
   mid-session. Put anything meant to survive under a disk-backed path (this session used
   `/opt/printgw/`), not `/tmp`.
 
+## Sixth phase (2026-08-25): bench statistics honesty fix (B3, part of the printer-server hardening plan)
+
+`WSL/bench.go`'s `report()` had two measurement bugs, both fixed this phase (no behavior
+change to `bench`'s job submission itself, only to what the numbers mean):
+
+- **Failed requests' accept-latency was folded into the success percentiles.** `elapsed`
+  was appended to the same `durations` slice used for `min/avg/p50/p95/max` *before* the
+  `ok`/`fail` branch, so a run with `fail > 0` reported percentiles computed over a mix of
+  real successes and failure latencies (which can be far faster — a fast connection
+  refusal — or far slower — a dial timeout — than a real job, skewing the number either
+  way depending on the failure mode). `fail=N` was printed alongside, making the split
+  look real when it wasn't. Fixed: percentiles are now computed only over successful
+  samples; `fail` is still counted and shown, just never blended into `min/avg/p50/p95/max`.
+- **A `-wait-completion` poll give-up was indistinguishable from a real completion
+  measurement.** `pollJobCompletion` returned the poll timeout itself as a plain
+  `time.Duration` on give-up, which the caller could not tell apart from "the job actually
+  took this long" — so a target where every job's polling gave up could report a
+  fabricated `p50≈p95≈poll-timeout` in the completion-latency section with no indication
+  anything was wrong. `pollJobCompletion` now returns `(time.Duration, bool)`; a give-up
+  is excluded from the completion percentiles and reported as its own `gaveup=N` count.
+
+Also added: a `-json` output flag (for diffing numbers across runs/pre-post-fix).
+
+**Numbers published before this fix are not directly comparable to numbers from after
+it**, specifically wherever a run had `fail > 0` or a completion give-up — including the
+`cups-vs-spooler-comparison(-en).docx` "~54x faster" headline figure above,
+if any of the runs behind it hit a failure or a poll give-up. That headline was not
+re-measured as part of this fix; re-run with the corrected `bench` before treating it as
+settled if failures/give-ups are suspected in the original data. Runs with `fail=0` and no
+give-ups are unaffected — the fix only changes behavior when a contaminating sample
+existed in the first place. Separately, `bench.go`'s nearest-rank p95 fix (ceiling instead of
+a floor-truncated index) landed in an earlier commit (`56b74c0`, alongside B1/B2) — anyone
+bisecting published numbers should treat that as a second, independent comparability
+boundary, not the same one as this phase.
+
+**Code-review follow-up (2026-08-25), applied.** An Opus-model review of this diff found the
+first draft introduced two new problems of exactly the kind this phase exists to eliminate,
+plus a real gap in completion accounting; all three were fixed:
+
+- The first draft's throughput note claimed "`-wait-completion` polling traffic is not
+  counted", true of the numerator only — under `-wait-completion` each worker submits a job
+  then blocks polling it to completion before starting the next, so wall time (the
+  denominator) is dominated by polling, not submission. A run that truly accepts jobs fast
+  but waits seconds for each to finish could report a low req/s figure that reads as a slow
+  submission rate when it isn't one. The note is now conditional: plain "Print-Job submission
+  rate" when `-wait-completion` is off, an explicit "end-to-end rate ... NOT the submission
+  rate" warning when it's on.
+- A job accepted by the printer but whose `job-id` couldn't be parsed from the response fell
+  into neither the "measured" nor "gave up" bucket — invisible in the completion section with
+  nothing to explain the gap. `completedOK`/`gaveUp` (two independent bools) are now one
+  `completionOutcome` enum (`completionMeasured` / `completionGaveUp` / `completionNoJobID`
+  / `completionNotAttempted`), reported as its own `nojobid=N` column. The completion section
+  is now also gated on whether `-wait-completion` was requested (not on whether any
+  completion was actually observed), so a run where every job failed or gave up still prints
+  an explicit all-zero completion row instead of the section silently disappearing.
+- `sendIPP`'s `http.Client` (`ipp.go`) had no `Timeout`, so a target that accepts the TCP
+  connection but never answers blocked the worker forever — under `-wait-completion` this
+  meant the exact "completely wedged target" scenario the give-up fix exists to report
+  instead hung the whole `bench` run with no output at all. Added a 60s client timeout
+  (named `ippClientTimeout`), shared by every `printersearch` subcommand since `sendIPP` is
+  common code, not just `bench`.
+
+Also tightened along the way: `-json`'s `fail`/`gaveup`/`nojobid` counts no longer use
+`omitempty` (a real `0` now renders as `0`, not an absent key — significant for a
+run-to-run diffing format), and the accept/completion JSON shapes are two distinct Go types
+with their own constructors rather than one struct discriminated by a string label, removing
+a class of typo-silently-drops-data bug the review also flagged.
+
 ## Open items / not yet done
 
 - None of this is wired into an actual Print Gateway/Worker service yet —

@@ -6,7 +6,16 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 )
+
+// ippClientTimeout bounds the whole request/response round trip (dial through
+// reading the body). Without it, a target that accepts the TCP connection but
+// never answers - a wedged cupsd, a dropped firewall rule - blocks the caller
+// forever; for `bench -wait-completion` that meant a worker never returned and
+// the whole run hung with no output at all, which is worse than the give-up
+// -poll-timeout is supposed to produce.
+const ippClientTimeout = 60 * time.Second
 
 // IPP value tags (RFC 8010). tagUnsupported (the out-of-band "unsupported"
 // value, not the 0x05 unsupported-attributes group delimiter), tagOctetString,
@@ -143,7 +152,7 @@ func sendIPP(endpoint string, request *bytes.Buffer, document io.Reader) (*ippRe
 	}
 	req.Header.Set("Content-Type", "application/ipp")
 
-	client := &http.Client{}
+	client := &http.Client{Timeout: ippClientTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("http post to %s: %w", endpoint, err)
