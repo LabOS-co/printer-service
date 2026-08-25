@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
+	"math"
 	"os"
 	"sort"
 	"strconv"
@@ -55,6 +56,15 @@ func runBench(args []string) {
 	pollInterval := fs.Duration("poll-interval", 20*time.Millisecond, "how often to poll job-state when -wait-completion is set")
 	pollTimeout := fs.Duration("poll-timeout", 30*time.Second, "give up waiting for job completion after this long")
 	fs.Parse(args)
+
+	if *requests <= 0 {
+		fmt.Println("error: -requests must be a positive number")
+		os.Exit(1)
+	}
+	if *concurrency <= 0 {
+		fmt.Println("error: -concurrency must be a positive number")
+		os.Exit(1)
+	}
 
 	var targets []target
 	if *pathsFlag != "" {
@@ -243,8 +253,14 @@ func report(results <-chan benchResult, total time.Duration, targets []target) {
 			return
 		}
 		sort.Slice(s.durations, func(i, j int) bool { return s.durations[i] < s.durations[j] })
+		// Nearest-rank (ceiling), not a floor-truncated index: with n<21 samples
+		// the old `int((n-1)*p)` could never select the slowest sample for p95,
+		// biasing the reported tail low - the direction that flatters the result.
 		pct := func(p float64) time.Duration {
-			idx := int(float64(len(s.durations)-1) * p)
+			idx := int(math.Ceil(p*float64(len(s.durations)))) - 1
+			if idx < 0 {
+				idx = 0
+			}
 			return s.durations[idx]
 		}
 		var sum time.Duration

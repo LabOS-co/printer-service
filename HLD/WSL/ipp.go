@@ -8,22 +8,27 @@ import (
 	"net/http"
 )
 
-// IPP value tags (RFC 8010)
+// IPP value tags (RFC 8010). tagUnsupported (the out-of-band "unsupported"
+// value, not the 0x05 unsupported-attributes group delimiter), tagOctetString,
+// and tagTextWithoutLang are not referenced elsewhere yet - decodeValue's
+// default case already renders them correctly as raw strings, and
+// tagUnsupported is expected to be wired up when group structure is retained
+// (plan item B2).
 const (
-	tagUnsupported        byte = 0x10
-	tagInteger            byte = 0x21
-	tagBoolean            byte = 0x22
-	tagEnum               byte = 0x23
-	tagOctetString        byte = 0x30
-	tagTextWithoutLang    byte = 0x41
-	tagNameWithoutLang    byte = 0x42
-	tagKeyword            byte = 0x44
-	tagURI                byte = 0x45
-	tagCharset            byte = 0x47
-	tagNaturalLanguage    byte = 0x48
-	tagMimeMediaType      byte = 0x49
-	tagRangeOfInteger     byte = 0x33
-	tagResolution         byte = 0x32
+	tagUnsupported     byte = 0x10
+	tagInteger         byte = 0x21
+	tagBoolean         byte = 0x22
+	tagEnum            byte = 0x23
+	tagOctetString     byte = 0x30
+	tagTextWithoutLang byte = 0x41
+	tagNameWithoutLang byte = 0x42
+	tagKeyword         byte = 0x44
+	tagURI             byte = 0x45
+	tagCharset         byte = 0x47
+	tagNaturalLanguage byte = 0x48
+	tagMimeMediaType   byte = 0x49
+	tagRangeOfInteger  byte = 0x33
+	tagResolution      byte = 0x32
 )
 
 // IPP delimiter tags
@@ -36,11 +41,11 @@ const (
 
 // IPP operation ids
 const (
-	opPrintJob              uint16 = 0x0002
-	opCancelJob             uint16 = 0x0008
-	opGetJobAttributes      uint16 = 0x0009
-	opGetJobs               uint16 = 0x000A
-	opGetPrinterAttributes  uint16 = 0x000B
+	opPrintJob             uint16 = 0x0002
+	opCancelJob            uint16 = 0x0008
+	opGetJobAttributes     uint16 = 0x0009
+	opGetJobs              uint16 = 0x000A
+	opGetPrinterAttributes uint16 = 0x000B
 )
 
 type ippAttribute struct {
@@ -50,10 +55,10 @@ type ippAttribute struct {
 }
 
 type ippResponse struct {
-	Version       uint16
-	StatusCode    uint16
-	RequestID     uint32
-	Attributes    []ippAttribute
+	Version    uint16
+	StatusCode uint16
+	RequestID  uint32
+	Attributes []ippAttribute
 }
 
 func writeAttribute(buf *bytes.Buffer, tag byte, name, value string) {
@@ -180,10 +185,13 @@ func parseResponse(raw []byte) (*ippResponse, error) {
 			continue
 		}
 		if pos+2 > len(raw) {
-			break
+			return nil, fmt.Errorf("truncated ipp response: name length prefix at offset %d exceeds %d-byte body", pos, len(raw))
 		}
 		nameLen := int(binary.BigEndian.Uint16(raw[pos : pos+2]))
 		pos += 2
+		if pos+nameLen > len(raw) {
+			return nil, fmt.Errorf("truncated ipp response: %d-byte name at offset %d exceeds %d-byte body", nameLen, pos, len(raw))
+		}
 		name := string(raw[pos : pos+nameLen])
 		pos += nameLen
 		if name == "" {
@@ -193,10 +201,13 @@ func parseResponse(raw []byte) (*ippResponse, error) {
 		}
 
 		if pos+2 > len(raw) {
-			break
+			return nil, fmt.Errorf("truncated ipp response: value length prefix at offset %d exceeds %d-byte body", pos, len(raw))
 		}
 		valueLen := int(binary.BigEndian.Uint16(raw[pos : pos+2]))
 		pos += 2
+		if pos+valueLen > len(raw) {
+			return nil, fmt.Errorf("truncated ipp response: %d-byte value at offset %d exceeds %d-byte body", valueLen, pos, len(raw))
+		}
 		value := raw[pos : pos+valueLen]
 		pos += valueLen
 
