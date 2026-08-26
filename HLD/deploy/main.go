@@ -43,20 +43,21 @@ func main() {
 
 	token, tokenSource, err := secrets.ResolveToken(cfg, logger, startupMeta)
 	if err != nil {
-		logger.LogError(fmt.Sprintf("invalid configuration: %v", err), startupMeta)
+		// F2: a service that cannot resolve a print token cannot serve any
+		// request. Previously this logged and continued, so a misconfigured
+		// deploy printed "listening" and looked healthy while requireToken
+		// answered 503 to everything forever. Fail fast instead.
+		//
+		// Distinct prefix from config.Load's "invalid configuration" above:
+		// this can be a live outage (Vault unreachable, env also unset), not
+		// only a misconfigured value, and an operator grepping for
+		// "invalid configuration" during an outage should not be misdirected
+		// at env/flag parsing.
+		logger.LogError(fmt.Sprintf("cannot start: %v", err), startupMeta)
 		os.Exit(1)
 	}
 	cfg.AuthToken = token
-	if tokenSource != "" {
-		logger.LogInfo(fmt.Sprintf("print token resolved from %s", tokenSource), startupMeta)
-	} else {
-		// Not a startup failure (requireToken answers 503 to everything
-		// instead — see its comment) but this is the moment an operator
-		// most needs a line saying so: silence here previously meant the
-		// service would come up looking healthy while unable to serve any
-		// request at all.
-		logger.LogInfo("no print token resolved from Vault or "+config.AuthTokenEnv+"; every request will be answered 503", startupMeta)
-	}
+	logger.LogInfo(fmt.Sprintf("print token resolved from %s", tokenSource), startupMeta)
 
 	svc := printgw.NewService(cups.NewLPSubmitter(), fetch.NewHTTPFetcher(), cfg.SubmitTimeout)
 	api := httpapi.New(cfg, logger, svc)

@@ -24,8 +24,10 @@ const (
 // ResolveToken resolves the shared print token (X-Labos-Print-Token). If
 // cfg.SecretStoreURL is empty, Vault is not configured at all: this returns
 // cfg.AuthToken (what config.Load already read from PRINT_GATEWAY_TOKEN)
-// unchanged, so a standalone deployment with no Vault behaves exactly as it
-// did before Vault support existed.
+// unchanged — with one exception since F2: if that is empty too, no source
+// produced a token, and this is an error rather than a "successful" empty
+// resolution, so the process refuses to start instead of coming up and
+// answering 503 to every request forever.
 //
 // If Vault is configured, ResolveToken falls back to cfg.AuthToken on ANY
 // failure — client construction (bad or missing credentials), an
@@ -46,12 +48,20 @@ const (
 //
 // Returns (token, source, nil) on success, where source names which input
 // won ("vault", "env", or "env (vault fallback)") for the caller to log.
-// Returns an error only when neither Vault nor the environment produced a
-// token, naming that both were tried.
+// Returns an error whenever no source produced a token — whether Vault
+// wasn't configured at all, or Vault was tried and failed — and the
+// environment was also empty, naming what was tried.
 func ResolveToken(cfg config.Config, logger logs.Logger, meta *logs.LogMetaData) (token, source string, err error) {
 	if cfg.SecretStoreURL == "" {
-		if cfg.AuthToken == "" {
-			return "", "", nil
+		// Trimmed for the emptiness test only — a whitespace-only
+		// PRINT_GATEWAY_TOKEN (e.g. a trailing newline from a unit file's
+		// Environment=) must not "resolve" into a token nobody set on
+		// purpose. The untrimmed value is still what's returned and compared
+		// against on every request, so a legitimate token with meaningful
+		// leading/trailing space (unlikely, but not this function's call) is
+		// preserved exactly.
+		if strings.TrimSpace(cfg.AuthToken) == "" {
+			return "", "", fmt.Errorf("print token unavailable: vault is not configured and %s is not set", config.AuthTokenEnv)
 		}
 		return cfg.AuthToken, "env", nil
 	}
@@ -109,7 +119,7 @@ func ResolveToken(cfg config.Config, logger logs.Logger, meta *logs.LogMetaData)
 // sites above. Refuses to resolve only when the environment is empty too —
 // the one case where neither configured source produced a usable token.
 func fallbackToken(cfg config.Config) (string, string, error) {
-	if cfg.AuthToken == "" {
+	if strings.TrimSpace(cfg.AuthToken) == "" {
 		return "", "", fmt.Errorf("print token unavailable: vault failed and %s is not set", config.AuthTokenEnv)
 	}
 	return cfg.AuthToken, "env (vault fallback)", nil

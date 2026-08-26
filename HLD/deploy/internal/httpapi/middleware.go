@@ -8,7 +8,6 @@ import (
 	"net/http"
 
 	"printgateway/internal/apperr"
-	"printgateway/internal/config"
 )
 
 // The calling system sends this header on every request; the expected
@@ -122,16 +121,20 @@ func (a *API) requireToken(next http.HandlerFunc) http.HandlerFunc {
 	expected := a.cfg.AuthToken
 	return func(w http.ResponseWriter, r *http.Request) {
 		if expected == "" {
+			// Unreachable through main(): secrets.ResolveToken now errors
+			// whenever no source produces a token, and main exits 1 on that
+			// (F2) before httpapi.New is ever called. This branch stays
+			// anyway — it's the only thing standing between an empty
+			// AuthToken (a future second entrypoint, a test building API
+			// directly) and fail-OPEN: crypto/subtle.ConstantTimeCompare
+			// returns 1 for two zero-length slices, so with this branch
+			// removed an empty expected token would authorize any request
+			// that sends no token header at all.
 			a.fail(w, r, &apperr.HTTPError{
 				Status: http.StatusServiceUnavailable,
 				Public: "server is not configured for authentication",
-				// Naming only %s would be misleading now that the token can
-				// also come from Vault (see internal/secrets): an empty
-				// cfg.AuthToken here means resolution produced nothing from
-				// EITHER source, not specifically that this one env var is
-				// unset.
-				Internal: fmt.Errorf("no print token resolved from Vault or %s, refusing to serve unauthenticated (%s %s)",
-					config.AuthTokenEnv, r.Method, r.URL.Path),
+				Internal: fmt.Errorf("no print token configured, refusing to serve unauthenticated (%s %s)",
+					r.Method, r.URL.Path),
 			})
 			return
 		}

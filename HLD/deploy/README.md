@@ -87,11 +87,12 @@ independent layers — the same model `HtmlToPdf` relies on, plus a token:
    overrides this — use a specific internal interface, never `:8090`, which
    would listen on every interface including any external one.
 2. **Shared token.** Every request must carry the header
-   `X-Labos-Print-Token`, matched in constant time against the
-   `PRINT_GATEWAY_TOKEN` environment variable. A missing or wrong token is
-   `401`, and it is logged with the caller's address. If
-   `PRINT_GATEWAY_TOKEN` is not set the server answers `503` to everything
-   rather than serving unauthenticated — it will not silently run open.
+   `X-Labos-Print-Token`, matched in constant time against the resolved print
+   token (`PRINT_GATEWAY_TOKEN`, or Vault — see "Secrets (Vault)" below). A
+   missing or wrong token is `401`, and it is logged with the caller's
+   address. If no token can be resolved from any configured source, the
+   process refuses to start rather than serving unauthenticated or answering
+   `503` to everything forever — see "Fallback policy" below.
 
 The token never appears in this repository or in the labOS source. On the
 labOS side it comes from `gSecretManager` (`config/print_gateway`,
@@ -110,22 +111,27 @@ needs no new path convention on either side.
 
 | Env var | Meaning |
 | :--- | :--- |
-| `VAULT_ADDR` | Vault address (the standard Nomad-injected variable). Unset (and `SECRET_STORE_URL` also unset) ⇒ Vault is not used at all; the token comes from `PRINT_GATEWAY_TOKEN` exactly as before Vault support existed. |
+| `VAULT_ADDR` | Vault address (the standard Nomad-injected variable). Unset (and `SECRET_STORE_URL` also unset) ⇒ Vault is not used at all; the token comes from `PRINT_GATEWAY_TOKEN` instead, which must then be non-empty — the process refuses to start otherwise (see "Fallback policy" below). |
 | `SECRET_STORE_URL` | Overrides `VAULT_ADDR` when both are set — matches `go-packages/settings`' own precedence. |
 | `VAULT_TOKEN` | Vault token auth. |
 | `SECRET_STORE_USERNAME` / `SECRET_STORE_PASSWORD` | Vault `userpass` auth, used when `VAULT_TOKEN` is empty. `SECRET_STORE_PASSWORD` must be `encryption.Encrypt`-ed, not plaintext — matching the convention `go-packages/settings` already uses for this variable. A password that fails to decrypt is treated as a Vault-init failure (logged, falls back to `PRINT_GATEWAY_TOKEN`). |
 | `LABOS_ENV` | Path prefix under the KV mount, e.g. `production`. Unset ⇒ no prefix. |
 
-**Fallback policy, deliberately fail-open:** when Vault is configured, any
-failure reading the token — client construction (bad/missing credentials),
-an unreachable server, a malformed response, or the secret genuinely not
-being present — is logged (never the token value) and the server falls back
-to `PRINT_GATEWAY_TOKEN`. The process refuses to start only if *neither*
-Vault nor the environment produced a token. This is a deliberate choice for
-this prototype: a misconfigured or down Vault degrades to env instead of
-taking the service down. It is intentionally more permissive than
-`secret_store`'s own `GetSecretStringWithFallback` helper, which only falls
-back on a definite miss (see `internal/secrets/secrets.go`).
+**Fallback policy, deliberately fail-open (until nothing is left to fall
+back to):** when Vault is configured, any failure reading the token — client
+construction (bad/missing credentials), an unreachable server, a malformed
+response, or the secret genuinely not being present — is logged (never the
+token value) and the server falls back to `PRINT_GATEWAY_TOKEN`. The same
+rule applies when Vault isn't configured at all: the token then comes
+straight from `PRINT_GATEWAY_TOKEN`. Either way, the process refuses to
+start only if *neither* Vault nor the environment produced a token — Vault
+configured-and-failed with no env token, or Vault not configured at all with
+no env token. This is a deliberate choice for this prototype: a
+misconfigured or down Vault degrades to env instead of taking the service
+down, but "no token anywhere" cannot boot into a server that would 503 every
+request forever. It is intentionally more permissive than `secret_store`'s
+own `GetSecretStringWithFallback` helper, which only falls back on a
+definite miss (see `internal/secrets/secrets.go`).
 
 A present-but-blank Vault value (an unset key, a botched `vault kv put`, a
 rotation that cleared it) is treated the same as a miss — it falls back to
