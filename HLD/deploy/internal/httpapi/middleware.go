@@ -125,7 +125,12 @@ func (a *API) requireToken(next http.HandlerFunc) http.HandlerFunc {
 			a.fail(w, r, &apperr.HTTPError{
 				Status: http.StatusServiceUnavailable,
 				Public: "server is not configured for authentication",
-				Internal: fmt.Errorf("%s is not set, refusing to serve unauthenticated (%s %s)",
+				// Naming only %s would be misleading now that the token can
+				// also come from Vault (see internal/secrets): an empty
+				// cfg.AuthToken here means resolution produced nothing from
+				// EITHER source, not specifically that this one env var is
+				// unset.
+				Internal: fmt.Errorf("no print token resolved from Vault or %s, refusing to serve unauthenticated (%s %s)",
 					config.AuthTokenEnv, r.Method, r.URL.Path),
 			})
 			return

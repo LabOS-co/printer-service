@@ -28,6 +28,7 @@ import (
 	"printgateway/internal/fetch"
 	"printgateway/internal/httpapi"
 	"printgateway/internal/printgw"
+	"printgateway/internal/secrets"
 )
 
 func main() {
@@ -38,6 +39,23 @@ func main() {
 	if err != nil {
 		logger.LogError(fmt.Sprintf("invalid configuration: %v", err), startupMeta)
 		os.Exit(1)
+	}
+
+	token, tokenSource, err := secrets.ResolveToken(cfg, logger, startupMeta)
+	if err != nil {
+		logger.LogError(fmt.Sprintf("invalid configuration: %v", err), startupMeta)
+		os.Exit(1)
+	}
+	cfg.AuthToken = token
+	if tokenSource != "" {
+		logger.LogInfo(fmt.Sprintf("print token resolved from %s", tokenSource), startupMeta)
+	} else {
+		// Not a startup failure (requireToken answers 503 to everything
+		// instead — see its comment) but this is the moment an operator
+		// most needs a line saying so: silence here previously meant the
+		// service would come up looking healthy while unable to serve any
+		// request at all.
+		logger.LogInfo("no print token resolved from Vault or "+config.AuthTokenEnv+"; every request will be answered 503", startupMeta)
 	}
 
 	svc := printgw.NewService(cups.NewLPSubmitter(), fetch.NewHTTPFetcher(), cfg.SubmitTimeout)

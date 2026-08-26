@@ -40,6 +40,14 @@ func (s *LPSubmitter) Submit(ctx context.Context, job printgw.SubmitJob) (printg
 	defer f.Close()
 
 	cmd := exec.CommandContext(ctx, "lp", "-d", job.Printer, "-t", job.Title)
+	// exec.Command's default is to hand the child the WHOLE process
+	// environment. That used to only leak PRINT_GATEWAY_TOKEN; since F1
+	// (Vault secrets) it would also leak VAULT_TOKEN/SECRET_STORE_PASSWORD —
+	// materially more valuable credentials — to lp and every CUPS filter it
+	// spawns, visible via e.g. /proc/<pid>/environ. lp needs none of that:
+	// PATH to find its own helpers, HOME for CUPS client-side config lookups
+	// (~/.cups). Nothing else is passed through.
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME")}
 	cmd.Stdin = f
 	out, err := cmd.CombinedOutput()
 	if err != nil {

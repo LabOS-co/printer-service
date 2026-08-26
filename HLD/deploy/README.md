@@ -95,7 +95,45 @@ independent layers — the same model `HtmlToPdf` relies on, plus a token:
 
 The token never appears in this repository or in the labOS source. On the
 labOS side it comes from `gSecretManager` (`config/print_gateway`,
-key `auth-token`); here it comes from the environment.
+key `auth-token`); here it comes from the environment, or from Vault when
+configured — see "Secrets (Vault)" below.
+
+### Secrets (Vault)
+
+Setting `VAULT_ADDR` (Nomad's own injected address variable) or
+`SECRET_STORE_URL` switches the print token's source from plain
+`PRINT_GATEWAY_TOKEN` to Vault, read at the same path/key the labOS side
+already uses (`<LABOS_ENV>/config/print_gateway`, key `auth-token` — the
+`LABOS_ENV` prefix is only added when that variable is set). This mirrors
+`gSecretManager`'s convention deliberately, so a Vault-backed deployment
+needs no new path convention on either side.
+
+| Env var | Meaning |
+| :--- | :--- |
+| `VAULT_ADDR` | Vault address (the standard Nomad-injected variable). Unset (and `SECRET_STORE_URL` also unset) ⇒ Vault is not used at all; the token comes from `PRINT_GATEWAY_TOKEN` exactly as before Vault support existed. |
+| `SECRET_STORE_URL` | Overrides `VAULT_ADDR` when both are set — matches `go-packages/settings`' own precedence. |
+| `VAULT_TOKEN` | Vault token auth. |
+| `SECRET_STORE_USERNAME` / `SECRET_STORE_PASSWORD` | Vault `userpass` auth, used when `VAULT_TOKEN` is empty. `SECRET_STORE_PASSWORD` must be `encryption.Encrypt`-ed, not plaintext — matching the convention `go-packages/settings` already uses for this variable. A password that fails to decrypt is treated as a Vault-init failure (logged, falls back to `PRINT_GATEWAY_TOKEN`). |
+| `LABOS_ENV` | Path prefix under the KV mount, e.g. `production`. Unset ⇒ no prefix. |
+
+**Fallback policy, deliberately fail-open:** when Vault is configured, any
+failure reading the token — client construction (bad/missing credentials),
+an unreachable server, a malformed response, or the secret genuinely not
+being present — is logged (never the token value) and the server falls back
+to `PRINT_GATEWAY_TOKEN`. The process refuses to start only if *neither*
+Vault nor the environment produced a token. This is a deliberate choice for
+this prototype: a misconfigured or down Vault degrades to env instead of
+taking the service down. It is intentionally more permissive than
+`secret_store`'s own `GetSecretStringWithFallback` helper, which only falls
+back on a definite miss (see `internal/secrets/secrets.go`).
+
+A present-but-blank Vault value (an unset key, a botched `vault kv put`, a
+rotation that cleared it) is treated the same as a miss — it falls back to
+`PRINT_GATEWAY_TOKEN` rather than "succeeding" into an empty token, which
+would otherwise 503 every request while logging a successful resolution.
+
+The startup log names which source won (`vault`, `env`, or
+`env (vault fallback)`) — never the token value itself.
 
 ### Correlation ID
 
@@ -197,7 +235,7 @@ go build -o printgateway .
 
 ## labOS shared library
 
-This service depends on two packages from the shared
+This service depends on four packages from the shared
 [`github.com/LabOS-co/go-packages`](https://github.com/LabOS-co/go-packages)
 monorepo (each package there is its own Go module, versioned with its own
 `<package>/vX.Y.Z` git tags):
@@ -209,14 +247,29 @@ monorepo (each package there is its own Go module, versioned with its own
   so failures come back in the same JSON envelope (`errorCode`/`errorDetails`/
   `errorMessage`) as every other labOS Go service, and every failure is logged
   automatically as it's handled.
+- `github.com/LabOS-co/go-packages/secret_store` — `internal/secrets` uses its
+  `Vault(...)` client plus `GetSecretString` to resolve the print token when
+  `SECRET_STORE_URL` is set (see "Secrets (Vault)" above). **Not yet on a
+  tagged release**: the two functions this depends on
+  (`GetSecretString`/`GetSecretStringWithFallback`) live on the unpushed
+  branch `feature/secret_store/LAB-16894—Add_secret_fallback_helpers` in the
+  `go-packages` repo, so `go.mod` currently carries a local
+  `replace github.com/LabOS-co/go-packages/secret_store =>
+  ../../../go-packages/secret_store` pointing at that clone. Remove the
+  `replace` and bump the `require` to a real tag once that branch is merged
+  and tagged.
+- `github.com/LabOS-co/go-packages/encryption` — `internal/secrets` uses
+  `Decrypt` on `SECRET_STORE_PASSWORD`, matching the convention
+  `go-packages/settings` already applies to that variable (see the table
+  above). A real tagged release (`v1.1.1`), no local `replace` needed.
 
 `GetConsoleLogger()` was chosen over `logs.GetLogger()` deliberately: the
 latter needs a full labOS `settings` (Consul-backed) + Vault `secret_store`
 setup to resolve its own logstash host/port, which this standalone WSL
-prototype doesn't have. Switch to `logs.GetLogger()` (and consider sourcing
-`PRINT_GATEWAY_TOKEN` from `secret_store` instead of the environment, matching
-how the labOS side already reads it from `gSecretManager`) once this runs
-alongside the rest of the labOS infrastructure rather than standalone in WSL.
+prototype doesn't have. Switch to `logs.GetLogger()` once this runs alongside
+the rest of the labOS infrastructure rather than standalone in WSL — that is
+unrelated to `secret_store` above (which resolves the print token, not the
+logger's own settings) and is still open.
 
 To fetch or update these packages, `GOPRIVATE=github.com/LabOS-co` must be
 set (this repo's `go.mod`/`go.sum` already pin working versions, so a normal

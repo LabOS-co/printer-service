@@ -78,13 +78,53 @@ const DefaultSubmitTimeout = 30 * time.Second
 
 const SubmitTimeoutEnv = "PRINT_GATEWAY_SUBMIT_TIMEOUT"
 
+// Vault/secret_store connection details, all optional. An empty
+// SecretStoreURL means Vault is not configured at all — secrets.ResolveToken
+// then resolves purely from the environment, unchanged from before Vault
+// support existed. Naming follows the team's existing convention (see
+// go-packages/settings) so a Nomad job spec needs no new vocabulary.
+const (
+	// VaultAddrEnv is Nomad's own injected address variable, read as the
+	// base value. SecretStoreURLEnv overrides it when set — matching
+	// go-packages/settings.go's getSecretStoreSettings precedence exactly,
+	// so a standard Nomad job spec (which sets VAULT_ADDR and nothing else)
+	// engages Vault here the same way it does for every other labOS Go
+	// service, instead of silently looking "unconfigured".
+	VaultAddrEnv      = "VAULT_ADDR"
+	SecretStoreURLEnv = "SECRET_STORE_URL"
+
+	VaultTokenEnv          = "VAULT_TOKEN"
+	SecretStoreUsernameEnv = "SECRET_STORE_USERNAME"
+	// SecretStorePasswordEnv, like go-packages/settings, is expected to hold
+	// an encryption.Encrypt-ed value, not plaintext — secrets.ResolveToken
+	// decrypts it before use.
+	SecretStorePasswordEnv = "SECRET_STORE_PASSWORD"
+
+	// LabosEnvEnv names the path prefix under the Vault mount, e.g.
+	// "production" turns the print token's path into
+	// "production/config/print_gateway". Empty means no prefix.
+	LabosEnvEnv = "LABOS_ENV"
+)
+
 // Config holds the service's runtime configuration.
 type Config struct {
 	Addr string
 
-	// AuthToken is empty when PRINT_GATEWAY_TOKEN is not set. The caller
-	// decides how to react to that (see httpapi.requireToken).
+	// AuthToken starts as whatever PRINT_GATEWAY_TOKEN holds (possibly
+	// empty). main.go overwrites it with secrets.ResolveToken's result before
+	// constructing the server — see that function for the Vault-then-env
+	// precedence and its deliberate fall-back-on-any-error policy.
 	AuthToken string
+
+	// Vault/secret_store connection details. SecretStoreURL == "" means
+	// Vault is not configured; the other three fields are then meaningless.
+	// Populated from VAULT_ADDR, overridden by SECRET_STORE_URL if set (see
+	// VaultAddrEnv).
+	SecretStoreURL      string
+	VaultToken          string
+	SecretStoreUsername string
+	SecretStorePassword string
+	LabosEnv            string
 
 	ReadHeaderTimeout time.Duration
 	ReadTimeout       time.Duration
@@ -110,9 +150,20 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 		addr = args[1]
 	}
 
+	secretStoreURL := getenv(VaultAddrEnv)
+	if v := getenv(SecretStoreURLEnv); v != "" {
+		secretStoreURL = v
+	}
+
 	cfg := Config{
 		Addr:      addr,
 		AuthToken: getenv(AuthTokenEnv),
+
+		SecretStoreURL:      secretStoreURL,
+		VaultToken:          getenv(VaultTokenEnv),
+		SecretStoreUsername: getenv(SecretStoreUsernameEnv),
+		SecretStorePassword: getenv(SecretStorePasswordEnv),
+		LabosEnv:            getenv(LabosEnvEnv),
 
 		ReadHeaderTimeout: DefaultReadHeaderTimeout,
 		ReadTimeout:       DefaultReadTimeout,
