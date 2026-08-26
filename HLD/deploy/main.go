@@ -32,13 +32,44 @@ import (
 )
 
 func main() {
-	logger := logs.GetConsoleLogger()
+	// Constructed WITHOUT a Host: GetLoggerWithSettings' own internal
+	// setLogstashLogger call swallows a dial failure and reports success
+	// regardless (logs@v1.5.2/logs.go), so giving it nothing to dial and
+	// calling logger.SetLogstashLogger ourselves below — whose error we DO
+	// check — is what lets a broken logstash address actually be noticed.
+	// FormatJSON is what makes LogMetaData's fields (job_id, status,
+	// duration, ...) queryable once they reach logstash; console output
+	// stays human-readable regardless (createLogstashLogger always sets
+	// ConsoleFormatter for it) but now goes to stderr — logrus.New()'s
+	// default — rather than the old GetConsoleLogger()'s stdout. A wrapper
+	// that only captured stdout needs updating.
+	//
+	// The discarded error is safe today: GetLoggerWithSettings has no
+	// failure path of its own (it does no I/O; that's exactly why we drive
+	// SetLogstashLogger separately below), so it always returns nil.
+	logger, _ := logs.GetLoggerWithSettings(logs.LogsSettings{Format: logs.FormatJSON}, config.ServiceName)
 	startupMeta := &logs.LogMetaData{Service: config.ServiceName}
 
 	cfg, err := config.Load(os.Args, os.Getenv)
 	if err != nil {
 		logger.LogError(fmt.Sprintf("invalid configuration: %v", err), startupMeta)
 		os.Exit(1)
+	}
+
+	// Set before anything else logs, so PRINT_GATEWAY_LOG_LEVEL actually
+	// governs every startup line that follows it — not just request
+	// handling.
+	if err := logger.SetLogLevel(cfg.LogLevel); err != nil {
+		logger.LogError(fmt.Sprintf("%s: invalid level %q, defaulting to info: %v", config.LogLevelEnv, cfg.LogLevel, err), startupMeta)
+	}
+
+	if host, port, source := secrets.ResolveLogServer(cfg, logger, startupMeta); host != "" {
+		if err := logger.SetLogstashLogger(host, port); err != nil {
+			logger.LogError(fmt.Sprintf("logstash dial to %s:%d (%s) failed: %v; continuing with console-only logging",
+				host, port, source, err), startupMeta)
+		} else {
+			logger.LogInfo(fmt.Sprintf("logstash logging enabled via %s (%s:%d)", source, host, port), startupMeta)
+		}
 	}
 
 	token, tokenSource, err := secrets.ResolveToken(cfg, logger, startupMeta)

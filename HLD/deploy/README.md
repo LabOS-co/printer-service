@@ -153,14 +153,63 @@ A supplied id is accepted only if it is printable ASCII and at most 128
 bytes. Anything else is replaced with a generated id and a log line saying
 so — it is never echoed back or written into a log field as given.
 
-Note the id is currently visible in the response header only, not in the
-server's log text: the prototype logs via `logs.GetConsoleLogger()`, whose
-methods ignore log metadata. Attaching the logstash logger is what turns the
-id into a queryable `job_id` field.
+The id always reaches the response header. It reaches the *log text* as a
+queryable `job_id` field only once logstash shipping is configured (see
+"Logging" below) — local console output still prints message text only, not
+structured fields, regardless.
 
 ```bash
 PRINT_GATEWAY_TOKEN='<the shared secret>' ./printgateway-linux-amd64
 ```
+
+### Logging
+
+The server logs via `logs.GetLoggerWithSettings` (`FormatJSON`), not the
+stdlib `log` package or the plain `logs.GetConsoleLogger()` this prototype
+started with — see "labOS shared library" below for why. Two things follow
+from that:
+
+- **Log level.** `PRINT_GATEWAY_LOG_LEVEL` (default `info`) sets the
+  minimum logrus level. An invalid value is logged and ignored (falls back
+  to `info`) rather than failing startup — logging misconfiguration alone
+  isn't worth refusing to serve over.
+- **Shipping to logstash.** Optional and non-fatal: if nothing resolves, the
+  server just stays on console-only logging. The address (`host:port`)
+  resolves the same way the print token does — Vault first if configured,
+  then env — and every failure along the way is logged once so the
+  degradation is visible:
+
+  | Source | Where |
+  | :--- | :--- |
+  | Vault | `<LABOS_ENV>/config/print_gateway`, key `log-server` (same path as the print token, different key) |
+  | Env fallback | `LOG_SERVER`, e.g. `LOG_SERVER=logstash.internal:514` |
+
+  The startup log names which source won (`vault` or `env`), mirroring the
+  print token's own `vault`/`env` source log line.
+
+**Known limitations, accepted for this prototype:**
+
+- **Console output moved from stdout to stderr.** The old
+  `GetConsoleLogger()` printed via `fmt.Print` (stdout); `logrus.New()`
+  (what `GetLoggerWithSettings` builds on) defaults its output to stderr.
+  A deploy wrapper that only captured stdout needs updating.
+- **UDP is fire-and-forget.** `SetLogstashLogger` dials UDP — a successful
+  dial proves the address resolved, not that anything is listening on the
+  other end. Confirm actual delivery in Kibana (the `kibana-search` skill
+  queries by `job_id`), don't infer it from a clean startup log.
+- **`environment` is never populated.** `GetLoggerWithSettings` has no
+  setter for it (only the `settings`-backed `GetLogger` sets it), so every
+  shipped record's `environment` field is empty and dropped by the JSON
+  formatter — a Kibana query filtering by environment won't match this
+  service at all, even though `LABOS_ENV` is set and used elsewhere (Vault
+  path prefixing). This is the concrete reason to revisit `GetLogger()` +
+  the `settings` stack (see "labOS shared library" below), not just an
+  abstract "nice to have."
+- **A log-call sequence counter races under concurrent requests.** The
+  `logs` package increments an unsynchronized package-global on every log
+  call. Two concurrent failing requests can log through this at the same
+  time. Not fixable from this repo — tracked as an upstream `go-packages`
+  issue, not this service's bug.
 
 ### Timeouts, limits, and shutdown
 
@@ -246,8 +295,16 @@ This service depends on four packages from the shared
 monorepo (each package there is its own Go module, versioned with its own
 `<package>/vX.Y.Z` git tags):
 
-- `github.com/LabOS-co/go-packages/logs` — used via `logs.GetConsoleLogger()`
-  for every log line, instead of the stdlib `log` package.
+- `github.com/LabOS-co/go-packages/logs` — used via
+  `logs.GetLoggerWithSettings(logs.LogsSettings{Format: logs.FormatJSON}, ...)`
+  for every log line, instead of the stdlib `log` package or the plain
+  `logs.GetConsoleLogger()` this prototype started with. Constructed
+  *without* a `Host`, then `logger.SetLogstashLogger(host, port)` is called
+  separately once `internal/secrets.ResolveLogServer` resolves one — because
+  `GetLoggerWithSettings`'s own internal call to that same function
+  discards its error and reports success regardless (`logs@v1.5.2/logs.go`),
+  which would hide a real dial failure. See "Logging" above for the
+  env/Vault knobs and known limitations.
 - `github.com/LabOS-co/go-packages/error_handler` — every non-2xx response is
   built with `error_handler.NewErrorHandler(logger, metaData).HandleError(...)`,
   so failures come back in the same JSON envelope (`errorCode`/`errorDetails`/
@@ -269,13 +326,12 @@ monorepo (each package there is its own Go module, versioned with its own
   `go-packages/settings` already applies to that variable (see the table
   above). A real tagged release (`v1.1.1`), no local `replace` needed.
 
-`GetConsoleLogger()` was chosen over `logs.GetLogger()` deliberately: the
-latter needs a full labOS `settings` (Consul-backed) + Vault `secret_store`
-setup to resolve its own logstash host/port, which this standalone WSL
-prototype doesn't have. Switch to `logs.GetLogger()` once this runs alongside
-the rest of the labOS infrastructure rather than standalone in WSL — that is
-unrelated to `secret_store` above (which resolves the print token, not the
-logger's own settings) and is still open.
+`logs.GetLogger()` (which resolves its logstash host/port from a full labOS
+`settings`-backed setup) is still not used, deliberately: this standalone WSL
+prototype doesn't have that stack, and `internal/secrets.ResolveLogServer`
+gets the same Vault-then-env result without it. The concrete reason to
+revisit that choice is the `environment` field gap noted under "Logging"
+above — `GetLoggerWithSettings` has no way to populate it, `GetLogger` does.
 
 To fetch or update these packages, `GOPRIVATE=github.com/LabOS-co` must be
 set (this repo's `go.mod`/`go.sum` already pin working versions, so a normal
@@ -298,10 +354,10 @@ works, not to be run in production:
 - **No idempotency key / retry / DLQ** (section 9-10) — if `lp` fails, the
   caller finds out immediately and has to decide what to do.
 - **No audit trail** (section 8) — nothing is persisted; the log line per
-  request is all there is. Correlation IDs *are* now assigned (see
-  "Correlation ID" above), but they are not yet visible in the log text,
-  because the console logger discards log metadata — that arrives with the
-  logstash logger.
+  request is all there is. Correlation IDs *are* assigned and, once
+  logstash shipping is configured, do reach the log text as a queryable
+  `job_id` field (see "Correlation ID" and "Logging" above) — that's a log
+  line, not an audit record.
 - **No SSRF protection on `file_url`** (section 11.3) — the server will
   fetch whatever URL it's given, with no allowlist or internal-IP
   blocking yet. Fine for testing, not for anything reachable by an

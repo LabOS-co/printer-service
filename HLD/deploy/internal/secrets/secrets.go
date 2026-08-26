@@ -4,6 +4,8 @@ package secrets
 
 import (
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
 
 	"github.com/LabOS-co/go-packages/encryption"
@@ -20,6 +22,42 @@ const (
 	printTokenPath = "config/print_gateway"
 	printTokenKey  = "auth-token"
 )
+
+// logServerPath/logServerKey sit alongside the print token at the same
+// Vault path — both are this service's own config, not a shared convention
+// with another labOS component the way the print token is.
+const (
+	logServerPath = "config/print_gateway"
+	logServerKey  = "log-server"
+)
+
+// vaultClient builds the secret_store client shared by every resolver in
+// this package (ResolveToken, ResolveLogServer, and any future one), so the
+// userpass-decrypt-then-authenticate logic lives in exactly one place
+// instead of drifting between call sites. Each caller gets its own fresh
+// login — a startup-only cost, not a per-request one — rather than this
+// package threading a single client through main.go, which would couple
+// independent resolvers to a shared calling convention.
+func vaultClient(cfg config.Config, logger logs.Logger, meta *logs.LogMetaData) (secret_store.SecretStoreClient, error) {
+	password := cfg.SecretStorePassword
+	if password != "" {
+		// SECRET_STORE_PASSWORD is expected encrypted, matching
+		// go-packages/settings.go's getSecretStoreSettings — a plaintext
+		// value here would authenticate with ciphertext and fail.
+		decrypted, err := encryption.Decrypt(password)
+		if err != nil {
+			return nil, fmt.Errorf("can't decrypt %s: %w", config.SecretStorePasswordEnv, err)
+		}
+		password = decrypted
+	}
+
+	return secret_store.Vault(&secret_store.SecretStoreDetails{
+		URL:      cfg.SecretStoreURL,
+		Token:    cfg.VaultToken,
+		UserName: cfg.SecretStoreUsername,
+		Password: password,
+	}, logger, meta)
+}
 
 // ResolveToken resolves the shared print token (X-Labos-Print-Token). If
 // cfg.SecretStoreURL is empty, Vault is not configured at all: this returns
@@ -66,27 +104,7 @@ func ResolveToken(cfg config.Config, logger logs.Logger, meta *logs.LogMetaData)
 		return cfg.AuthToken, "env", nil
 	}
 
-	password := cfg.SecretStorePassword
-	if password != "" {
-		// SECRET_STORE_PASSWORD is expected encrypted, matching
-		// go-packages/settings.go's getSecretStoreSettings — a plaintext
-		// value here would authenticate with ciphertext and fail, which
-		// fail-open then silently converts into "resolved from env".
-		decrypted, decErr := encryption.Decrypt(password)
-		if decErr != nil {
-			logger.LogError(fmt.Sprintf("vault client init failed: can't decrypt %s: %v; falling back to %s",
-				config.SecretStorePasswordEnv, decErr, config.AuthTokenEnv), meta)
-			return fallbackToken(cfg)
-		}
-		password = decrypted
-	}
-
-	client, err := secret_store.Vault(&secret_store.SecretStoreDetails{
-		URL:      cfg.SecretStoreURL,
-		Token:    cfg.VaultToken,
-		UserName: cfg.SecretStoreUsername,
-		Password: password,
-	}, logger, meta)
+	client, err := vaultClient(cfg, logger, meta)
 	if err != nil {
 		logger.LogError(fmt.Sprintf("vault client init failed: %v; falling back to %s", err, config.AuthTokenEnv), meta)
 		return fallbackToken(cfg)
@@ -137,4 +155,89 @@ func vaultPath(labosEnv, path string) string {
 		return path
 	}
 	return labosEnv + "/" + path
+}
+
+// ResolveLogServer resolves the logstash address (host, port) main.go
+// hands to logger.SetLogstashLogger. Unlike ResolveToken, this is never
+// fatal: logstash shipping is an optional capability, and every failure —
+// Vault not configured, Vault tried and failed, a malformed value from
+// either source, or nothing configured anywhere — just means the service
+// stays on console-only logging, logged once so the degradation is visible.
+//
+// Returns ("", 0, "") when nothing usable was found. source names which
+// input won ("vault" or "env") when host is non-empty.
+func ResolveLogServer(cfg config.Config, logger logs.Logger, meta *logs.LogMetaData) (host string, port int, source string) {
+	if cfg.SecretStoreURL != "" {
+		client, err := vaultClient(cfg, logger, meta)
+		if err != nil {
+			logger.LogError(fmt.Sprintf("vault client init failed: %v; log server falls back to %s",
+				err, config.LogServerEnv), meta)
+		} else {
+			path := vaultPath(cfg.LabosEnv, logServerPath)
+			value, err := secret_store.GetSecretString(client, path, logServerKey)
+			if err != nil {
+				// LogInfo, not LogError: unlike the print token, log-server is
+				// optional, and the overwhelmingly common reason this fails is
+				// simply that nobody set the key — not a fault worth an ERROR
+				// line on every single startup. logs.Logger has no LogWarn.
+				logger.LogInfo(fmt.Sprintf("vault read %s (key %s) unavailable: %v; log server falls back to %s",
+					path, logServerKey, err, config.LogServerEnv), meta)
+			} else if h, p, perr := parseHostPort(value); perr != nil {
+				logger.LogError(fmt.Sprintf("vault %s (key %s) is not a valid host:port: %v; log server falls back to %s",
+					path, logServerKey, perr, config.LogServerEnv), meta)
+			} else {
+				return h, p, "vault"
+			}
+		}
+	}
+
+	if cfg.LogServer == "" {
+		return "", 0, ""
+	}
+	h, p, err := parseHostPort(cfg.LogServer)
+	if err != nil {
+		logger.LogError(fmt.Sprintf("%s: invalid host:port %q: %v; logstash shipping disabled",
+			config.LogServerEnv, cfg.LogServer, err), meta)
+		return "", 0, ""
+	}
+	return h, p, "env"
+}
+
+// parseHostPort parses a "host:port" value shared by both the Vault and env
+// forms of the log server address. net.SplitHostPort rejects a missing
+// port outright rather than silently defaulting it — logs.LogsSettings'
+// own defaultPort (514) is a convenience for callers that never set Port at
+// all, not a license to accept an address with no port here.
+//
+// Trimmed for the same reason ResolveToken trims: a trailing newline or
+// space from a unit file's Environment= would otherwise land in the port
+// ("514\n" fails Atoi) or the host and disable shipping over whitespace.
+//
+// An empty host is rejected explicitly: SplitHostPort(":514") succeeds with
+// host == "" — a plausible "any interface" typo — which the caller's
+// `host != ""` check then drops with no log line at all, and (from the
+// Vault branch) without ever trying the env fallback. Every other bad value
+// here is loud; this one has to be too.
+func parseHostPort(raw string) (host string, port int, err error) {
+	h, p, err := net.SplitHostPort(strings.TrimSpace(raw))
+	if err != nil {
+		return "", 0, err
+	}
+	if h == "" {
+		return "", 0, fmt.Errorf("missing host in address %q", raw)
+	}
+	n, err := strconv.Atoi(p)
+	if err != nil || n <= 0 || n > 65535 {
+		return "", 0, fmt.Errorf("invalid port %q", p)
+	}
+	// SplitHostPort strips the brackets off an IPv6 literal, but
+	// logs.SetLogstashLogger rejoins the address with a plain
+	// fmt.Sprintf("%s:%d", ...) (logstash_logger.go) — "::1" + ":514"
+	// becomes "::1:514", which net.Dial rejects with "too many colons in
+	// address" (verified live). Put the brackets back so the value we
+	// return is the one that function can actually dial.
+	if strings.Contains(h, ":") {
+		h = "[" + h + "]"
+	}
+	return h, n, nil
 }

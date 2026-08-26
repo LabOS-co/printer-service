@@ -106,6 +106,21 @@ const (
 	LabosEnvEnv = "LABOS_ENV"
 )
 
+const (
+	// LogServerEnv is the env-fallback address (host:port) for shipping logs
+	// to logstash — secrets.ResolveLogServer prefers Vault, matching
+	// ResolveToken's pattern, but logstash is optional: an empty result from
+	// both sources just means console-only logging, not a startup failure.
+	LogServerEnv = "LOG_SERVER"
+
+	// LogLevelEnv selects the logrus level name (e.g. "debug", "info",
+	// "warn", "error"). Not validated here — that would pull logrus into a
+	// package that is otherwise stdlib-only; logger.SetLogLevel in main.go
+	// is where an invalid value is caught and logged.
+	LogLevelEnv     = "PRINT_GATEWAY_LOG_LEVEL"
+	DefaultLogLevel = "info"
+)
+
 // Config holds the service's runtime configuration.
 type Config struct {
 	Addr string
@@ -138,6 +153,14 @@ type Config struct {
 
 	// SubmitTimeout bounds a single lp invocation (P0-1).
 	SubmitTimeout time.Duration
+
+	// LogServer is the raw, unparsed "host:port" env fallback for logstash
+	// shipping (see LogServerEnv). secrets.ResolveLogServer parses it and
+	// prefers a Vault-resolved value when Vault is configured.
+	LogServer string
+
+	// LogLevel names the logrus level main.go asks the logger for.
+	LogLevel string
 }
 
 // Load builds Config from argv (an address override, matching the original
@@ -153,6 +176,11 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 	secretStoreURL := getenv(VaultAddrEnv)
 	if v := getenv(SecretStoreURLEnv); v != "" {
 		secretStoreURL = v
+	}
+
+	logLevel := getenv(LogLevelEnv)
+	if logLevel == "" {
+		logLevel = DefaultLogLevel
 	}
 
 	cfg := Config{
@@ -172,6 +200,9 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 		MaxHeaderBytes:    DefaultMaxHeaderBytes,
 		ShutdownGrace:     DefaultShutdownGrace,
 		SubmitTimeout:     DefaultSubmitTimeout,
+
+		LogServer: getenv(LogServerEnv),
+		LogLevel:  logLevel,
 	}
 
 	// Table rather than one if-block per value: the repeated form made the

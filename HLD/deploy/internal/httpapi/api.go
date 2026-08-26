@@ -43,13 +43,14 @@ func New(cfg config.Config, logger logs.Logger, svc *printgw.Service) *API {
 // grows; it is not written yet, so for now the invariant rests on nothing
 // hoisting this pair onto the API struct.
 //
-// Caveat on JobId: it is set correctly here, but main.go currently builds
-// logs.GetConsoleLogger(), and every consoleLogger method discards its
-// metadata argument (logs@v1.5.2/console_logger.go) — so the id reaches the
-// response header and not the log text. That is not a defect in this code:
-// it is why Workstream D (the logstash logger, where all 12 LogMetaData
-// fields become real structured fields) is the step that makes correlation
-// observable. What this file fixes is the data race that blocked it (P0-5).
+// JobId now does reach the log text: main.go builds its logger via
+// logs.GetLoggerWithSettings (Workstream D), not the old GetConsoleLogger()
+// whose every method silently discarded its metadata argument. One caveat
+// that -race test will need to account for when it's written: the
+// logstashLogger this now runs through increments an unsynchronized
+// package-global sequence number per log call (logs@v1.5.2/
+// logstash_logger.go) — a real race across concurrent requests, not fixable
+// from this side. Tracked as a known upstream issue, not this file's bug.
 func (a *API) requestMeta(r *http.Request) (*logs.LogMetaData, error_handler.ErrorHandler) {
 	md := &logs.LogMetaData{Service: config.ServiceName, JobId: requestIDFrom(r.Context())}
 	return md, error_handler.NewErrorHandler(a.logger, md)
