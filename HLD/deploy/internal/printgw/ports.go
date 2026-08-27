@@ -39,9 +39,11 @@ type Submitter interface {
 // Fetcher downloads a document from a caller-supplied URL, copying it into
 // dst and returning the byte count.
 //
-// ctx is accepted for interface stability but not yet wired to the
-// production implementation's request — SSRF protection and timeouts land
-// in a later hardening step.
+// ctx is bounded by Service to config.FetchTimeout, the same way Submitter's
+// is bounded to config.SubmitTimeout (see Service.fetch) — a wedged or
+// silent file_url host now fails the request instead of hanging it forever.
+// The production implementation (fetch.SafeFetcher) also enforces SSRF
+// defense (HLD §11.3) before ever using ctx to dial.
 type Fetcher interface {
 	Fetch(ctx context.Context, rawURL string, dst io.Writer) (int64, error)
 }

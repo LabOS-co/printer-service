@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -47,9 +48,16 @@ const (
 	// just the last of those. At the 1m this originally shipped with, any
 	// request slower than a minute was read successfully and submitted to
 	// CUPS, and then failed on the response write: the caller saw a reset
-	// connection, retried, and the document printed twice. Keep the
-	// WriteTimeout > ReadTimeout invariant that validate enforces.
-	DefaultWriteTimeout = 6 * time.Minute
+	// connection, retried, and the document printed twice.
+	//
+	// validate enforces WriteTimeout > ReadTimeout + FetchTimeout +
+	// SubmitTimeout — the full chain a JSON/file_url request can spend
+	// before the response is written — not just WriteTimeout > ReadTimeout;
+	// 6m stopped covering that once FetchTimeout/SubmitTimeout became real
+	// (5m + 60s + 30s = 6.5m), which is exactly the duplicate-print failure
+	// mode described above, just with the fetch+submit time standing in for
+	// "any request slower than a minute".
+	DefaultWriteTimeout = 8 * time.Minute
 
 	DefaultIdleTimeout    = 60 * time.Second
 	DefaultMaxHeaderBytes = 64 << 10 // 64 KiB
@@ -70,13 +78,38 @@ const (
 // per request. printgw.Service applies this as a context.WithTimeout around
 // the Submit call, and cups.LPSubmitter's exec.CommandContext is what turns
 // that expiry into the child process actually being killed.
-//
-// NOTE: not yet included in a ShutdownGrace-vs-budget startup assertion —
-// that needs FetchTimeout too, which isn't wired to real cancellation until
-// a later step (SSRF hardening).
 const DefaultSubmitTimeout = 30 * time.Second
 
 const SubmitTimeoutEnv = "PRINT_GATEWAY_SUBMIT_TIMEOUT"
+
+// Fetch (file_url download) settings — SSRF defense, HLD §11.3 (P0-4).
+// FetchTimeout is now wired to real cancellation (printgw.Service.fetch), so
+// the ShutdownGrace-vs-budget assertion deferred since DefaultSubmitTimeout
+// was added is enforced in validate below.
+const (
+	DefaultFetchTimeout = 60 * time.Second
+	FetchTimeoutEnv     = "PRINT_GATEWAY_FETCH_TIMEOUT"
+
+	// DefaultFetchMaxBytes bounds a downloaded file_url response, independent
+	// of any general request-body limit: this is disk written from a
+	// caller-influenced remote host, before printgw's own logic ever sees it.
+	DefaultFetchMaxBytes int64 = 64 << 20 // 64 MiB
+	FetchMaxBytesEnv           = "PRINT_GATEWAY_FETCH_MAX_BYTES"
+
+	// AllowPrivateTargetsEnv lifts the loopback/private/link-local block on
+	// file_url. false in any deployment reachable by an untrusted caller;
+	// exists at all only because fetch's own tests need to dial
+	// httptest.Server. Not a strategy interface — a bool the project's own
+	// "design patterns are earned" rule says is the right amount of
+	// abstraction for one production value and one test value.
+	AllowPrivateTargetsEnv = "PRINT_GATEWAY_ALLOW_PRIVATE_TARGETS"
+
+	// FetchAllowedHostsEnv is the optional host-suffix allowlist — HLD
+	// §11.3's "pre-approved sources". Empty (the default) means any public
+	// host is fetchable; the loopback/private/link-local block above still
+	// applies regardless. Comma-separated, e.g. "s3.example.com,cdn.example.com".
+	FetchAllowedHostsEnv = "PRINT_GATEWAY_FETCH_ALLOWED_HOSTS"
+)
 
 // Vault/secret_store connection details, all optional. An empty
 // SecretStoreURL means Vault is not configured at all — secrets.ResolveToken
@@ -154,6 +187,18 @@ type Config struct {
 	// SubmitTimeout bounds a single lp invocation (P0-1).
 	SubmitTimeout time.Duration
 
+	// FetchTimeout bounds a single file_url download (P0-4).
+	FetchTimeout time.Duration
+	// FetchMaxBytes bounds a downloaded file_url response's size.
+	FetchMaxBytes int64
+	// AllowPrivateTargets lifts the loopback/private/link-local block on
+	// file_url. Must stay false in any deployment reachable by an untrusted
+	// caller — see AllowPrivateTargetsEnv.
+	AllowPrivateTargets bool
+	// FetchAllowedHosts is the optional host-suffix allowlist; empty means
+	// any public host is fetchable. See FetchAllowedHostsEnv.
+	FetchAllowedHosts []string
+
 	// LogServer is the raw, unparsed "host:port" env fallback for logstash
 	// shipping (see LogServerEnv). secrets.ResolveLogServer parses it and
 	// prefers a Vault-resolved value when Vault is configured.
@@ -183,6 +228,11 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 		logLevel = DefaultLogLevel
 	}
 
+	fetchAllowedHosts, err := splitHostList(getenv(FetchAllowedHostsEnv))
+	if err != nil {
+		return Config{}, err
+	}
+
 	cfg := Config{
 		Addr:      addr,
 		AuthToken: getenv(AuthTokenEnv),
@@ -200,6 +250,11 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 		MaxHeaderBytes:    DefaultMaxHeaderBytes,
 		ShutdownGrace:     DefaultShutdownGrace,
 		SubmitTimeout:     DefaultSubmitTimeout,
+
+		FetchTimeout:        DefaultFetchTimeout,
+		FetchMaxBytes:       DefaultFetchMaxBytes,
+		AllowPrivateTargets: false,
+		FetchAllowedHosts:   fetchAllowedHosts,
 
 		LogServer: getenv(LogServerEnv),
 		LogLevel:  logLevel,
@@ -219,6 +274,7 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 		{IdleTimeoutEnv, &cfg.IdleTimeout},
 		{ShutdownGraceEnv, &cfg.ShutdownGrace},
 		{SubmitTimeoutEnv, &cfg.SubmitTimeout},
+		{FetchTimeoutEnv, &cfg.FetchTimeout},
 	} {
 		v, err := overrideDuration(getenv, d.name, *d.dst)
 		if err != nil {
@@ -232,6 +288,18 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 	cfg.MaxHeaderBytes = n
+
+	fn, err := overrideBytes64(getenv, FetchMaxBytesEnv, cfg.FetchMaxBytes)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.FetchMaxBytes = fn
+
+	allowPrivate, err := overrideBool(getenv, AllowPrivateTargetsEnv, cfg.AllowPrivateTargets)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.AllowPrivateTargets = allowPrivate
 
 	if err := validate(cfg); err != nil {
 		return Config{}, err
@@ -256,12 +324,24 @@ func validate(cfg Config) error {
 	}
 
 	// See DefaultWriteTimeout: the write deadline is armed at header-parse
-	// time, so it has to cover the body read too. If it does not, a slow
-	// upload is accepted and printed and then fails on the response write —
-	// the caller sees failure for a job that succeeded, and retries it.
-	if cfg.WriteTimeout <= cfg.ReadTimeout {
-		return fmt.Errorf("%s (%s) must exceed %s (%s): the write deadline starts when request headers are parsed, so it must cover reading the body as well as sending the response",
-			WriteTimeoutEnv, cfg.WriteTimeout, ReadTimeoutEnv, cfg.ReadTimeout)
+	// time, so it has to cover the body read, any file_url download, and lp
+	// submission, not just the response write. If it does not, a slow
+	// request is accepted, fetched, and printed, and then fails on the
+	// response write — the caller sees failure for a job that succeeded,
+	// and retries it, printing the document twice.
+	if writeBudget := cfg.ReadTimeout + cfg.FetchTimeout + cfg.SubmitTimeout; cfg.WriteTimeout <= writeBudget {
+		return fmt.Errorf("%s (%s) must exceed %s+%s+%s (%s): the write deadline is armed when request headers are parsed, so it must cover reading the body, downloading file_url, and running lp, as well as sending the response",
+			WriteTimeoutEnv, cfg.WriteTimeout, ReadTimeoutEnv, FetchTimeoutEnv, SubmitTimeoutEnv, writeBudget)
+	}
+
+	// Deferred since DefaultSubmitTimeout was added: FetchTimeout is now
+	// wired to real cancellation (printgw.Service.fetch), so a request that
+	// blocks for the full fetch-then-submit budget must still fit inside
+	// the shutdown grace period, or a SIGTERM during that request truncates
+	// the print it exists to let finish.
+	if budget := cfg.FetchTimeout + cfg.SubmitTimeout; cfg.ShutdownGrace <= budget {
+		return fmt.Errorf("%s (%s) must exceed %s+%s (%s): a request already using the full fetch+submit budget must still fit inside the shutdown grace period",
+			ShutdownGraceEnv, cfg.ShutdownGrace, FetchTimeoutEnv, SubmitTimeoutEnv, budget)
 	}
 
 	return nil
@@ -298,4 +378,57 @@ func overrideBytes(getenv func(string) string, name string, def int) (int, error
 		return 0, fmt.Errorf("%s: invalid byte size %q, want a positive integer number of bytes", name, raw)
 	}
 	return n, nil
+}
+
+// overrideBytes64 is overrideBytes for a field too large for a plain int on
+// a 32-bit build (FetchMaxBytes) — same validation, same error shape.
+func overrideBytes64(getenv func(string) string, name string, def int64) (int64, error) {
+	raw := getenv(name)
+	if raw == "" {
+		return def, nil
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("%s: invalid byte size %q, want a positive integer number of bytes", name, raw)
+	}
+	return n, nil
+}
+
+func overrideBool(getenv func(string) string, name string, def bool) (bool, error) {
+	raw := getenv(name)
+	if raw == "" {
+		return def, nil
+	}
+	b, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("%s: invalid boolean %q: %w", name, raw, err)
+	}
+	return b, nil
+}
+
+// splitHostList parses the comma-separated FetchAllowedHostsEnv value.
+// Empty entries (from "a,,b" or leading/trailing commas) are dropped rather
+// than rejected — a stray comma should not be a startup failure for a
+// setting whose empty value ("no allowlist") is itself a valid, meaningful
+// choice. A malformed entry, though, fails startup by the same rule every
+// other override in this file follows: fetch.hostAllowed does plain suffix
+// matching, so a scheme/port/userinfo/path fragment or a leading "." left
+// in an entry would silently never match anything, and every file_url
+// fetch would then 403 with no hint why.
+func splitHostList(raw string) ([]string, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	var hosts []string
+	for _, h := range strings.Split(raw, ",") {
+		h = strings.ToLower(strings.TrimSpace(h))
+		if h == "" {
+			continue
+		}
+		if strings.ContainsAny(h, "/:@") || strings.HasPrefix(h, ".") || strings.HasSuffix(h, ".") {
+			return nil, fmt.Errorf("%s: invalid host entry %q, want a bare hostname (e.g. \"s3.example.com\"), not a URL", FetchAllowedHostsEnv, h)
+		}
+		hosts = append(hosts, h)
+	}
+	return hosts, nil
 }

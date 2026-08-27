@@ -2,6 +2,7 @@ package printgw
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,22 +15,41 @@ import (
 // document onto local disk (from an already-open reader or by fetching a
 // URL), hand it to a Submitter, then always clean up.
 type Service struct {
-	submitter     Submitter
-	fetcher       Fetcher
-	submitTimeout time.Duration // bounds the Submit call; see ports.go (P0-1)
+	submitter Submitter
+	fetcher   Fetcher
+	timeouts  Timeouts
 }
 
-func NewService(submitter Submitter, fetcher Fetcher, submitTimeout time.Duration) *Service {
-	return &Service{submitter: submitter, fetcher: fetcher, submitTimeout: submitTimeout}
+// Timeouts bounds Service's two operations. A named struct rather than two
+// adjacent time.Duration parameters on NewService: config.go's own
+// env-var-override table exists specifically because two same-typed values
+// next to each other is a swap that compiles, vets clean, and is invisible
+// in review — the same hazard applies here, one call site away.
+type Timeouts struct {
+	Submit time.Duration // bounds the Submit call; see ports.go (P0-1)
+	Fetch  time.Duration // bounds the Fetch call; see ports.go (P0-4)
+}
+
+func NewService(submitter Submitter, fetcher Fetcher, timeouts Timeouts) *Service {
+	return &Service{submitter: submitter, fetcher: fetcher, timeouts: timeouts}
 }
 
 // submit bounds ctx to submitTimeout before handing job to the Submitter, so
 // a wedged CUPS queue fails the request instead of hanging the handler
 // goroutine forever (P0-1).
 func (s *Service) submit(ctx context.Context, job SubmitJob) (SubmitResult, error) {
-	ctx, cancel := context.WithTimeout(ctx, s.submitTimeout)
+	ctx, cancel := context.WithTimeout(ctx, s.timeouts.Submit)
 	defer cancel()
 	return s.submitter.Submit(ctx, job)
+}
+
+// fetch bounds ctx to timeouts.Fetch before calling the Fetcher, the same
+// pattern as submit above: a file_url host that accepts the connection and
+// then never answers must not hang the handler goroutine forever.
+func (s *Service) fetch(ctx context.Context, rawURL string, dst io.Writer) (int64, error) {
+	ctx, cancel := context.WithTimeout(ctx, s.timeouts.Fetch)
+	defer cancel()
+	return s.fetcher.Fetch(ctx, rawURL, dst)
 }
 
 // PrintReader spools src — an already-open uploaded file named filename,
@@ -58,7 +78,17 @@ func (s *Service) PrintReader(ctx context.Context, printer, filename string, src
 // submits it to printer.
 func (s *Service) PrintURL(ctx context.Context, printer, rawURL string) (SubmitResult, error) {
 	path, cleanup, err := spoolTo("print-download-*.pdf", func(w io.Writer) error {
-		if _, err := s.fetcher.Fetch(ctx, rawURL, w); err != nil {
+		if _, err := s.fetch(ctx, rawURL, w); err != nil {
+			// fetch.SafeFetcher classifies its own failures (bad file_url,
+			// blocked SSRF target, oversize response, ...) into the right
+			// *apperr.HTTPError status already — pass those through as-is
+			// rather than force-collapsing everything to 502, which would
+			// turn a caller mistake (e.g. a blocked address) into a
+			// misleading "gateway" failure.
+			var httpErr *apperr.HTTPError
+			if errors.As(err, &httpErr) {
+				return err
+			}
 			return &apperr.HTTPError{
 				Status:   http.StatusBadGateway,
 				Public:   "failed to download file_url",

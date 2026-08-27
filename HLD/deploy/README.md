@@ -141,6 +141,66 @@ would otherwise 503 every request while logging a successful resolution.
 The startup log names which source won (`vault`, `env`, or
 `env (vault fallback)`) — never the token value itself.
 
+### SSRF defense (`file_url`)
+
+Option 2 above makes the server fetch a caller-supplied URL. Left
+unguarded, a caller could point `file_url` at `http://169.254.169.254/` (a
+cloud metadata endpoint) or `http://127.0.0.1:631/admin` (this machine's own
+CUPS admin interface) and have the response printed on paper. Per HLD §11.3,
+every `file_url` fetch is checked before *and* after connecting:
+
+1. Scheme must be `http`/`https`; embedded credentials (`http://user:pass@…`)
+   are rejected.
+2. Port must be `80` or `443` — this single rule is what kills
+   `127.0.0.1:631`.
+3. The address actually being connected to — not just the URL string, which
+   DNS could resolve differently by the time of the real connect — is
+   checked against loopback, private (RFC1918 + `fc00::/7`), link-local
+   (`169.254.169.254` included), CGNAT (`100.64.0.0/10`) and a handful of
+   other IANA special-purpose IPv4 ranges, multicast, unspecified,
+   broadcast, and every IPv6 scheme that embeds an IPv4 address
+   (`::/96`, `64:ff9b::/96`, `64:ff9b:1::/48`, `2002::/16`, `2001::/32`,
+   `100::/64`) that would otherwise let an IPv4-blocked address through
+   under an IPv6-shaped disguise. Enforced in `net.Dialer.Control`, which
+   runs after DNS resolution and immediately before `connect(2)` on the
+   literal IP — this is what actually stops DNS rebinding, not just the URL
+   as originally submitted, and it's sufficient on its own: the address
+   `Control` sees is exactly the one `connect(2)` uses, with no re-resolution
+   in between. A second, best-effort check re-validates the connection's
+   remote address right after it's established and rejects the response
+   before any of its body is read — a fail-safe against `Control` itself
+   being mis-wired in some future change, not something the primary gate
+   depends on.
+4. No redirects are followed — a presigned URL is a direct link by
+   construction, so any `3xx` response is treated as `file_url must be a
+   direct link`.
+5. The response is size-bounded (`Content-Length` checked up front, and the
+   body always read through a limited reader regardless, so a chunked or
+   lying body can't evade the check either).
+
+This guard is a blocklist, not an allowlist — its failure mode is "still
+reachable", not "false positive". It does not consult `HTTP_PROXY`/
+`HTTPS_PROXY` at all (the `http.Transport`'s `Proxy` field is left `nil`
+deliberately): honoring a proxy env var here would let every fetch's real
+destination be redirected through the configured proxy, which the address
+check would then validate instead of the actual target. In a deployment
+that requires an egress proxy for outbound traffic, every `file_url` fetch
+will fail — that's a known, accepted limitation of this prototype's
+implementation, not a bug.
+
+| Env var | Meaning |
+| :--- | :--- |
+| `PRINT_GATEWAY_ALLOW_PRIVATE_TARGETS` | `true` disables **every** target check above — address, port, and the post-connect recheck alike, not just the address block. Default `false`; **must stay `false` in any deployment reachable by an untrusted caller.** Exists as a config knob (rather than a test-only code path) because this prototype has no committed tests yet to need it privately; logged at `LogError` (survives any configured log level) when set. |
+| `PRINT_GATEWAY_FETCH_ALLOWED_HOSTS` | Optional comma-separated host-suffix allowlist (e.g. `s3.example.com,cdn.example.com`). Empty (the default) means any public host is fetchable — the address block above still applies regardless. |
+| `PRINT_GATEWAY_FETCH_TIMEOUT` | Bounds a single `file_url` download. Default `60s`. |
+| `PRINT_GATEWAY_FETCH_MAX_BYTES` | Bounds a downloaded response's size. Default `64` MiB. |
+
+**Option 3, `s3_key`, isn't implemented yet** (Workstream E) — when it lands
+it will bypass all of the above by design, since it talks to a fixed,
+configured object-store endpoint with server-side credentials rather than a
+caller-supplied URL, so there is no attacker-controlled address to guard
+against in the first place.
+
 ### Correlation ID
 
 Every response carries an `X-Laas-Identifier` header — the labOS-wide
@@ -224,10 +284,13 @@ than silently keeping the default:
 | :--- | :--- | :--- | :--- |
 | Read header timeout | 10s | `PRINT_GATEWAY_READ_HEADER_TIMEOUT` | Go duration, positive, `<=` read timeout |
 | Read timeout | 5m | `PRINT_GATEWAY_READ_TIMEOUT` | Go duration, positive |
-| Write timeout | 6m | `PRINT_GATEWAY_WRITE_TIMEOUT` | Go duration, positive, **`>` read timeout** |
+| Write timeout | 8m | `PRINT_GATEWAY_WRITE_TIMEOUT` | Go duration, positive, **`>` read timeout + fetch timeout + submit timeout** |
 | Idle timeout | 60s | `PRINT_GATEWAY_IDLE_TIMEOUT` | Go duration, positive |
 | Max header bytes | 64 KiB | `PRINT_GATEWAY_MAX_HEADER_BYTES` | plain integer **number of bytes** (`65536`, not `64KiB`) |
-| Shutdown grace period | 2m | `PRINT_GATEWAY_SHUTDOWN_GRACE` | Go duration, positive |
+| Shutdown grace period | 2m | `PRINT_GATEWAY_SHUTDOWN_GRACE` | Go duration, positive, **`>` fetch timeout + submit timeout** |
+| Submit (`lp`) timeout | 30s | `PRINT_GATEWAY_SUBMIT_TIMEOUT` | Go duration, positive |
+| Fetch (`file_url`) timeout | 60s | `PRINT_GATEWAY_FETCH_TIMEOUT` | Go duration, positive |
+| Fetch (`file_url`) max size | 64 MiB | `PRINT_GATEWAY_FETCH_MAX_BYTES` | plain integer **number of bytes** |
 
 Zero and negative durations are rejected on purpose: `net/http` guards every
 timeout with `if d > 0`, so `0` or `-5s` does not mean "very short", it means
@@ -238,25 +301,27 @@ exist to close.
 deadline when the request *headers* are parsed, not when the response starts
 (`conn.readRequest` sets it in a `defer`). So it is the budget for reading the
 body, spooling it, downloading `file_url`, running `lp`, *and* sending the
-response. Set below the read timeout, a slow upload is accepted and printed
-and then fails on the response write — the caller sees a failure for a job
-that actually succeeded, retries, and the document prints twice. Startup
-enforces `write timeout > read timeout` for that reason.
+response. Set too low, a slow request is accepted, fetched, and printed, and
+then fails on the response write — the caller sees a failure for a job that
+actually succeeded, retries, and the document prints twice. Startup enforces
+`write timeout > read timeout + fetch timeout + submit timeout` — the full
+chain a `file_url` request can spend, not just the body read — for that
+reason.
 
 On `SIGINT`/`SIGTERM` the server stops accepting new connections and waits
 up to the shutdown grace period for in-flight requests to finish before the
 process exits — a print already spooling is allowed to complete rather than
 being cut off mid-upload.
 
-> **Caveat until per-operation timeouts land.** `Shutdown` can only wait for
-> handlers; it cannot interrupt them. `fetch.HTTPFetcher` still uses
-> `http.Get` with no timeout and ignores its context, and `cups.LPSubmitter`
-> still uses `exec.Command` rather than `exec.CommandContext`. A handler
-> blocked on an unresponsive `file_url` host therefore cannot be drained: it
-> holds the full grace period, `Shutdown` returns `DeadlineExceeded`, the
-> process exits non-zero, and that request's temp spool file is left behind.
-> Wiring `FetchTimeout`/`SubmitTimeout` to real cancellation is what closes
-> this.
+Both operations a handler can block on now have real, ctx-bounded timeouts —
+`cups.LPSubmitter` uses `exec.CommandContext` (submit timeout) and
+`fetch.SafeFetcher` is dialed and read through a context `printgw.Service`
+bounds to the fetch timeout — so a wedged CUPS queue or an unresponsive
+`file_url` host fails the request instead of holding it, and the shutdown
+grace period, for the full duration. `config.Load` asserts
+`ShutdownGrace > FetchTimeout + SubmitTimeout` so a request already at that
+combined budget still has room to finish draining rather than being cut off
+by `Shutdown` itself.
 
 `net/http`'s own error lines (e.g. a client that tripped the read header
 timeout) are routed through the same logger as every request instead of
@@ -358,12 +423,16 @@ works, not to be run in production:
   logstash shipping is configured, do reach the log text as a queryable
   `job_id` field (see "Correlation ID" and "Logging" above) — that's a log
   line, not an audit record.
-- **No SSRF protection on `file_url`** (section 11.3) — the server will
-  fetch whatever URL it's given, with no allowlist or internal-IP
-  blocking yet. Fine for testing, not for anything reachable by an
-  untrusted caller.
 - **No status endpoint** (section 5) — the HTTP response is the only
   feedback you get.
+- **No concurrency limit on `/print`.** An authenticated caller can trigger
+  unlimited concurrent `file_url` fetches — usable as a reflector against a
+  third party, and each one can write up to `FETCH_MAX_BYTES` to disk before
+  the SSRF guard's size check rejects it.
+- **No content validation of a fetched or uploaded document.** Neither
+  intake option checks `Content-Type`, a PDF magic number, or a minimum
+  size — a 200 response with an empty or non-PDF body is spooled and handed
+  to `lp` as a success.
 
 Treat this as the "does the plumbing work at all" step, not a deployable
 service.

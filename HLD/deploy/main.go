@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/LabOS-co/go-packages/logs"
@@ -90,7 +91,27 @@ func main() {
 	cfg.AuthToken = token
 	logger.LogInfo(fmt.Sprintf("print token resolved from %s", tokenSource), startupMeta)
 
-	svc := printgw.NewService(cups.NewLPSubmitter(), fetch.NewHTTPFetcher(), cfg.SubmitTimeout)
+	// SSRF defense (HLD §11.3, P0-4): logged at startup, not just enforced
+	// silently, because both are exactly the kind of misconfiguration that
+	// should be loud rather than discovered later from an incident.
+	//
+	// AllowPrivateTargets=true is a total bypass of every target check
+	// (address, port, and the post-connect recheck alike), so this one uses
+	// LogError rather than LogInfo: PRINT_GATEWAY_LOG_LEVEL=warn/error is a
+	// plausible production setting, and this line must survive it or the
+	// "logged loudly" guarantee the README makes is false.
+	if cfg.AllowPrivateTargets {
+		logger.LogError(fmt.Sprintf("%s=true: file_url target checks (address AND port) are disabled — do not set this in a deployment reachable by an untrusted caller",
+			config.AllowPrivateTargetsEnv), startupMeta)
+	}
+	if len(cfg.FetchAllowedHosts) == 0 {
+		logger.LogInfo(fmt.Sprintf("%s not set: file_url may target any public host", config.FetchAllowedHostsEnv), startupMeta)
+	} else {
+		logger.LogInfo(fmt.Sprintf("file_url restricted to hosts: %s", strings.Join(cfg.FetchAllowedHosts, ", ")), startupMeta)
+	}
+
+	fetcher := fetch.NewSafeFetcher(cfg.AllowPrivateTargets, cfg.FetchAllowedHosts, cfg.FetchMaxBytes)
+	svc := printgw.NewService(cups.NewLPSubmitter(), fetcher, printgw.Timeouts{Submit: cfg.SubmitTimeout, Fetch: cfg.FetchTimeout})
 	api := httpapi.New(cfg, logger, svc)
 	server := httpapi.NewServer(api)
 
