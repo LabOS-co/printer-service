@@ -24,13 +24,24 @@ type API struct {
 	cfg    config.Config
 	logger logs.Logger
 	svc    *printgw.Service
+
+	// objectStore is nil when S3 is not configured (config.S3Endpoint ==
+	// ""); presignHandler is the only place that checks for that, the same
+	// way printgw.Service.PrintS3Key checks its own copy of the same
+	// underlying value (passed to New separately, typed as each package's
+	// own narrow interface — see printgw.ObjectStore's doc comment for why
+	// this isn't one shared interface). Held here too, rather than only
+	// inside svc, because presigning is not a print operation and has no
+	// reason to go through Service at all.
+	objectStore Presigner
 }
 
-func New(cfg config.Config, logger logs.Logger, svc *printgw.Service) *API {
+func New(cfg config.Config, logger logs.Logger, svc *printgw.Service, objectStore Presigner) *API {
 	return &API{
-		cfg:    cfg,
-		logger: logger,
-		svc:    svc,
+		cfg:         cfg,
+		logger:      logger,
+		svc:         svc,
+		objectStore: objectStore,
 	}
 }
 

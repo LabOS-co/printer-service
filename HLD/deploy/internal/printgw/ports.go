@@ -47,3 +47,25 @@ type Submitter interface {
 type Fetcher interface {
 	Fetch(ctx context.Context, rawURL string, dst io.Writer) (int64, error)
 }
+
+// ObjectStore is a narrow port onto S3/MinIO — just the one operation this
+// package actually calls, not the full cloud_storage.CloudStorageStreamingClient
+// surface (no Put/Delete/Stat/presign: nothing here calls them, and printgw
+// stays free of any dependency beyond what its own callers need). Presigning
+// is a separate capability with a separate, unrelated consumer — see
+// httpapi.Presigner — deliberately not folded into this interface: printgw
+// and httpapi each depend on only the slice of objstore.MinIO's method set
+// they actually use, rather than both carrying the other's half. The
+// production implementation (objstore.MinIO) adapts a *fixed*,
+// server-side-credentialed bucket, which is why PrintS3Key needs no
+// SSRF-style guard the way PrintURL does — there is no caller-controlled
+// destination, only a caller-controlled key.
+type ObjectStore interface {
+	// Get returns key's content and its claimed size — treated as
+	// authoritative by Service.getObject in the sense that it's checked
+	// against the configured max up front, but still verified against the
+	// actual byte count copied, not merely trusted (see getObject). Returns
+	// an error wrapping apperr.HTTPError{Status: 404} when key does not
+	// exist.
+	Get(ctx context.Context, key string) (io.ReadCloser, int64, error)
+}

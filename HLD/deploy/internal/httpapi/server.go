@@ -26,6 +26,7 @@ import (
 func NewServer(a *API) *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/print", a.requireToken(a.printHandler))
+	mux.HandleFunc("/files/presign", a.requireToken(a.presignHandler))
 
 	return &http.Server{
 		Addr:              a.cfg.Addr,

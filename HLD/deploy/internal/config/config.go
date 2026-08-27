@@ -44,24 +44,35 @@ const (
 	//	}
 	//
 	// so WriteTimeout is the budget for reading the body, spooling it to
-	// disk, downloading file_url, running lp, AND writing the response — not
-	// just the last of those. At the 1m this originally shipped with, any
-	// request slower than a minute was read successfully and submitted to
-	// CUPS, and then failed on the response write: the caller saw a reset
-	// connection, retried, and the document printed twice.
+	// disk, downloading file_url/s3_key, running lp, AND writing the
+	// response — not just the last of those. At the 1m this originally
+	// shipped with, any request slower than a minute was read successfully
+	// and submitted to CUPS, and then failed on the response write: the
+	// caller saw a reset connection, retried, and the document printed
+	// twice.
 	//
-	// validate enforces WriteTimeout > ReadTimeout + FetchTimeout +
-	// SubmitTimeout — the full chain a JSON/file_url request can spend
-	// before the response is written — not just WriteTimeout > ReadTimeout;
-	// 6m stopped covering that once FetchTimeout/SubmitTimeout became real
-	// (5m + 60s + 30s = 6.5m), which is exactly the duplicate-print failure
-	// mode described above, just with the fetch+submit time standing in for
-	// "any request slower than a minute".
+	// validate enforces WriteTimeout > ReadTimeout + max(FetchTimeout,
+	// S3Timeout) + SubmitTimeout — the full chain a JSON/file_url/s3_key
+	// request can spend before the response is written — not just
+	// WriteTimeout > ReadTimeout; 6m stopped covering that once
+	// FetchTimeout/SubmitTimeout became real (5m + 60s + 30s = 6.5m), which
+	// is exactly the duplicate-print failure mode described above, just
+	// with the fetch/s3+submit time standing in for "any request slower
+	// than a minute". max, not sum, of FetchTimeout/S3Timeout: a single
+	// request only ever exercises one of file_url/s3_key, so charging both
+	// would tighten this budget for every deployment the moment S3Timeout
+	// existed, whether or not object storage is even configured.
 	DefaultWriteTimeout = 8 * time.Minute
 
 	DefaultIdleTimeout    = 60 * time.Second
 	DefaultMaxHeaderBytes = 64 << 10 // 64 KiB
-	DefaultShutdownGrace  = 2 * time.Minute
+
+	// DefaultShutdownGrace must exceed max(FetchTimeout,S3Timeout)+SubmitTimeout
+	// (validate's other budget check) — 60s+30s at these defaults, so 2m
+	// leaves comfortable headroom. validate takes the max of Fetch/S3 rather
+	// than their sum specifically so adding S3Timeout didn't need to raise
+	// this default (see validate's comment).
+	DefaultShutdownGrace = 2 * time.Minute
 
 	ReadHeaderTimeoutEnv = "PRINT_GATEWAY_READ_HEADER_TIMEOUT"
 	ReadTimeoutEnv       = "PRINT_GATEWAY_READ_TIMEOUT"
@@ -109,6 +120,47 @@ const (
 	// host is fetchable; the loopback/private/link-local block above still
 	// applies regardless. Comma-separated, e.g. "s3.example.com,cdn.example.com".
 	FetchAllowedHostsEnv = "PRINT_GATEWAY_FETCH_ALLOWED_HOSTS"
+)
+
+// S3/MinIO object storage settings, all optional: S3Endpoint == "" means
+// object storage is not configured at all, and objstore is never
+// constructed (main.go). Unlike the print token, this is never a startup
+// failure — multipart upload remains the primary intake path per the HLD's
+// own constraint (not every Windows caller has an S3 SDK), so a missing or
+// broken S3 config just means the s3_key intake and /files/presign answer
+// 503, not that the service refuses to start.
+const (
+	S3EndpointEnv = "PRINT_GATEWAY_S3_ENDPOINT"
+	S3BucketEnv   = "PRINT_GATEWAY_S3_BUCKET"
+	S3RegionEnv   = "PRINT_GATEWAY_S3_REGION"
+
+	// S3InsecureEnv disables TLS to the S3/MinIO endpoint — see
+	// cloud_storage.CloudStorageSettings.Insecure. false (secure) unless a
+	// caller opts in, matching that package's own default.
+	S3InsecureEnv = "PRINT_GATEWAY_S3_INSECURE"
+
+	// S3AccessKeyEnv/S3SecretKeyEnv are the env-fallback credential source —
+	// secrets.ResolveS3Credentials prefers Vault first, the same
+	// Vault-then-env pattern as ResolveToken/ResolveLogServer.
+	S3AccessKeyEnv = "PRINT_GATEWAY_S3_ACCESS_KEY"
+	S3SecretKeyEnv = "PRINT_GATEWAY_S3_SECRET_KEY"
+
+	DefaultS3Timeout = 60 * time.Second
+	S3TimeoutEnv     = "PRINT_GATEWAY_S3_TIMEOUT"
+
+	// DefaultS3MaxBytes bounds an s3_key download the same way
+	// DefaultFetchMaxBytes bounds a file_url download (P0-4's sibling risk:
+	// an authenticated caller naming a huge key would otherwise spool an
+	// unbounded amount of disk).
+	DefaultS3MaxBytes int64 = 64 << 20 // 64 MiB
+	S3MaxBytesEnv           = "PRINT_GATEWAY_S3_MAX_BYTES"
+
+	// DefaultPresignTTL is both the default and the cap for a
+	// /files/presign expiry: a caller-requested ttl longer than this is
+	// silently clamped down to it, never rejected outright — a client
+	// asking for "as long as possible" is not a caller error.
+	DefaultPresignTTL = 15 * time.Minute
+	PresignTTLEnv     = "PRINT_GATEWAY_PRESIGN_TTL"
 )
 
 // Vault/secret_store connection details, all optional. An empty
@@ -199,6 +251,25 @@ type Config struct {
 	// any public host is fetchable. See FetchAllowedHostsEnv.
 	FetchAllowedHosts []string
 
+	// S3Endpoint == "" means object storage is not configured; see the const
+	// block above for why that is never a startup failure.
+	S3Endpoint string
+	S3Bucket   string
+	S3Region   string
+	S3Insecure bool
+	S3Timeout  time.Duration
+	S3MaxBytes int64
+
+	// S3AccessKey/S3SecretKey are the raw env-fallback values (see
+	// S3AccessKeyEnv/S3SecretKeyEnv) — secrets.ResolveS3Credentials prefers
+	// a Vault-resolved pair when Vault is configured, the same pattern as
+	// AuthToken/LogServer above.
+	S3AccessKey string
+	S3SecretKey string
+
+	// PresignTTL is both the default and the cap for /files/presign.
+	PresignTTL time.Duration
+
 	// LogServer is the raw, unparsed "host:port" env fallback for logstash
 	// shipping (see LogServerEnv). secrets.ResolveLogServer parses it and
 	// prefers a Vault-resolved value when Vault is configured.
@@ -256,6 +327,15 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 		AllowPrivateTargets: false,
 		FetchAllowedHosts:   fetchAllowedHosts,
 
+		S3Endpoint:  getenv(S3EndpointEnv),
+		S3Bucket:    getenv(S3BucketEnv),
+		S3Region:    getenv(S3RegionEnv),
+		S3Timeout:   DefaultS3Timeout,
+		S3MaxBytes:  DefaultS3MaxBytes,
+		S3AccessKey: getenv(S3AccessKeyEnv),
+		S3SecretKey: getenv(S3SecretKeyEnv),
+		PresignTTL:  DefaultPresignTTL,
+
 		LogServer: getenv(LogServerEnv),
 		LogLevel:  logLevel,
 	}
@@ -275,6 +355,8 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 		{ShutdownGraceEnv, &cfg.ShutdownGrace},
 		{SubmitTimeoutEnv, &cfg.SubmitTimeout},
 		{FetchTimeoutEnv, &cfg.FetchTimeout},
+		{S3TimeoutEnv, &cfg.S3Timeout},
+		{PresignTTLEnv, &cfg.PresignTTL},
 	} {
 		v, err := overrideDuration(getenv, d.name, *d.dst)
 		if err != nil {
@@ -301,6 +383,18 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 	}
 	cfg.AllowPrivateTargets = allowPrivate
 
+	s3Insecure, err := overrideBool(getenv, S3InsecureEnv, cfg.S3Insecure)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.S3Insecure = s3Insecure
+
+	s3MaxBytes, err := overrideBytes64(getenv, S3MaxBytesEnv, cfg.S3MaxBytes)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.S3MaxBytes = s3MaxBytes
+
 	if err := validate(cfg); err != nil {
 		return Config{}, err
 	}
@@ -324,24 +418,33 @@ func validate(cfg Config) error {
 	}
 
 	// See DefaultWriteTimeout: the write deadline is armed at header-parse
-	// time, so it has to cover the body read, any file_url download, and lp
-	// submission, not just the response write. If it does not, a slow
-	// request is accepted, fetched, and printed, and then fails on the
+	// time, so it has to cover the body read, any file_url/s3_key download,
+	// and lp submission, not just the response write. If it does not, a
+	// slow request is accepted, fetched, and printed, and then fails on the
 	// response write — the caller sees failure for a job that succeeded,
-	// and retries it, printing the document twice.
-	if writeBudget := cfg.ReadTimeout + cfg.FetchTimeout + cfg.SubmitTimeout; cfg.WriteTimeout <= writeBudget {
-		return fmt.Errorf("%s (%s) must exceed %s+%s+%s (%s): the write deadline is armed when request headers are parsed, so it must cover reading the body, downloading file_url, and running lp, as well as sending the response",
-			WriteTimeoutEnv, cfg.WriteTimeout, ReadTimeoutEnv, FetchTimeoutEnv, SubmitTimeoutEnv, writeBudget)
+	// and retries it, printing the document twice. A single request only
+	// ever exercises ONE of file_url/s3_key (print_handler.go rejects a
+	// request naming both), so the budget takes their max, not their sum:
+	// summing would charge every deployment for S3Timeout even when
+	// PRINT_GATEWAY_S3_ENDPOINT is unset (S3Timeout still has a default),
+	// which could turn a WriteTimeout/ShutdownGrace pinned before object
+	// storage existed into a startup failure on upgrade alone — the
+	// opposite of "S3 is additive and never fatal".
+	fetchOrS3 := max(cfg.FetchTimeout, cfg.S3Timeout)
+	if writeBudget := cfg.ReadTimeout + fetchOrS3 + cfg.SubmitTimeout; cfg.WriteTimeout <= writeBudget {
+		return fmt.Errorf("%s (%s) must exceed %s+max(%s,%s)+%s (%s): the write deadline is armed when request headers are parsed, so it must cover reading the body, downloading file_url/s3_key, and running lp, as well as sending the response",
+			WriteTimeoutEnv, cfg.WriteTimeout, ReadTimeoutEnv, FetchTimeoutEnv, S3TimeoutEnv, SubmitTimeoutEnv, writeBudget)
 	}
 
 	// Deferred since DefaultSubmitTimeout was added: FetchTimeout is now
 	// wired to real cancellation (printgw.Service.fetch), so a request that
 	// blocks for the full fetch-then-submit budget must still fit inside
 	// the shutdown grace period, or a SIGTERM during that request truncates
-	// the print it exists to let finish.
-	if budget := cfg.FetchTimeout + cfg.SubmitTimeout; cfg.ShutdownGrace <= budget {
-		return fmt.Errorf("%s (%s) must exceed %s+%s (%s): a request already using the full fetch+submit budget must still fit inside the shutdown grace period",
-			ShutdownGraceEnv, cfg.ShutdownGrace, FetchTimeoutEnv, SubmitTimeoutEnv, budget)
+	// the print it exists to let finish. Same max-not-sum reasoning as
+	// writeBudget above applies now that s3_key downloads are real too.
+	if budget := fetchOrS3 + cfg.SubmitTimeout; cfg.ShutdownGrace <= budget {
+		return fmt.Errorf("%s (%s) must exceed max(%s,%s)+%s (%s): a request already using the full fetch/s3+submit budget must still fit inside the shutdown grace period",
+			ShutdownGraceEnv, cfg.ShutdownGrace, FetchTimeoutEnv, S3TimeoutEnv, SubmitTimeoutEnv, budget)
 	}
 
 	return nil

@@ -57,8 +57,24 @@ directly-fetchable URL works. **No AWS SDK or credentials are involved on
 this server** — the presigning/authorization has to already be baked into
 the URL you pass in.
 
-Both `printer` (the CUPS queue name — run `lpstat -p` to see what's
-available) are required either way.
+**Option 3 — reference a key in the configured object store** (`application/json`):
+
+```bash
+curl -X POST http://localhost:8090/print \
+  -H "Content-Type: application/json" \
+  -d '{"printer":"q-hp-laserjet","s3_key":"invoices/invoice-42.pdf"}'
+```
+
+Fields: `printer` and `s3_key`. The server downloads the object itself, from
+the one bucket configured at startup (see "S3/MinIO object storage" below) —
+**this is the recommended option for large files**, since option 1's upload
+still has to cross this server's own connection first. Requires
+`PRINT_GATEWAY_S3_ENDPOINT`/`PRINT_GATEWAY_S3_BUCKET` to be configured;
+otherwise this answers `503`. `file_url` and `s3_key` are mutually
+exclusive — sending both is a `400`.
+
+`printer` (the CUPS queue name — run `lpstat -p` to see what's available) is
+required in all three options.
 
 Success response (either option):
 
@@ -195,11 +211,73 @@ implementation, not a bug.
 | `PRINT_GATEWAY_FETCH_TIMEOUT` | Bounds a single `file_url` download. Default `60s`. |
 | `PRINT_GATEWAY_FETCH_MAX_BYTES` | Bounds a downloaded response's size. Default `64` MiB. |
 
-**Option 3, `s3_key`, isn't implemented yet** (Workstream E) — when it lands
-it will bypass all of the above by design, since it talks to a fixed,
+**`s3_key` bypasses all of the above by design** — it talks to a fixed,
 configured object-store endpoint with server-side credentials rather than a
 caller-supplied URL, so there is no attacker-controlled address to guard
-against in the first place.
+against in the first place. See "S3/MinIO object storage" below.
+
+### S3/MinIO object storage
+
+Two additive capabilities, per HLD §6: fetching a print job by key
+(`s3_key` above) and generating presigned URLs (`/files/presign` below).
+**Multipart upload (option 1) remains the primary, default intake path and
+is never deprecated** — the HLD is explicit that not every Windows caller
+has (or should need) an S3 SDK; this is purely for the >10MB / high-volume
+cases where it helps.
+
+All the actual S3 logic (auth, presigning, streaming, 404 classification)
+lives in the shared `github.com/LabOS-co/go-packages/cloud_storage` package
+— `internal/objstore` is a thin adapter onto it, the same role `internal/cups`
+and `internal/fetch` play for `lp` and outbound HTTP. See "labOS shared
+library" below for that package's status.
+
+Configured entirely by environment; empty `PRINT_GATEWAY_S3_ENDPOINT` (the
+default) disables the feature entirely — `s3_key` and `/files/presign` both
+answer `503`, and nothing else in the service changes. This is **never** a
+startup failure, unlike the print token: a misconfigured or absent S3 setup
+just means the additive capability isn't available, not that the whole
+service is down.
+
+| Env var | Meaning |
+| :--- | :--- |
+| `PRINT_GATEWAY_S3_ENDPOINT` | `host:port` of the S3/MinIO endpoint. Empty ⇒ object storage disabled. Half-configured (this set with `PRINT_GATEWAY_S3_BUCKET` empty, or vice versa) is logged loudly and disables object storage — same as every other broken-S3-config case, **never a startup failure**, matching the invariant stated above. |
+| `PRINT_GATEWAY_S3_BUCKET` | The one bucket this server reads/writes. There is no per-request bucket override or allowlist (see "deliberately not here yet" below). |
+| `PRINT_GATEWAY_S3_REGION` | Passed through to the S3 client and used to sign every request. **Strongly recommended, not optional in practice**: leaving it empty costs a live network round trip on first use, and — worse — if that lookup itself fails (e.g. against a non-AWS backend that doesn't answer it), the client silently signs as `us-east-1` instead of erroring, so a bad presigned URL fails on whoever tries to use it, with nothing here to trace it back to. Logged at `LogError` when left empty and S3 is otherwise configured. |
+| `PRINT_GATEWAY_S3_INSECURE` | `true` disables TLS to the endpoint (plain `http://`) — for a local/dev MinIO only. Default `false`. |
+| `PRINT_GATEWAY_S3_ACCESS_KEY` / `PRINT_GATEWAY_S3_SECRET_KEY` | Env-fallback credentials. Vault is tried first when configured (same Vault-then-env pattern as the print token — see "Secrets (Vault)" above), at the same path, keys `s3-access-key`/`s3-secret-key`. |
+| `PRINT_GATEWAY_S3_TIMEOUT` | Bounds a single `s3_key` download. Default `60s`. |
+| `PRINT_GATEWAY_S3_MAX_BYTES` | Bounds a downloaded object's size — checked against the object store's own authoritative size metadata before any byte is copied, unlike `file_url`'s Content-Length (at best a claim until the read catches a lie). Default `64` MiB. |
+
+**`POST /files/presign`** — same auth (`X-Labos-Print-Token`) as `/print`:
+
+```bash
+curl -X POST http://localhost:8090/files/presign \
+  -H "X-Labos-Print-Token: <token>" -H "Content-Type: application/json" \
+  -d '{"key":"invoices/invoice-42.pdf","method":"GET"}'
+# {"url":"http://...(signed)...","key":"invoices/invoice-42.pdf","expires_at":"2026-08-27T15:00:00Z"}
+```
+
+`method` is `GET` (default — a URL a third party can fetch, e.g. to hand to
+another system that will then print it by `s3_key`) or `PUT` (a URL a third
+party can upload to directly, which can then be printed by that same key).
+Optional `ttl_seconds` requests a shorter-than-default expiry; a value
+*longer* than `PRINT_GATEWAY_PRESIGN_TTL` (default `15m`) is silently
+clamped down to it rather than rejected.
+
+`key` is used exactly as given — no server-assigned prefix, no basename
+rewriting — except that a key containing a `../`-style traversal segment is
+rejected outright with `400` (`s3_key`/`key`, both endpoints), rather than
+silently normalized. This is what actually keeps a caller confined to the
+one configured bucket: verified live that a real MinIO instance
+independently rejects an unclean key server-side too, but that is
+backend-specific behavior this guarantee should not rest on alone — the
+check is enforced here regardless of backend.
+
+**Deliberately not here yet:** a per-request bucket override or allowlist
+(one caller cannot currently be restricted to a sub-prefix of the bucket);
+content-type/magic-byte validation of an `s3_key` object, same gap `file_url`
+and multipart already have (see "deliberately not here yet" at the bottom);
+a concurrency limit on `/print`, so this shares that pre-existing gap too.
 
 ### Correlation ID
 
@@ -284,13 +362,16 @@ than silently keeping the default:
 | :--- | :--- | :--- | :--- |
 | Read header timeout | 10s | `PRINT_GATEWAY_READ_HEADER_TIMEOUT` | Go duration, positive, `<=` read timeout |
 | Read timeout | 5m | `PRINT_GATEWAY_READ_TIMEOUT` | Go duration, positive |
-| Write timeout | 8m | `PRINT_GATEWAY_WRITE_TIMEOUT` | Go duration, positive, **`>` read timeout + fetch timeout + submit timeout** |
+| Write timeout | 8m | `PRINT_GATEWAY_WRITE_TIMEOUT` | Go duration, positive, **`>` read timeout + max(fetch timeout, S3 timeout) + submit timeout** |
 | Idle timeout | 60s | `PRINT_GATEWAY_IDLE_TIMEOUT` | Go duration, positive |
 | Max header bytes | 64 KiB | `PRINT_GATEWAY_MAX_HEADER_BYTES` | plain integer **number of bytes** (`65536`, not `64KiB`) |
-| Shutdown grace period | 2m | `PRINT_GATEWAY_SHUTDOWN_GRACE` | Go duration, positive, **`>` fetch timeout + submit timeout** |
+| Shutdown grace period | 2m | `PRINT_GATEWAY_SHUTDOWN_GRACE` | Go duration, positive, **`>` max(fetch timeout, S3 timeout) + submit timeout** |
 | Submit (`lp`) timeout | 30s | `PRINT_GATEWAY_SUBMIT_TIMEOUT` | Go duration, positive |
 | Fetch (`file_url`) timeout | 60s | `PRINT_GATEWAY_FETCH_TIMEOUT` | Go duration, positive |
 | Fetch (`file_url`) max size | 64 MiB | `PRINT_GATEWAY_FETCH_MAX_BYTES` | plain integer **number of bytes** |
+| S3 (`s3_key`) timeout | 60s | `PRINT_GATEWAY_S3_TIMEOUT` | Go duration, positive |
+| S3 (`s3_key`) max size | 64 MiB | `PRINT_GATEWAY_S3_MAX_BYTES` | plain integer **number of bytes** |
+| Presign expiry (default and cap) | 15m | `PRINT_GATEWAY_PRESIGN_TTL` | Go duration, positive |
 
 Zero and negative durations are rejected on purpose: `net/http` guards every
 timeout with `if d > 0`, so `0` or `-5s` does not mean "very short", it means
@@ -300,28 +381,33 @@ exist to close.
 **Why the write timeout is the largest value.** `net/http` arms the write
 deadline when the request *headers* are parsed, not when the response starts
 (`conn.readRequest` sets it in a `defer`). So it is the budget for reading the
-body, spooling it, downloading `file_url`, running `lp`, *and* sending the
-response. Set too low, a slow request is accepted, fetched, and printed, and
-then fails on the response write — the caller sees a failure for a job that
-actually succeeded, retries, and the document prints twice. Startup enforces
-`write timeout > read timeout + fetch timeout + submit timeout` — the full
-chain a `file_url` request can spend, not just the body read — for that
-reason.
+body, spooling it, downloading `file_url`/`s3_key`, running `lp`, *and*
+sending the response. Set too low, a slow request is accepted, fetched, and
+printed, and then fails on the response write — the caller sees a failure
+for a job that actually succeeded, retries, and the document prints twice.
+Startup enforces `write timeout > read timeout + max(fetch timeout, S3
+timeout) + submit timeout` — the *max*, not the sum, of the two download
+timeouts, since a single request only ever exercises one of `file_url`/
+`s3_key`, never both (the JSON intake rejects a request naming both). Summing
+them instead would have tightened this budget — and the shutdown-grace one
+below it — for every deployment the moment `PRINT_GATEWAY_S3_TIMEOUT` got a
+default, whether or not object storage is even configured.
 
 On `SIGINT`/`SIGTERM` the server stops accepting new connections and waits
 up to the shutdown grace period for in-flight requests to finish before the
 process exits — a print already spooling is allowed to complete rather than
 being cut off mid-upload.
 
-Both operations a handler can block on now have real, ctx-bounded timeouts —
-`cups.LPSubmitter` uses `exec.CommandContext` (submit timeout) and
+Every operation a handler can block on now has a real, ctx-bounded timeout —
+`cups.LPSubmitter` uses `exec.CommandContext` (submit timeout),
 `fetch.SafeFetcher` is dialed and read through a context `printgw.Service`
-bounds to the fetch timeout — so a wedged CUPS queue or an unresponsive
-`file_url` host fails the request instead of holding it, and the shutdown
-grace period, for the full duration. `config.Load` asserts
-`ShutdownGrace > FetchTimeout + SubmitTimeout` so a request already at that
-combined budget still has room to finish draining rather than being cut off
-by `Shutdown` itself.
+bounds to the fetch timeout, and `objstore.MinIO`'s `Get` is bounded to the
+S3 timeout the same way — so a wedged CUPS queue, an unresponsive `file_url`
+host, or a stalled S3 endpoint fails the request instead of holding it, and
+the shutdown grace period, for the full duration. `config.Load` asserts
+`ShutdownGrace > max(FetchTimeout, S3Timeout) + SubmitTimeout` so a request
+already at that budget still has room to finish draining rather than being
+cut off by `Shutdown` itself.
 
 `net/http`'s own error lines (e.g. a client that tripped the read header
 timeout) are routed through the same logger as every request instead of
@@ -355,7 +441,7 @@ go build -o printgateway .
 
 ## labOS shared library
 
-This service depends on four packages from the shared
+This service depends on five packages from the shared
 [`github.com/LabOS-co/go-packages`](https://github.com/LabOS-co/go-packages)
 monorepo (each package there is its own Go module, versioned with its own
 `<package>/vX.Y.Z` git tags):
@@ -376,20 +462,37 @@ monorepo (each package there is its own Go module, versioned with its own
   `errorMessage`) as every other labOS Go service, and every failure is logged
   automatically as it's handled.
 - `github.com/LabOS-co/go-packages/secret_store` — `internal/secrets` uses its
-  `Vault(...)` client plus `GetSecretString` to resolve the print token when
-  `SECRET_STORE_URL` is set (see "Secrets (Vault)" above). **Not yet on a
-  tagged release**: the two functions this depends on
-  (`GetSecretString`/`GetSecretStringWithFallback`) live on the unpushed
-  branch `feature/secret_store/LAB-16894—Add_secret_fallback_helpers` in the
-  `go-packages` repo, so `go.mod` currently carries a local
+  `Vault(...)` client plus `GetSecretString` to resolve the print token,
+  logstash address, and S3 credentials when `SECRET_STORE_URL` is set (see
+  "Secrets (Vault)" above). **Not yet on a tagged release**: the two
+  functions this depends on (`GetSecretString`/`GetSecretStringWithFallback`)
+  live on the unpushed branch
+  `feature/secret_store/LAB-16894—Add_secret_fallback_helpers` in the
+  `go-packages` repo, checked out into a separate **git worktree** (not the
+  main `go-packages` checkout — see the `cloud_storage` entry below for why),
+  so `go.mod` currently carries a local
   `replace github.com/LabOS-co/go-packages/secret_store =>
-  ../../../go-packages/secret_store` pointing at that clone. Remove the
-  `replace` and bump the `require` to a real tag once that branch is merged
-  and tagged.
+  ../../../go-packages-secret_store-wt/secret_store` pointing at it. Remove
+  the `replace` and bump the `require` to a real tag once that branch is
+  merged and tagged.
 - `github.com/LabOS-co/go-packages/encryption` — `internal/secrets` uses
   `Decrypt` on `SECRET_STORE_PASSWORD`, matching the convention
   `go-packages/settings` already applies to that variable (see the table
   above). A real tagged release (`v1.1.1`), no local `replace` needed.
+- `github.com/LabOS-co/go-packages/cloud_storage` — `internal/objstore`
+  adapts its `CloudStorageStreamingClient` (presigning + ctx-cancellable
+  streaming Get/Put) to this service's own `printgw.ObjectStore` port (see
+  "S3/MinIO object storage" above). **Not yet on a tagged release**: those
+  methods live on the unpushed branch
+  `feature/cloud_storage/LAB-16894—Add_presign_and_streaming_support` in the
+  `go-packages` repo — currently the *main* `go-packages` checkout (which is
+  why `secret_store`, above, needed its own separate worktree instead: one
+  working directory can only be on one branch at a time), so `go.mod` carries
+  `replace github.com/LabOS-co/go-packages/cloud_storage =>
+  ../../../go-packages/cloud_storage`. Remove the `replace` and bump the
+  `require` to a real tag once that branch is merged and tagged — and note
+  that whichever of these two branches merges first should let the other
+  drop its worktree and rejoin the main checkout.
 
 `logs.GetLogger()` (which resolves its logstash host/port from a full labOS
 `settings`-backed setup) is still not used, deliberately: this standalone WSL
@@ -426,13 +529,18 @@ works, not to be run in production:
 - **No status endpoint** (section 5) — the HTTP response is the only
   feedback you get.
 - **No concurrency limit on `/print`.** An authenticated caller can trigger
-  unlimited concurrent `file_url` fetches — usable as a reflector against a
-  third party, and each one can write up to `FETCH_MAX_BYTES` to disk before
-  the SSRF guard's size check rejects it.
-- **No content validation of a fetched or uploaded document.** Neither
-  intake option checks `Content-Type`, a PDF magic number, or a minimum
-  size — a 200 response with an empty or non-PDF body is spooled and handed
-  to `lp` as a success.
+  unlimited concurrent `file_url` fetches (or `s3_key` downloads) —
+  `file_url` is usable as a reflector against a third party, and either path
+  can write up to its configured max size to disk before the size check
+  rejects it.
+- **No content validation of a fetched or uploaded document.** No intake
+  option checks `Content-Type`, a PDF magic number, or a minimum size — a
+  200 response with an empty or non-PDF body is spooled and handed to `lp`
+  as a success.
+- **No per-caller bucket restriction.** `s3_key` and `/files/presign` always
+  operate against the one bucket configured at startup — there is no
+  allowlist or per-request bucket override, so every authenticated caller
+  can read/write anywhere in that bucket.
 
 Treat this as the "does the plumbing work at all" step, not a deployable
 service.

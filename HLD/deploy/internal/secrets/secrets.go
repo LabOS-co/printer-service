@@ -31,6 +31,15 @@ const (
 	logServerKey  = "log-server"
 )
 
+// s3*Path/Key sit alongside the print token and log server at the same
+// Vault path — this service's own config, same convention.
+const (
+	s3AccessKeyPath = "config/print_gateway"
+	s3AccessKeyKey  = "s3-access-key"
+	s3SecretKeyPath = "config/print_gateway"
+	s3SecretKeyKey  = "s3-secret-key"
+)
+
 // vaultClient builds the secret_store client shared by every resolver in
 // this package (ResolveToken, ResolveLogServer, and any future one), so the
 // userpass-decrypt-then-authenticate logic lives in exactly one place
@@ -240,4 +249,63 @@ func parseHostPort(raw string) (host string, port int, err error) {
 		h = "[" + h + "]"
 	}
 	return h, n, nil
+}
+
+// ResolveS3Credentials resolves the S3/MinIO access key and secret key.
+// Like ResolveLogServer (and unlike ResolveToken), this is never fatal: S3
+// is an additive capability behind config.S3Endpoint — multipart upload
+// remains the primary intake path per the HLD's own constraint, so a
+// missing or broken credential source here just means main.go skips
+// constructing objstore and the s3_key/presign endpoints answer 503, not
+// that the service refuses to start.
+//
+// Returns ("", "", "") when neither Vault nor the environment produced both
+// values — main.go treats that the same as "S3 not configured", logged once
+// here so the degradation is visible.
+func ResolveS3Credentials(cfg config.Config, logger logs.Logger, meta *logs.LogMetaData) (accessKey, secretKey, source string) {
+	if cfg.SecretStoreURL != "" {
+		client, err := vaultClient(cfg, logger, meta)
+		if err != nil {
+			logger.LogError(fmt.Sprintf("vault client init failed: %v; S3 credentials fall back to %s/%s",
+				err, config.S3AccessKeyEnv, config.S3SecretKeyEnv), meta)
+		} else {
+			ak, akErr := secret_store.GetSecretString(client, vaultPath(cfg.LabosEnv, s3AccessKeyPath), s3AccessKeyKey)
+			sk, skErr := secret_store.GetSecretString(client, vaultPath(cfg.LabosEnv, s3SecretKeyPath), s3SecretKeyKey)
+			switch {
+			case akErr != nil:
+				logger.LogInfo(fmt.Sprintf("vault read of S3 access key unavailable: %v; S3 credentials fall back to %s/%s",
+					akErr, config.S3AccessKeyEnv, config.S3SecretKeyEnv), meta)
+			case skErr != nil:
+				logger.LogInfo(fmt.Sprintf("vault read of S3 secret key unavailable: %v; S3 credentials fall back to %s/%s",
+					skErr, config.S3AccessKeyEnv, config.S3SecretKeyEnv), meta)
+			case strings.TrimSpace(ak) == "" || strings.TrimSpace(sk) == "":
+				// Same empty-value trap as ResolveToken: a present-but-blank
+				// secret must not "resolve" into a client that authenticates
+				// with an empty credential and fails on first real request.
+				logger.LogError("vault S3 access/secret key is empty; S3 credentials fall back to "+
+					config.S3AccessKeyEnv+"/"+config.S3SecretKeyEnv, meta)
+			default:
+				// Trimmed on return, unlike ResolveToken's deliberate
+				// untrimmed AuthToken (a bearer token could in principle
+				// contain meaningful whitespace; an S3 access/secret key
+				// cannot). Returning the untrimmed value here would let a
+				// trailing newline from a `vault kv put` heredoc — which
+				// passed the emptiness check above — reach minio-go and
+				// fail every request with SignatureDoesNotMatch, while this
+				// line logs a successful resolution.
+				return strings.TrimSpace(ak), strings.TrimSpace(sk), "vault"
+			}
+		}
+	}
+
+	// Trimmed for the same reason the Vault branch above is: a trailing
+	// newline from a unit file's Environment= is the realistic way an S3
+	// key picks up whitespace, and unlike AuthToken there's no legitimate
+	// reason for one to contain meaningful space.
+	accessKey = strings.TrimSpace(cfg.S3AccessKey)
+	secretKey = strings.TrimSpace(cfg.S3SecretKey)
+	if accessKey == "" || secretKey == "" {
+		return "", "", ""
+	}
+	return accessKey, secretKey, "env"
 }
