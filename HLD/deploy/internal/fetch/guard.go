@@ -118,6 +118,14 @@ var broadcastAddr = netip.MustParseAddr("255.255.255.255")
 // straight past an IPv4-only prefix like 100.64.0.0/10 without this.
 func isBlockedAddr(ip netip.Addr) bool {
 	ip = ip.Unmap()
+	// Strip any IPv6 zone before classification: netip.Prefix.Contains
+	// documents that it returns false for a zoned address, because prefixes
+	// carry no zone. Without this, appending e.g. "%eth0" to an IPv6 literal
+	// walks straight past every entry in blockedPrefixes below — including
+	// the IPv4-embedding ranges (::/96, 2002::/16, 64:ff9b::/96, 2001::/32)
+	// that exist specifically to catch an IPv4 target in IPv6 disguise. A
+	// zone is link scope, never part of an address's classification.
+	ip = ip.WithZone("")
 	if !ip.IsValid() {
 		return true // fail closed on anything we can't classify
 	}
