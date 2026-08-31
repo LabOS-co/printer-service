@@ -514,10 +514,15 @@ func overrideBool(getenv func(string) string, name string, def bool) (bool, erro
 // than rejected — a stray comma should not be a startup failure for a
 // setting whose empty value ("no allowlist") is itself a valid, meaningful
 // choice. A malformed entry, though, fails startup by the same rule every
-// other override in this file follows: fetch.hostAllowed does plain suffix
-// matching, so a scheme/port/userinfo/path fragment or a leading "." left
-// in an entry would silently never match anything, and every file_url
-// fetch would then 403 with no hint why.
+// other override in this file follows: fetch.hostAllowed matches on a label
+// boundary (host == suffix, or host ends in "."+suffix), so a
+// scheme/port/userinfo/path fragment left in an entry can never satisfy
+// either arm, and a leading "." turns the second arm into a search for
+// "..example.com", which no hostname contains. It is specifically the
+// label-boundary rule that makes the leading-dot case a problem — under
+// plain suffix matching ".example.com" would match "a.example.com" quite
+// happily. Left unrejected, every file_url fetch would then 403 with no
+// hint why.
 func splitHostList(raw string) ([]string, error) {
 	if raw == "" {
 		return nil, nil
