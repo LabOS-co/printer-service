@@ -47,7 +47,15 @@ const (
 // login — a startup-only cost, not a per-request one — rather than this
 // package threading a single client through main.go, which would couple
 // independent resolvers to a shared calling convention.
-func vaultClient(cfg config.Config, logger logs.Logger, meta *logs.LogMetaData) (secret_store.SecretStoreClient, error) {
+//
+// A package var, not a plain function, so tests can substitute a fake
+// secret_store.SecretStoreClient and exercise the Vault-success branches of
+// every resolver above without a reachable Vault server — there is no other
+// seam onto secret_store.Vault's concrete construction. Not safe to swap
+// from concurrently running tests; see secrets_test.go.
+var vaultClient = defaultVaultClient
+
+func defaultVaultClient(cfg config.Config, logger logs.Logger, meta *logs.LogMetaData) (secret_store.SecretStoreClient, error) {
 	password := cfg.SecretStorePassword
 	if password != "" {
 		// SECRET_STORE_PASSWORD is expected encrypted, matching
@@ -139,7 +147,14 @@ func ResolveToken(cfg config.Config, logger logs.Logger, meta *logs.LogMetaData)
 		return fallbackToken(cfg)
 	}
 
-	return value, "vault", nil
+	// Trimmed on return, matching ResolveS3Credentials: a trailing newline
+	// from a `vault kv put` heredoc passes the emptiness check above and
+	// then fails every request's token comparison forever, while this line
+	// logs a successful resolution. cfg.AuthToken (the env source) stays
+	// deliberately untrimmed — see fallbackToken — since that value is
+	// compared against on every request exactly as an operator set it; a
+	// Vault-stored secret has no equivalent reason to preserve whitespace.
+	return strings.TrimSpace(value), "vault", nil
 }
 
 // fallbackToken is ResolveToken's env fallback, shared by both failure
