@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"mime"
 	"net/http"
 	"path"
@@ -43,13 +44,16 @@ func (a *API) printHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // isMultipart reports whether contentType names a multipart/form-data
-// request, matching on the parsed media type (case-insensitively, per RFC
-// 9110) rather than a literal prefix. Shared with the maxBytes middleware,
+// request, matching on the parsed media type rather than a literal prefix.
+// mime.ParseMediaType already lowercases the returned type, so the
+// strings.EqualFold below is defensive rather than load-bearing for
+// case-insensitivity — the real reason a literal-prefix check would be
+// wrong is RFC 9110 case-insensitivity of the token itself, which
+// ParseMediaType already normalizes. Shared with the maxBytes middleware,
 // which must agree with this dispatch on which requests get the larger
-// upload limit rather than the tighter JSON one — two independent
-// case-sensitive checks that happened to agree today would silently
-// diverge the moment either one were "corrected" to be RFC-compliant on
-// its own.
+// upload limit rather than the tighter JSON one — two independent checks
+// that happened to agree today would silently diverge the moment either
+// one were reimplemented differently.
 func isMultipart(contentType string) bool {
 	mediaType, _, err := mime.ParseMediaType(contentType)
 	if err != nil {
@@ -109,7 +113,7 @@ type urlPrintRequest struct {
 // fixed-bucket download, and mixing them would leave one silently ignored.
 func (a *API) handleURLReference(w http.ResponseWriter, r *http.Request) {
 	var req urlPrintRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeStrictJSON(r, &req); err != nil {
 		a.fail(w, r, bodyErr(err, "invalid JSON body"))
 		return
 	}
@@ -160,6 +164,49 @@ func (a *API) handleURLReference(w http.ResponseWriter, r *http.Request) {
 // and what request actually reaches the store.
 func validObjectKey(key string) bool {
 	return path.Clean("/"+key) == "/"+key
+}
+
+// decodeStrictJSON decodes exactly one JSON value from r.Body into v,
+// rejecting an unknown field and any trailing content after that value.
+// Both intakes that take a JSON body (handleURLReference, presignHandler)
+// use this rather than a bare json.Decode: a caller who mistypes "file_url"
+// as "fiel_url" would otherwise have the typo silently dropped and the
+// request fail downstream on the confusing-sounding "exactly one of
+// file_url or s3_key is required" instead of the actual mistake, and a
+// caller who accidentally concatenates two JSON bodies would have the
+// second one silently discarded instead of rejected.
+//
+// Two properties this does NOT enforce, verified empirically rather than
+// assumed: field-name matching stays case-insensitive ({"Printer":...}
+// still matches Printer string `json:"printer"`) since DisallowUnknownFields
+// inherits encoding/json's own case-insensitive matching rather than adding
+// stricter rules of its own, and a duplicate key ({"printer":"a","printer":
+// "b"}) is not rejected — encoding/json applies the last occurrence and
+// this function does nothing to change that. Only a genuinely unrecognized
+// field name and trailing content are rejected.
+//
+// The trailing-content check decodes a second value into a throwaway
+// json.RawMessage rather than calling Decoder.More (which only answers
+// "is there a next array/object element", not "is there more input at the
+// top level"): a second Decode call returns io.EOF when nothing but
+// whitespace remains, returns nil when it successfully parsed another JSON
+// value (reject), and returns any other error when what follows is present
+// but not valid JSON on its own (also reject, via that same error).
+func decodeStrictJSON(r *http.Request, v any) error {
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	var extra json.RawMessage
+	switch err := dec.Decode(&extra); {
+	case errors.Is(err, io.EOF):
+		return nil
+	case err == nil:
+		return errors.New("body must contain exactly one JSON value")
+	default:
+		return err
+	}
 }
 
 // bodyErr classifies an error from reading or decoding a request body.

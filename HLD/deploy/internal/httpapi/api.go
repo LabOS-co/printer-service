@@ -67,6 +67,13 @@ func (a *API) requestMeta(r *http.Request) (*logs.LogMetaData, error_handler.Err
 	return md, error_handler.NewErrorHandler(a.logger, md)
 }
 
+// errFailCalledImproperly stands in for err when fail is called in a way no
+// current call site does (nil, or a typed-nil *apperr.HTTPError — see
+// fail's own doc comment). Package-level and immutable: every field is
+// read-only after construction, so sharing one instance across concurrent
+// requests is safe the same way a constant would be.
+var errFailCalledImproperly = &apperr.HTTPError{Status: http.StatusInternalServerError, Public: "internal server error"}
+
 // fail translates err into an HTTP response. If err is (or wraps) an
 // *apperr.HTTPError, its Internal detail — which may contain filesystem
 // paths, subprocess stderr, or a downstream response body — is logged here
@@ -74,12 +81,51 @@ func (a *API) requestMeta(r *http.Request) (*logs.LogMetaData, error_handler.Err
 // error_handler.HandleError logs again internally, but by then Err.Error()
 // is already just the public text, so the sensitive detail is logged
 // exactly once, by us.
+//
+// Three cases besides the ordinary one are guarded, in increasing order of
+// how likely they are to ever actually happen:
+//
+//   - err == nil would otherwise reach error_handler.HandleError's own
+//     Err.Error() call on a nil interface.
+//   - A typed-nil *apperr.HTTPError (a non-nil error interface whose
+//     concrete value is a nil pointer — see apperr.StatusCodeOf's doc
+//     comment for how that's constructed) would dereference that nil
+//     pointer here at httpErr.Internal, or later at (*HTTPError).Error()'s
+//     own e.Public.
+//   - An err that is not (or does not wrap) an *apperr.HTTPError at all is
+//     the one that matters most: error_handler@v1.2.4's handleAPIError puts
+//     Err.Error() directly into the response body's errorDetails.details
+//     (verified by reading it), so any such error reaches the client
+//     byte-for-byte. Every current dependency (cups.LPSubmitter,
+//     fetch.SafeFetcher, objstore.MinIO, and now printgw.Service.submit's
+//     own re-wrap) classifies its own failures before returning, so this is
+//     not reachable today — but "no current caller does this" describing a
+//     path that would leak a temp file path or subprocess stderr to an
+//     authenticated caller is exactly the kind of invariant this function
+//     should enforce structurally, not merely benefit from by convention.
+//
+// fail is the last function standing between a handler and a response — the
+// cost of defending all three (one switch, one package-level fallback
+// error) is cheap next to what a caller-visible leak, or a panic inside
+// error handling itself, would look like.
 func (a *API) fail(w http.ResponseWriter, r *http.Request, err error) {
 	md, eh := a.requestMeta(r)
+
 	var httpErr *apperr.HTTPError
-	if errors.As(err, &httpErr) && httpErr.Internal != nil {
+	switch matched := errors.As(err, &httpErr); {
+	case err == nil:
+		a.logger.LogError("fail called with a nil error (caller bug)", md)
+		err = errFailCalledImproperly
+	case matched && httpErr == nil:
+		a.logger.LogError("fail called with a typed-nil *apperr.HTTPError (caller bug)", md)
+		err = errFailCalledImproperly
+	case !matched:
+		a.logger.LogError(err.Error(), md)
+		err = errFailCalledImproperly
+	case httpErr.Internal != nil:
 		a.logger.LogError(httpErr.Internal.Error(), md)
 	}
+
 	eh.HandleError(error_handler.APIError{
 		StatusCode: apperr.StatusCodeOf(err),
 		Err:        err,

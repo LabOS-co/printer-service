@@ -48,10 +48,34 @@ func NewService(submitter Submitter, fetcher Fetcher, objectStore ObjectStore, t
 // submit bounds ctx to submitTimeout before handing job to the Submitter, so
 // a wedged CUPS queue fails the request instead of hanging the handler
 // goroutine forever (P0-1).
+//
+// A Submitter error that isn't already an *apperr.HTTPError is re-wrapped
+// into a generic one here, the same way fetch/getObject below re-wrap an
+// unclassified Fetcher/ObjectStore error — this is the one call site that
+// didn't, before this. The concrete implementation (cups.LPSubmitter)
+// always classifies its own errors, so this was unreachable through it, but
+// an unclassified error's raw text (a temp path, a subprocess's stderr) is
+// never safe to hand upward as-is: httpapi.fail passes Err.Error() straight
+// into error_handler's response body for anything it doesn't recognize as
+// an *apperr.HTTPError, and this package — not the HTTP layer two calls
+// away — is where a Submitter's own failure detail is known well enough to
+// classify correctly.
 func (s *Service) submit(ctx context.Context, job SubmitJob) (SubmitResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, s.timeouts.Submit)
 	defer cancel()
-	return s.submitter.Submit(ctx, job)
+	result, err := s.submitter.Submit(ctx, job)
+	if err != nil {
+		var httpErr *apperr.HTTPError
+		if errors.As(err, &httpErr) {
+			return result, err
+		}
+		return result, &apperr.HTTPError{
+			Status:   http.StatusInternalServerError,
+			Public:   "print submission failed",
+			Internal: err,
+		}
+	}
+	return result, nil
 }
 
 // fetch bounds ctx to timeouts.Fetch before calling the Fetcher, the same

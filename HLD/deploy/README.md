@@ -76,6 +76,14 @@ exclusive — sending both is a `400`.
 `printer` (the CUPS queue name — run `lpstat -p` to see what's available) is
 required in all three options.
 
+The two JSON bodies (options 2/3, and `/files/presign` below) are decoded
+strictly: a field name not listed above is a `400`, as is any content after
+the one JSON value (a caller accidentally concatenating two bodies, for
+example). Field-name matching stays case-insensitive and a duplicate key
+still resolves last-value-wins, both standard `encoding/json` behavior this
+server does nothing to change — only a genuinely unrecognized field name is
+rejected.
+
 Success response (either option):
 
 ```json

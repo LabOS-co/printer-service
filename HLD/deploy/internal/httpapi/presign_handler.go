@@ -64,7 +64,7 @@ func (a *API) presignHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req presignRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeStrictJSON(r, &req); err != nil {
 		a.fail(w, r, bodyErr(err, "invalid JSON body"))
 		return
 	}

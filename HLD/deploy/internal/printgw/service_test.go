@@ -260,6 +260,42 @@ func TestPrintReaderPropagatesTheSubmitterError(t *testing.T) {
 	}
 }
 
+// TestPrintReaderClassifiesAnUnwrappedSubmitterError is the sibling of
+// TestPrintReaderPropagatesTheSubmitterError: when the Submitter returns a
+// plain error (not an *apperr.HTTPError) — unreachable through the real
+// cups.LPSubmitter today, since it always classifies its own failures, but
+// not something the interface itself rules out — Service.submit must
+// re-wrap it into a generic *apperr.HTTPError rather than handing the raw
+// text upward. Not pinned anywhere else in the repo: an Opus review of the
+// A8 httpapi stage found removing this re-wrap (submit's return statement
+// reduced to `return s.submitter.Submit(ctx, job)`) survived every test in
+// both this package and httpapi, since the leak-regression test there
+// happens to use exactly this shape of fake and would still not leak (via
+// httpapi.fail's own, separate `!matched` fallback) even without it.
+func TestPrintReaderClassifiesAnUnwrappedSubmitterError(t *testing.T) {
+	t.Parallel()
+
+	rawErr := errors.New("running lp: exit status 1: lp: unknown printer q (spool file /tmp/print-upload-xyz)")
+	sub := &fakeSubmitter{err: rawErr}
+	svc := NewService(sub, nil, nil, testTimeouts, testS3Max)
+
+	_, err := svc.PrintReader(context.Background(), "q", "x.pdf", strings.NewReader("x"))
+
+	var httpErr *apperr.HTTPError
+	if !errors.As(err, &httpErr) {
+		t.Fatalf("error = %#v, want it re-wrapped as *apperr.HTTPError", err)
+	}
+	if httpErr.Status != http.StatusInternalServerError {
+		t.Errorf("Status = %d, want %d", httpErr.Status, http.StatusInternalServerError)
+	}
+	if httpErr.Public == "" || strings.Contains(httpErr.Public, "/tmp") || strings.Contains(httpErr.Public, "unknown printer") {
+		t.Errorf("Public = %q, want a generic message with no filesystem/subprocess detail", httpErr.Public)
+	}
+	if !errors.Is(httpErr.Internal, rawErr) {
+		t.Errorf("Internal = %v, want it to wrap the submitter's original error (an operator still needs this detail in the log)", httpErr.Internal)
+	}
+}
+
 // TestPrintReaderBoundsTheSubmitCall is the P0-1 headline test: a wedged CUPS
 // queue must fail the request at SubmitTimeout instead of hanging the handler
 // goroutine forever, leaking the goroutine, the lp process, the temp file and

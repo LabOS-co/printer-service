@@ -8,6 +8,14 @@ import (
 	"testing"
 )
 
+// typedNilHTTPError returns a non-nil error interface whose concrete value
+// is a nil *HTTPError pointer — the classic Go footgun, built explicitly so
+// TestStatusCodeOf can pin the guard against it.
+func typedNilHTTPError() error {
+	var e *HTTPError
+	return e
+}
+
 func TestStatusCodeOf(t *testing.T) {
 	t.Parallel()
 
@@ -88,6 +96,20 @@ func TestStatusCodeOf(t *testing.T) {
 			name: "zero status is reported verbatim, not coerced",
 			err:  &HTTPError{Public: "no status set"},
 			want: 0,
+		},
+		{
+			// A non-nil error interface whose concrete value is a nil
+			// *HTTPError pointer (constructible by e.g. `var e *HTTPError;
+			// return e` from a function returning error) still satisfies
+			// errors.As, since it matches on the dynamic TYPE, not the
+			// value. Without StatusCodeOf's own `httpErr != nil` guard,
+			// httpErr.Status below would dereference that nil pointer
+			// instead of falling through to the documented 500 default. No
+			// production call site constructs one today, but this pins the
+			// guard directly rather than resting on that being permanent.
+			name: "typed-nil HTTPError falls through to the default, not a panic",
+			err:  typedNilHTTPError(),
+			want: http.StatusInternalServerError,
 		},
 	}
 
