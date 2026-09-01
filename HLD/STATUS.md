@@ -1,4 +1,4 @@
-# printerSearch/HDL — status (last updated 2026-07-22)
+# printerSearch/HDL — status (last updated 2026-09-01)
 
 Continuation of LAB-16894 under `C:\printerSearch\HDL`. The original POC in
 `C:\printerSearch` (outside HDL) is **frozen as a backup — do not modify it**.
@@ -343,11 +343,67 @@ run-to-run diffing format), and the accept/completion JSON shapes are two distin
 with their own constructors rather than one struct discriminated by a string label, removing
 a class of typo-silently-drops-data bug the review also flagged.
 
+## Seventh phase (2026-08-26 through 2026-09-01): printgateway hardening plan completed
+
+The full "bulletproof printgateway" plan (`HLD/deploy` hardening + S3/Vault/logstash +
+`HLD/WSL` client robustness + ops) reached its last suggested-order-of-execution step this
+phase. Full step-by-step detail, every code-review pass, and every deliberately-deferred
+finding live in the plan document itself (`let-s-go-over-the-proud-wombat.md`'s own
+"Progress" section) and are not repeated here — this entry is the STATUS.md-level pointer
+CLAUDE.md's own convention asks for, not a duplicate.
+
+**`HLD/deploy` (Print Gateway):** all P0 fixes (uncancellable `lp`, unguarded IPP-parser
+slice — WSL side, discarded spool `Close()` error, unmitigated SSRF on `file_url`, the
+shared-`LogMetaData` race, zero-value `http.Server`) are in. Added since the sixth-phase
+entry above: HashiCorp Vault secrets (print token, S3 credentials, logstash address —
+Vault-then-env, refuse to start only when no source produces a required one), logs now ship
+to logstash via `go-packages/logs`' structured JSON path (not the console-only logger that
+silently discarded every `LogMetaData` field), S3/MinIO object storage (`s3_key` intake,
+`/files/presign`), the `accessLog`/`maxBytes`/`panicRecovery` middleware chain, and a full
+`go test ./...` suite (`internal/{apperr,config,cups,fetch,httpapi,objstore,printgw,secrets}`
+each at or near 100% statement coverage, verified by hand-mutation, not just the percentage).
+`main()` is now a thin `os.Exit` wrapper around a testable `run(ctx, stopSignals, args,
+getenv) error`.
+
+**`HLD/WSL` (`printersearch-hld` client + `bench`):** the two remaining P0s (IPP-parser
+bounds checks, bench statistics honesty) were already fixed in earlier phases; this phase
+added honest IPP success/failure sub-code reporting (`successful-ok-ignored-or-substituted-
+attributes` no longer counted as a clean success), and client robustness — explicit
+`Content-Length` instead of chunked encoding, a shared `*http.Client` with a `-timeout` flag
+on every subcommand, a bounded response read, a rune-safe clamp on any attribute name/value
+that would otherwise overflow the wire framing's `uint16` length prefix, and `os.Open`
+streaming in `runPrint` (guarded against a non-regular file, after a review caught that an
+unguarded stream could silently truncate the document on the wire). Module renamed
+`printersearch` → `printersearch-hld` (its `ippfix` submodule too) to stop colliding with the
+frozen root module's identical name, which had been blocking any `go.work` spanning both
+trees.
+
+**Ops:** `printgateway.service` and `ippfix.service` are now committed to the repo (neither
+existed anywhere but inside the live WSL distro before this, despite this document naming
+`ippfix.service` as what survives a reboot) with an `install-services.sh` and an
+`printgateway.env.example` skeleton. Every WSL/`win-bench` setup script's hardcoded, stale
+(and case-typo'd — `HDL` vs `HLD`) absolute path is gone, replaced with a path derived from
+the script's own location.
+
+**Known limitations carried forward, not fixed this phase** (see the plan document for the
+full list with reasoning): no concurrency limit on `/print`; `go-packages/logs`' own
+unsynchronized sequence-number counter races under concurrent requests (upstream, not
+fixable from here); `-race` cannot run natively on this Windows dev box (no C toolchain) —
+verified instead in WSL where gcc is available; `HLD/WSL/ippfix`'s two flagged defects
+(silent truncation on a parse failure, a base64-decode failure silently producing a
+zero-length attribute) remain unfixed, since `ippfix` was explicitly kept out of this plan's
+scope.
+
 ## Open items / not yet done
 
-- None of this is wired into an actual Print Gateway/Worker service yet —
-  it's still POC/benchmark-quality code proving the CUPS+IPP path's
-  viability and performance, per the spec doc.
+- **Superseded by the seventh phase above**: `HLD/deploy` is now a hardened prototype Print
+  Gateway (Vault secrets, S3 storage, logstash logging, graceful shutdown, near-100% test
+  coverage), not just POC/benchmark-quality code proving the path's viability — this line
+  described the state before that phase and is kept only as the historical record of what
+  the fifth-phase e2e test (below) was validating at the time. It remains, deliberately, a
+  synchronous single-node prototype with no job-store DB, queue, DLQ, or audit trail — see
+  the plan document's "Target is a hardened prototype" framing for what was explicitly not
+  in scope.
 - `ippfix`'s template-overlay path is broken for filtered `requested-attributes`
   requests (see fifth-phase entry above) — fine for one-shot `driverless` PPD
   generation, not safe yet as a persistent runtime proxy in front of real print traffic.

@@ -36,6 +36,36 @@ import (
 )
 
 func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	if err := run(ctx, stop, os.Args, os.Getenv); err != nil {
+		os.Exit(1)
+	}
+}
+
+// run holds every step of startup, request serving, and shutdown that main()
+// used to do inline, returning an error instead of calling os.Exit directly
+// at each failure site. main() is now a thin os.Exit wrapper around this —
+// the standard Go testable-main pattern, adopted specifically because
+// os.Exit/signal handling/a blocking ListenAndServe made the previous shape
+// untestable (approved as part of A8 stage 1's scope, landed here in stage 7
+// once every other package had its own test coverage to build on).
+//
+// ctx is the one signal.NotifyContext(SIGINT, SIGTERM) builds in main — the
+// standard three-parameter testable-main signature is (ctx, args, getenv),
+// but a graceful-shutdown test needs to trigger the shutdown path
+// deterministically (a plain context.WithCancel, not a real OS signal —
+// this project has already hit real cross-platform signal-delivery
+// differences once, see A3's history, and this refactor should not
+// reintroduce that dependency into a test), and the shutdown branch below
+// must call stop() partway through, not only in main's deferred call, so a
+// second signal reverts to default (immediate-kill) disposition instead of
+// being silently absorbed by a context that has already fired once. Passing
+// stopSignals separately from ctx is what lets a test drive the shutdown
+// path with a cancellable context while still exercising that same
+// stop-call — pass a no-op when ctx isn't from signal.NotifyContext.
+func run(ctx context.Context, stopSignals func(), args []string, getenv func(string) string) error {
 	// Constructed WITHOUT a Host: GetLoggerWithSettings' own internal
 	// setLogstashLogger call swallows a dial failure and reports success
 	// regardless (logs@v1.5.2/logs.go), so giving it nothing to dial and
@@ -54,10 +84,10 @@ func main() {
 	logger, _ := logs.GetLoggerWithSettings(logs.LogsSettings{Format: logs.FormatJSON}, config.ServiceName)
 	startupMeta := &logs.LogMetaData{Service: config.ServiceName}
 
-	cfg, err := config.Load(os.Args, os.Getenv)
+	cfg, err := config.Load(args, getenv)
 	if err != nil {
 		logger.LogError(fmt.Sprintf("invalid configuration: %v", err), startupMeta)
-		os.Exit(1)
+		return err
 	}
 
 	// Set before anything else logs, so PRINT_GATEWAY_LOG_LEVEL actually
@@ -89,7 +119,7 @@ func main() {
 		// "invalid configuration" during an outage should not be misdirected
 		// at env/flag parsing.
 		logger.LogError(fmt.Sprintf("cannot start: %v", err), startupMeta)
-		os.Exit(1)
+		return err
 	}
 	cfg.AuthToken = token
 	logger.LogInfo(fmt.Sprintf("print token resolved from %s", tokenSource), startupMeta)
@@ -135,9 +165,6 @@ func main() {
 	api := httpapi.New(cfg, logger, svc, presigner)
 	server := httpapi.NewServer(api)
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
 	serveErr := make(chan error, 1)
 	go func() {
 		logger.LogInfo(fmt.Sprintf("print gateway (prototype) listening on %s", cfg.Addr), startupMeta)
@@ -148,20 +175,22 @@ func main() {
 	case err := <-serveErr:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.LogError(fmt.Sprintf("server exited: %v", err), startupMeta)
-			os.Exit(1)
+			return err
 		}
+		return nil
 
 	case <-ctx.Done():
-		stop() // restore default signal behavior so a second signal can force-kill
+		stopSignals() // restore default signal behavior so a second signal can force-kill
 		logger.LogInfo("shutdown signal received, draining in-flight requests", startupMeta)
 
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownGrace)
 		defer cancel()
 		if err := server.Shutdown(shutdownCtx); err != nil {
 			logger.LogError(fmt.Sprintf("graceful shutdown did not complete within %s: %v", cfg.ShutdownGrace, err), startupMeta)
-			os.Exit(1)
+			return err
 		}
 		logger.LogInfo("shutdown complete", startupMeta)
+		return nil
 	}
 }
 
