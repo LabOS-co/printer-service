@@ -1,0 +1,30 @@
+[Unit]
+# G1: HLD/STATUS.md names ippfix.service three times as what makes this
+# proxy survive a reboot, but the unit itself was never committed to the
+# repo - it existed only inside the live WSL distro and was lost on every
+# reinstall. This is that file.
+Description=ippfix - IPP fix-up reverse proxy (printer firmware workaround)
+After=network.target
+
+[Service]
+Type=simple
+User=ippfix
+Group=ippfix
+WorkingDirectory=/opt/ippfix
+
+# -listen/-target/-template are this printer fleet's specifics, not
+# secrets - edit them here per deployment rather than through an
+# EnvironmentFile (ippfix takes flags, not env vars; see main.go's flag
+# definitions). -template must point at a file already generated via
+# `ippfix -gen-template` for this exact printer (see CLAUDE.md's ippfix
+# section) - install-services.sh does not generate one for you.
+ExecStart=/opt/ippfix/ippfix -listen :6310 -target http://192.168.252.210:631 -template /opt/ippfix/printer-template.json
+
+Restart=always
+RestartSec=2s
+
+NoNewPrivileges=true
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target

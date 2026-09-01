@@ -1,0 +1,55 @@
+[Unit]
+# G1: version-controlled so `systemctl is-active printgateway` survives a
+# WSL distro reinstall (HLD/STATUS.md already names this requirement for
+# ippfix; before this file, printgateway had no unit at all, despite
+# CLAUDE.md's own lesson that a long-running WSL process not run as a
+# systemd unit does not survive the invoking shell exiting, let alone a
+# reboot).
+Description=LAB-16894 Print Gateway (prototype)
+After=network.target cups.service
+Wants=cups.service
+
+[Service]
+Type=simple
+
+# Never root: this process shells out to `lp` and, once S3/Vault are
+# configured, holds bucket and Vault credentials in its own environment.
+# install-services.sh creates this system user if it does not already exist.
+User=printgateway
+Group=printgateway
+
+WorkingDirectory=/opt/printgateway
+ExecStart=/opt/printgateway/printgateway-linux-amd64
+
+# Every secret this process can hold - PRINT_GATEWAY_TOKEN, VAULT_TOKEN /
+# SECRET_STORE_USERNAME+PASSWORD, PRINT_GATEWAY_S3_ACCESS_KEY/SECRET_KEY -
+# belongs in this file (root:root, mode 600), never inlined here: unit files
+# under /etc/systemd/system are commonly world-readable, and `systemctl
+# show`/`systemctl cat` print Environment= lines verbatim in their output.
+EnvironmentFile=/etc/printgateway/printgateway.env
+
+# HOST_NAME via a systemd specifier (no secret, safe to inline); HOST_IP has
+# no equivalent specifier and belongs in the EnvironmentFile above instead.
+# Both are read by go-packages/logs' getLogFields once Workstream D's
+# logstash shipping is configured (LOG_SERVER set) - left unset, every
+# shipped log record's host fields render as the literal string "NO_VAL",
+# making per-host filtering in Kibana useless.
+Environment=HOST_NAME=%H
+
+Restart=always
+RestartSec=2s
+
+# Defence in depth for a process that already defends itself (SSRF guard,
+# per-body size limits, a non-root user above): a compromised process still
+# gains nothing from the rest of the filesystem or from privilege
+# escalation. PrivateTmp gives it its own writable /tmp regardless of
+# ProtectSystem's read-only bind - spoolTo (internal/printgw/spool.go)
+# writes the document being printed there, so it's the one path that must
+# stay writable, and this is enough on its own (no separate ReadWritePaths=
+# needed: PrivateTmp's mount is layered on top of ProtectSystem's).
+NoNewPrivileges=true
+ProtectSystem=strict
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

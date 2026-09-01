@@ -6,7 +6,13 @@
 #   - any short-lived filter/renderer child processes CUPS forks per job to
 #     actually convert PDF -> raster (gs, pdftopdf, gstoraster, rastertopwg,
 #     etc.) - analogous to SumatraPDF.exe on the Windows side.
-cd /mnt/c/printerSearch/HDL/WSL
+set -uo pipefail
+
+# BASE comes from this script's own location, not a hardcoded path that has
+# been stale (and case-typo'd) since the working copy moved to
+# C:\GitProjects\printer-server - see setup-emulators.sh's comment.
+BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$BASE"
 
 CUPSD_PID=$(pgrep -x cupsd | head -1)
 if [ -z "$CUPSD_PID" ]; then
@@ -45,6 +51,18 @@ sampler() {
 sampler &
 SAMPLER_PID=$!
 
+# Without this, Ctrl-C (or any early exit - a bad flag rejected by
+# `printersearch bench` itself, since that failure is deliberately NOT fatal
+# to this script - see `set -uo pipefail` above, no `-e`) orphaned the 10ms
+# sampler loop, left running forever until the shell that started it exited.
+# Idempotent against the explicit kill/wait below on the normal path: a
+# process already reaped just makes kill/wait fail quietly.
+cleanup_sampler() {
+  kill "$SAMPLER_PID" 2>/dev/null || true
+  wait "$SAMPLER_PID" 2>/dev/null || true
+}
+trap cleanup_sampler EXIT
+
 ./printersearch bench "$@"
 BENCH_EXIT=$?
 
@@ -52,8 +70,7 @@ BENCH_EXIT=$?
 # to actually spawn and finish before stopping the sampler and reporting.
 sleep 8
 
-kill "$SAMPLER_PID" 2>/dev/null
-wait "$SAMPLER_PID" 2>/dev/null
+cleanup_sampler
 
 echo ""
 echo "=== cupsd + filter/renderer resource usage during the run ==="

@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 PRINTERS=(
   "hp-laserjet:9101:1"

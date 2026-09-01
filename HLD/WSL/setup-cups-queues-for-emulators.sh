@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 lpadmin -x vp 2>/dev/null || true
 for n in 1 2 3; do
   port=$((9000 + n))

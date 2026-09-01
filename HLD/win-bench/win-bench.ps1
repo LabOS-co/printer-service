@@ -1,5 +1,9 @@
+# $PSScriptRoot is this script's own directory - used to default $File
+# relative to the actual checkout location instead of a hardcoded
+# C:\printerSearch path that has been stale (and case-typo'd, HDL vs HLD)
+# since the working copy moved to C:\GitProjects\printer-server.
 param(
-    [string]$File = "C:\printerSearch\HDL\WSL\printDemo.pdf",
+    [string]$File = (Join-Path (Split-Path $PSScriptRoot -Parent) "WSL\printDemo.pdf"),
     [string]$Printer = "BenchFilePrinter",
     [string]$Sumatra = "\\gaia\netlims$\AutoLims\MainRls\bin\SumatraPDF.exe",
     [int]$Requests = 30,
