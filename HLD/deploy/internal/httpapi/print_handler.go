@@ -2,12 +2,15 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"mime"
 	"net/http"
 	"path"
 	"strings"
 
 	"printgateway/internal/apperr"
+	"printgateway/internal/config"
 	"printgateway/internal/printgw"
 )
 
@@ -27,7 +30,7 @@ func (a *API) printHandler(w http.ResponseWriter, r *http.Request) {
 	contentType := r.Header.Get("Content-Type")
 
 	switch {
-	case strings.HasPrefix(contentType, "multipart/form-data"):
+	case isMultipart(contentType):
 		a.handleMultipart(w, r)
 	case strings.HasPrefix(contentType, "application/json"):
 		a.handleURLReference(w, r)
@@ -39,6 +42,22 @@ func (a *API) printHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// isMultipart reports whether contentType names a multipart/form-data
+// request, matching on the parsed media type (case-insensitively, per RFC
+// 9110) rather than a literal prefix. Shared with the maxBytes middleware,
+// which must agree with this dispatch on which requests get the larger
+// upload limit rather than the tighter JSON one — two independent
+// case-sensitive checks that happened to agree today would silently
+// diverge the moment either one were "corrected" to be RFC-compliant on
+// its own.
+func isMultipart(contentType string) bool {
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(mediaType, "multipart/form-data")
+}
+
 // Option 1: the caller attaches the file itself.
 // multipart fields: "printer" (text), "file" (the file part).
 //
@@ -47,8 +66,12 @@ func (a *API) printHandler(w http.ResponseWriter, r *http.Request) {
 // — unlike printgw's errors, which come from the filesystem/subprocess/
 // network and must stay out of the response body (see apperr.HTTPError).
 func (a *API) handleMultipart(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseMultipartForm(64 << 20); err != nil { // 64MB in-memory threshold, rest spills to disk
-		a.fail(w, r, &apperr.HTTPError{Status: http.StatusBadRequest, Public: fmt.Sprintf("invalid multipart body: %v", err)})
+	// In-memory threshold only; the hard cap on the whole body is
+	// a.cfg.MaxUploadBytes, already enforced by the maxBytes middleware
+	// before this handler ever runs (see config.DefaultMultipartMemoryBytes
+	// for why these are deliberately different values).
+	if err := r.ParseMultipartForm(config.DefaultMultipartMemoryBytes); err != nil {
+		a.fail(w, r, bodyErr(err, "invalid multipart body"))
 		return
 	}
 	printer := r.FormValue("printer")
@@ -87,7 +110,7 @@ type urlPrintRequest struct {
 func (a *API) handleURLReference(w http.ResponseWriter, r *http.Request) {
 	var req urlPrintRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		a.fail(w, r, &apperr.HTTPError{Status: http.StatusBadRequest, Public: fmt.Sprintf("invalid JSON body: %v", err)})
+		a.fail(w, r, bodyErr(err, "invalid JSON body"))
 		return
 	}
 	if req.Printer == "" {
@@ -137,6 +160,28 @@ func (a *API) handleURLReference(w http.ResponseWriter, r *http.Request) {
 // and what request actually reaches the store.
 func validObjectKey(key string) bool {
 	return path.Clean("/"+key) == "/"+key
+}
+
+// bodyErr classifies an error from reading or decoding a request body.
+// what describes what was being parsed (e.g. "invalid JSON body"), matching
+// the message shape every call site already used before this existed.
+//
+// A *http.MaxBytesError — produced when the maxBytes middleware's
+// http.MaxBytesReader cuts a read short — means the client's own body
+// exceeded the configured limit, not that it was malformed; that is a 413
+// naming the limit, not the generic 400 every other parsing mistake here
+// gets. Without this, a caller hitting the size limit saw the same 400 as a
+// caller who sent garbage, with no way to tell the two apart from the
+// response alone.
+func bodyErr(err error, what string) *apperr.HTTPError {
+	var maxBytesErr *http.MaxBytesError
+	if errors.As(err, &maxBytesErr) {
+		return &apperr.HTTPError{
+			Status: http.StatusRequestEntityTooLarge,
+			Public: fmt.Sprintf("request body exceeds the %d byte limit", maxBytesErr.Limit),
+		}
+	}
+	return &apperr.HTTPError{Status: http.StatusBadRequest, Public: fmt.Sprintf("%s: %v", what, err)}
 }
 
 func (a *API) writeSuccess(w http.ResponseWriter, r *http.Request, printer string, result printgw.SubmitResult) {

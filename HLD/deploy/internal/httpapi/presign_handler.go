@@ -65,7 +65,7 @@ func (a *API) presignHandler(w http.ResponseWriter, r *http.Request) {
 
 	var req presignRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		a.fail(w, r, &apperr.HTTPError{Status: http.StatusBadRequest, Public: fmt.Sprintf("invalid JSON body: %v", err)})
+		a.fail(w, r, bodyErr(err, "invalid JSON body"))
 		return
 	}
 	if req.Key == "" {
@@ -135,7 +135,7 @@ func (a *API) presignHandler(w http.ResponseWriter, r *http.Request) {
 	// whoever holds it — the one operation in this service that hands out
 	// object-store credentials by proxy — so who requested it, for which
 	// key and method, is worth a line on its own rather than only the
-	// generic access log a future accessLog middleware would add. Never the
+	// generic access log the accessLog middleware already adds. Never the
 	// URL itself: it IS the credential.
 	md, _ := a.requestMeta(r)
 	a.logger.LogInfo(fmt.Sprintf("presigned %s issued: key=%q ttl=%s", method, req.Key, ttl), md)

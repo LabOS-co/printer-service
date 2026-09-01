@@ -67,6 +67,38 @@ const (
 	DefaultIdleTimeout    = 60 * time.Second
 	DefaultMaxHeaderBytes = 64 << 10 // 64 KiB
 
+	// DefaultMaxUploadBytes bounds a multipart/form-data request body — the
+	// maxBytes middleware wraps r.Body in http.MaxBytesReader with this limit
+	// before requireToken or handleMultipart ever runs, so an oversized
+	// upload is rejected while still being read, not after it has already
+	// been spooled. This is the hard cap only — see
+	// DefaultMultipartMemoryBytes for why ParseMultipartForm's own parameter
+	// is deliberately a different, non-configurable value rather than this
+	// one.
+	DefaultMaxUploadBytes int64 = 64 << 20 // 64 MiB
+	MaxUploadBytesEnv           = "PRINT_GATEWAY_MAX_UPLOAD_BYTES"
+
+	// DefaultMultipartMemoryBytes is ParseMultipartForm's in-memory
+	// threshold (handleMultipart), deliberately NOT DefaultMaxUploadBytes.
+	// That parameter is not a cap: mime/multipart's own doc says it "stores
+	// up to maxMemory bytes […] in memory, with the remainder stored on
+	// disk" — passing MaxUploadBytes would mean raising
+	// PRINT_GATEWAY_MAX_UPLOAD_BYTES (the entire point of that env var)
+	// raises resident memory per concurrent upload by the same amount, with
+	// no concurrency limit on /print to bound the total (see README's
+	// "deliberately not here yet" list). Verified live: a 3 MiB part is
+	// disk-backed with a 1 MiB threshold and fully RAM-resident at 64/512
+	// MiB. Not configurable on purpose — this is an internal memory/disk
+	// tradeoff, not a policy an operator needs a lever for.
+	DefaultMultipartMemoryBytes int64 = 1 << 20 // 1 MiB
+
+	// DefaultMaxJSONBytes bounds every non-multipart request body (the JSON
+	// print-by-reference intake and /files/presign) the same way — both are
+	// small, structured payloads with no legitimate reason to be large, so
+	// the limit is far tighter than the upload one.
+	DefaultMaxJSONBytes int64 = 8 << 10 // 8 KiB
+	MaxJSONBytesEnv           = "PRINT_GATEWAY_MAX_JSON_BYTES"
+
 	// DefaultShutdownGrace must exceed max(FetchTimeout,S3Timeout)+SubmitTimeout
 	// (validate's other budget check) — 60s+30s at these defaults, so 2m
 	// leaves comfortable headroom. validate takes the max of Fetch/S3 rather
@@ -232,6 +264,11 @@ type Config struct {
 	IdleTimeout       time.Duration
 	MaxHeaderBytes    int
 
+	// MaxUploadBytes/MaxJSONBytes bound an inbound request body by
+	// Content-Type (see the maxBytes middleware in internal/httpapi).
+	MaxUploadBytes int64
+	MaxJSONBytes   int64
+
 	// ShutdownGrace bounds how long Shutdown waits for in-flight requests
 	// to finish before main forces an exit.
 	ShutdownGrace time.Duration
@@ -319,6 +356,8 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 		WriteTimeout:      DefaultWriteTimeout,
 		IdleTimeout:       DefaultIdleTimeout,
 		MaxHeaderBytes:    DefaultMaxHeaderBytes,
+		MaxUploadBytes:    DefaultMaxUploadBytes,
+		MaxJSONBytes:      DefaultMaxJSONBytes,
 		ShutdownGrace:     DefaultShutdownGrace,
 		SubmitTimeout:     DefaultSubmitTimeout,
 
@@ -376,6 +415,18 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 	cfg.FetchMaxBytes = fn
+
+	upn, err := overrideBytes64(getenv, MaxUploadBytesEnv, cfg.MaxUploadBytes)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.MaxUploadBytes = upn
+
+	jn, err := overrideBytes64(getenv, MaxJSONBytesEnv, cfg.MaxJSONBytes)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.MaxJSONBytes = jn
 
 	allowPrivate, err := overrideBool(getenv, AllowPrivateTargetsEnv, cfg.AllowPrivateTargets)
 	if err != nil {

@@ -93,6 +93,11 @@ Failure returns a non-2xx HTTP status with a labOS-standard error envelope
 The failure detail is in `errorDetails.details`; check the server's own log
 output too — every request (success or failure) is logged there as well.
 
+A request body over the configured size limit (see "Timeouts, limits, and
+shutdown" below) gets `413`, naming the limit in `errorDetails.details`,
+rather than the generic `400` every other malformed-body case gets — the two
+are otherwise indistinguishable from the response alone.
+
 ## Access control
 
 The server is closed to anything that is not the calling system, in two
@@ -296,6 +301,23 @@ queryable `job_id` field only once logstash shipping is configured (see
 "Logging" below) — local console output still prints message text only, not
 structured fields, regardless.
 
+Every request also gets exactly one completion line via `logs.LogAPICompletion`
+(`job_id`/`duration`/`status`), including a 401 or an oversized-body
+rejection, emitted regardless of outcome — even a panic still produces one.
+If the panic happens before the handler wrote anything, the client gets a
+clean `500` and the logged `status` matches it. If the panic happens after
+the handler already started writing a response, the connection is aborted
+outright instead — a corrupted-but-parseable `200` is worse than no response
+at all — and the logged `status` reflects whatever was already sent before
+the panic, not a fabricated `500`.
+
+On local console output, `LogAPICompletion` renders as a message-less,
+timestamp-only blank line per request — `logs`' console/JSON formatters both
+build the human-readable text from the *message* argument, which this call
+never has one of (only structured fields); this is an upstream `logs`
+behavior, not something settable from here. The structured fields (and a
+real message) only show up once logstash shipping is configured.
+
 ```bash
 PRINT_GATEWAY_TOKEN='<the shared secret>' ./printgateway-linux-amd64
 ```
@@ -372,6 +394,8 @@ than silently keeping the default:
 | S3 (`s3_key`) timeout | 60s | `PRINT_GATEWAY_S3_TIMEOUT` | Go duration, positive |
 | S3 (`s3_key`) max size | 64 MiB | `PRINT_GATEWAY_S3_MAX_BYTES` | plain integer **number of bytes** |
 | Presign expiry (default and cap) | 15m | `PRINT_GATEWAY_PRESIGN_TTL` | Go duration, positive |
+| Max upload (`multipart/form-data`) body | 64 MiB | `PRINT_GATEWAY_MAX_UPLOAD_BYTES` | plain integer **number of bytes** |
+| Max JSON body (`application/json`, incl. `/files/presign`) | 8 KiB | `PRINT_GATEWAY_MAX_JSON_BYTES` | plain integer **number of bytes** |
 
 Zero and negative durations are rejected on purpose: `net/http` guards every
 timeout with `if d > 0`, so `0` or `-5s` does not mean "very short", it means
@@ -392,6 +416,14 @@ timeouts, since a single request only ever exercises one of `file_url`/
 them instead would have tightened this budget — and the shutdown-grace one
 below it — for every deployment the moment `PRINT_GATEWAY_S3_TIMEOUT` got a
 default, whether or not object storage is even configured.
+
+Every request body is also bounded before it is read, regardless of which
+route or auth outcome follows: `multipart/form-data` up to the max-upload
+size, everything else (the JSON print-by-reference intake, `/files/presign`)
+up to the much smaller max-JSON size. This is wired above authentication —
+`http.MaxBytesReader` is lazy, so wrapping the body early costs nothing and
+makes "the body is bounded" true of the whole request handling stack, not
+just of whichever handler happens to parse it.
 
 On `SIGINT`/`SIGTERM` the server stops accepting new connections and waits
 up to the shutdown grace period for in-flight requests to finish before the
