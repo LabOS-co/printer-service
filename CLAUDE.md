@@ -130,9 +130,12 @@ an `_en` English twin. Each script writes exactly one file, named at the bottom 
 
 ## Environment gotchas (this machine)
 
-- **Paths in the scripts are stale.** `HLD/WSL/*.sh`, `HLD/win-bench/win-bench.ps1` and several
-  comments hardcode `C:\printerSearch` / `/mnt/c/printerSearch`, but the working copy is now
-  `C:\GitProjects\printer-server`. Any script you run or edit needs its `BASE`/paths updated first.
+- **Fixed (2026-09-01, Workstream G2):** `HLD/WSL/*.sh` and `HLD/win-bench/win-bench.ps1` used to
+  hardcode `C:\printerSearch` / `/mnt/c/printerSearch` (a path that hasn't existed since the working
+  copy became `C:\GitProjects\printer-server`, with a case typo — `HDL` vs `HLD` — that only worked
+  because drvfs is case-insensitive). Each now derives its base path from its own location instead.
+  Some in-repo *comments* (this file included, historically) may still cite the old path when
+  describing something that predates the fix — that's prose, not something a script reads.
 - Git Bash/MSYS mangles Unix-looking paths passed through `wsl.exe` or `docker exec`
   (`/mnt/c/...`, `/printers/brother-fixed`) — prefix such commands with `MSYS_NO_PATHCONV=1`.
 - Long-running processes in WSL must be **systemd units**. `wsl.exe ... bash -c "... &"` does not
