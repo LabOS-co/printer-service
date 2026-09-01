@@ -39,7 +39,24 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx, stop, os.Args, os.Getenv); err != nil {
+	// Constructed WITHOUT a Host: GetLoggerWithSettings' own internal
+	// setLogstashLogger call swallows a dial failure and reports success
+	// regardless (logs@v1.5.2/logs.go), so giving it nothing to dial and
+	// calling logger.SetLogstashLogger ourselves inside run — whose error we
+	// DO check — is what lets a broken logstash address actually be noticed.
+	// FormatJSON is what makes LogMetaData's fields (job_id, status,
+	// duration, ...) queryable once they reach logstash; console output
+	// stays human-readable regardless (createLogstashLogger always sets
+	// ConsoleFormatter for it) but now goes to stderr — logrus.New()'s
+	// default — rather than the old GetConsoleLogger()'s stdout. A wrapper
+	// that only captured stdout needs updating.
+	//
+	// The discarded error is safe today: GetLoggerWithSettings has no
+	// failure path of its own (it does no I/O; that's exactly why run drives
+	// SetLogstashLogger separately), so it always returns nil.
+	logger, _ := logs.GetLoggerWithSettings(logs.LogsSettings{Format: logs.FormatJSON}, config.ServiceName)
+
+	if err := run(ctx, stop, os.Args, os.Getenv, logger); err != nil {
 		os.Exit(1)
 	}
 }
@@ -52,36 +69,34 @@ func main() {
 // untestable (approved as part of A8 stage 1's scope, landed here in stage 7
 // once every other package had its own test coverage to build on).
 //
-// ctx is the one signal.NotifyContext(SIGINT, SIGTERM) builds in main — the
-// standard three-parameter testable-main signature is (ctx, args, getenv),
-// but a graceful-shutdown test needs to trigger the shutdown path
-// deterministically (a plain context.WithCancel, not a real OS signal —
-// this project has already hit real cross-platform signal-delivery
-// differences once, see A3's history, and this refactor should not
-// reintroduce that dependency into a test), and the shutdown branch below
-// must call stop() partway through, not only in main's deferred call, so a
-// second signal reverts to default (immediate-kill) disposition instead of
-// being silently absorbed by a context that has already fired once. Passing
-// stopSignals separately from ctx is what lets a test drive the shutdown
-// path with a cancellable context while still exercising that same
-// stop-call — pass a no-op when ctx isn't from signal.NotifyContext.
-func run(ctx context.Context, stopSignals func(), args []string, getenv func(string) string) error {
-	// Constructed WITHOUT a Host: GetLoggerWithSettings' own internal
-	// setLogstashLogger call swallows a dial failure and reports success
-	// regardless (logs@v1.5.2/logs.go), so giving it nothing to dial and
-	// calling logger.SetLogstashLogger ourselves below — whose error we DO
-	// check — is what lets a broken logstash address actually be noticed.
-	// FormatJSON is what makes LogMetaData's fields (job_id, status,
-	// duration, ...) queryable once they reach logstash; console output
-	// stays human-readable regardless (createLogstashLogger always sets
-	// ConsoleFormatter for it) but now goes to stderr — logrus.New()'s
-	// default — rather than the old GetConsoleLogger()'s stdout. A wrapper
-	// that only captured stdout needs updating.
-	//
-	// The discarded error is safe today: GetLoggerWithSettings has no
-	// failure path of its own (it does no I/O; that's exactly why we drive
-	// SetLogstashLogger separately below), so it always returns nil.
-	logger, _ := logs.GetLoggerWithSettings(logs.LogsSettings{Format: logs.FormatJSON}, config.ServiceName)
+// Two deliberate additions beyond the standard three-parameter
+// (ctx, args, getenv) shape, both fixed after an Opus review found the
+// first draft's justification for stopSignals didn't hold up:
+//
+//   - logger is injected rather than constructed inside run. A test needs
+//     to assert which log line fired (which source resolved a secret, which
+//     warning survived a log level, whether a completion line fired at all)
+//     without driving the real logs.GetLoggerWithSettings — that concrete
+//     logger's logstashLogger increments an unsynchronized package-global
+//     sequence number on every call (logs@v1.5.2/logstash_logger.go), so
+//     four parallel tests each logging through it is a real, reviewer-
+//     confirmed data race, the same reason every other package in this
+//     module takes a logs.Logger parameter instead of constructing one.
+//   - stopSignals is passed separately from ctx so the shutdown branch can
+//     call it partway through (restoring default signal disposition before
+//     Shutdown, not only in main's deferred call, so a second signal
+//     force-kills instead of being silently absorbed by an already-fired
+//     context) while a test still drives that branch with a plain
+//     context.WithCancel rather than a real OS signal. A 3-parameter
+//     version (deriving signal.NotifyContext from a passed-in parent
+//     context inside run itself) is possible and was prototyped during
+//     review — it is not the reason this parameter exists. The real reason:
+//     that version registers a live SIGINT/SIGTERM handler in the test
+//     process on every call, which four parallel tests would install and
+//     tear down concurrently, leaving the test binary briefly
+//     un-interruptible by Ctrl-C. Keeping signal registration in main,
+//     entirely outside what any test constructs, avoids that.
+func run(ctx context.Context, stopSignals func(), args []string, getenv func(string) string, logger logs.Logger) error {
 	startupMeta := &logs.LogMetaData{Service: config.ServiceName}
 
 	cfg, err := config.Load(args, getenv)
@@ -97,6 +112,11 @@ func run(ctx context.Context, stopSignals func(), args []string, getenv func(str
 		logger.LogError(fmt.Sprintf("%s: invalid level %q, defaulting to info: %v", config.LogLevelEnv, cfg.LogLevel, err), startupMeta)
 	}
 
+	// SetLogstashLogger opens a UDP socket the logs.Logger interface has no
+	// way to close; harmless under main (the process holds it until exit)
+	// but worth naming here since run is now callable repeatedly in one
+	// process — a future test that sets LOG_SERVER would leak one socket per
+	// call unless the injected logger owns its own lifecycle.
 	if host, port, source := secrets.ResolveLogServer(cfg, logger, startupMeta); host != "" {
 		if err := logger.SetLogstashLogger(host, port); err != nil {
 			logger.LogError(fmt.Sprintf("logstash dial to %s:%d (%s) failed: %v; continuing with console-only logging",
