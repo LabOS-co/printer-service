@@ -80,14 +80,16 @@ func runBench(args []string) {
 	pollInterval := fs.Duration("poll-interval", 20*time.Millisecond, "how often to poll job-state when -wait-completion is set")
 	pollTimeout := fs.Duration("poll-timeout", 30*time.Second, "give up waiting for job completion after this long")
 	jsonOutput := fs.Bool("json", false, "emit the report as JSON instead of human-readable text (for diffing numbers across runs)")
+	timeout := fs.Duration("timeout", 0, "per-request timeout for every worker's HTTP client (0 = the 60s default)")
 	fs.Parse(args)
+	setClientTimeout(*timeout)
 
 	if *requests <= 0 {
-		fmt.Println("error: -requests must be a positive number")
+		fmt.Fprintln(os.Stderr, "error: -requests must be a positive number")
 		os.Exit(1)
 	}
 	if *concurrency <= 0 {
-		fmt.Println("error: -concurrency must be a positive number")
+		fmt.Fprintln(os.Stderr, "error: -concurrency must be a positive number")
 		os.Exit(1)
 	}
 
@@ -108,20 +110,20 @@ func runBench(args []string) {
 			}
 			n, err := strconv.Atoi(p)
 			if err != nil {
-				fmt.Printf("invalid port %q: %v\n", p, err)
+				fmt.Fprintf(os.Stderr, "invalid port %q: %v\n", p, err)
 				os.Exit(1)
 			}
 			targets = append(targets, target{port: n, path: *path})
 		}
 	}
 	if len(targets) == 0 {
-		fmt.Println("error: -ports or -paths must list at least one target")
+		fmt.Fprintln(os.Stderr, "error: -ports or -paths must list at least one target")
 		os.Exit(1)
 	}
 
 	data, err := os.ReadFile(*file)
 	if err != nil {
-		fmt.Printf("error reading file %s: %v\n", *file, err)
+		fmt.Fprintf(os.Stderr, "error reading file %s: %v\n", *file, err)
 		os.Exit(1)
 	}
 
@@ -169,7 +171,7 @@ func runBench(args []string) {
 				})
 
 				t0 := time.Now()
-				resp, err := sendIPP(endpoint, req, bytes.NewReader(data))
+				resp, err := sendIPP(endpoint, req, bytes.NewReader(data), int64(len(data)))
 				elapsed := time.Since(t0)
 
 				r := benchResult{target: tgt, elapsed: elapsed}
@@ -235,7 +237,7 @@ func pollJobCompletion(host string, port int, path string, jobID int32, interval
 		req := buildRequest(opGetJobAttributes, 1, uri, currentUser(), func(buf *bytes.Buffer) {
 			writeIntegerAttribute(buf, tagInteger, "job-id", jobID)
 		})
-		resp, err := sendIPP(endpoint, req, nil)
+		resp, err := sendIPP(endpoint, req, nil, 0)
 		if err == nil && resp.StatusCode < 0x0100 {
 			state := findIntAttr(resp.Attributes, "job-state")
 			if state == 7 || state == 8 || state == 9 {

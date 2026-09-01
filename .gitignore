@@ -4,8 +4,14 @@
 /ippfix/ippfix-linux
 /HLD/WSL/printersearch
 /HLD/WSL/printersearch-linux
+# printersearch-hld: `go build` with no -o names its output after the
+# module's last path element (HLD/WSL's module was renamed from
+# printersearch to printersearch-hld in B5 to resolve a module-path
+# collision with the frozen root module of the same original name).
+/HLD/WSL/printersearch-hld
 /HLD/WSL/ippfix/ippfix
 /HLD/deploy/printgateway-linux-amd64
+/HLD/deploy/printgateway
 
 # Node (HLD/*.docx generator scripts)
 /HLD/node_modules/

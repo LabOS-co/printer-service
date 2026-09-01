@@ -6,16 +6,89 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"time"
+	"unicode/utf8"
 )
 
-// ippClientTimeout bounds the whole request/response round trip (dial through
-// reading the body). Without it, a target that accepts the TCP connection but
-// never answers - a wedged cupsd, a dropped firewall rule - blocks the caller
-// forever; for `bench -wait-completion` that meant a worker never returned and
-// the whole run hung with no output at all, which is worse than the give-up
+// ippClientTimeout is httpClient's default Timeout, overridable per
+// subcommand via -timeout (see setClientTimeout). Bounds the whole
+// request/response round trip (dial through reading the body): without it,
+// a target that accepts the TCP connection but never answers - a wedged
+// cupsd, a dropped firewall rule - blocks the caller forever; for
+// `bench -wait-completion` that meant a worker never returned and the
+// whole run hung with no output at all, which is worse than the give-up
 // -poll-timeout is supposed to produce.
 const ippClientTimeout = 60 * time.Second
+
+// httpClient is shared across every sendIPP call instead of allocating one
+// per call (B4) - not for connection pooling (a nil Transport already
+// defaults to http.DefaultTransport, so a fresh *http.Client per call
+// reused the pool just as well), but so -timeout applies uniformly from one
+// place, including to bench's many concurrent goroutines. Safe for
+// concurrent use (http.Client's own contract); Timeout is set once via
+// setClientTimeout before any goroutine starts (every call site parses
+// flags and calls setClientTimeout before spawning workers), never mutated
+// concurrently with a request in flight.
+var httpClient = &http.Client{Timeout: ippClientTimeout}
+
+// setClientTimeout applies a -timeout flag value (0 = keep the default) to
+// the shared client. Called once per subcommand, before any sendIPP call.
+func setClientTimeout(d time.Duration) {
+	if d == 0 {
+		return
+	}
+	if d < 0 {
+		fmt.Fprintf(os.Stderr, "error: -timeout must be positive, got %s\n", d)
+		os.Exit(1)
+	}
+	httpClient.Timeout = d
+}
+
+// maxIPPResponseBytes bounds how much of a response body sendIPP will read.
+// Get-Printer-Attributes/Get-Jobs responses are metadata, not documents; a
+// misbehaving or malicious endpoint returning something drastically larger
+// should be rejected rather than fully buffered into memory.
+const maxIPPResponseBytes = 16 << 20 // 16 MiB
+
+// maxIPPFieldLen is the largest name/value length IPP's own framing can
+// encode in one attribute: RFC 8010's length prefix is a uint16. Without
+// this guard, a name/value longer than this truncates only the LENGTH
+// PREFIX (uint16(len(s)) wraps silently) while the FULL string is still
+// written after it - desyncing every byte of the message that follows, not
+// just this one field's content. The only externally-influenced input that
+// can realistically reach this is a job name/title built from a long file
+// path or an explicit -job-name flag; every other caller here passes a
+// short, hardcoded attribute/keyword name.
+const maxIPPFieldLen = 65535
+
+// ippSafeString clamps s to at most maxIPPFieldLen bytes so the length
+// prefix written to the wire and the bytes actually written always agree.
+// kind/name identify the field in the warning printed to stderr only when
+// truncation actually happens - built lazily, in the truncation branch, not
+// on every call: this runs per attribute per request (bench.go calls it up
+// to hundreds of times per run), and building a label string on every
+// non-truncating call is a needless allocation in a benchmarking tool's own
+// worker loop.
+//
+// The clamp backs off to the nearest rune boundary at or below
+// maxIPPFieldLen rather than cutting at the raw byte index: IPP's own
+// attributes-charset declaration (buildRequest) promises utf-8, and a value
+// truncated mid-rune is invalid utf-8 in a message that says otherwise - a
+// strict server can reject the whole request over that, not just this one
+// field. Backing off can only ever shrink the cut, never grow it, so the
+// uint16 length prefix stays correct either way.
+func ippSafeString(kind, name, s string) string {
+	if len(s) <= maxIPPFieldLen {
+		return s
+	}
+	n := maxIPPFieldLen
+	for n > 0 && !utf8.ValidString(s[:n]) {
+		n--
+	}
+	fmt.Fprintf(os.Stderr, "warning: %s %q is %d bytes, truncating to %d (IPP's length prefix is a uint16)\n", kind, name, len(s), n)
+	return s[:n]
+}
 
 // IPP value tags (RFC 8010). tagUnsupported (the out-of-band "unsupported"
 // value, not the 0x05 unsupported-attributes group delimiter), tagOctetString,
@@ -73,6 +146,9 @@ type ippResponse struct {
 }
 
 func writeAttribute(buf *bytes.Buffer, tag byte, name, value string) {
+	origName := name
+	name = ippSafeString("attribute name", name, name)
+	value = ippSafeString("attribute value for", origName, value)
 	buf.WriteByte(tag)
 	binary.Write(buf, binary.BigEndian, uint16(len(name)))
 	buf.WriteString(name)
@@ -81,6 +157,7 @@ func writeAttribute(buf *bytes.Buffer, tag byte, name, value string) {
 }
 
 func writeIntegerAttribute(buf *bytes.Buffer, tag byte, name string, value int32) {
+	name = ippSafeString("attribute name", name, name)
 	buf.WriteByte(tag)
 	binary.Write(buf, binary.BigEndian, uint16(len(name)))
 	buf.WriteString(name)
@@ -93,6 +170,7 @@ func writeEnumAttribute(buf *bytes.Buffer, name string, value int32) {
 }
 
 func writeResolutionAttribute(buf *bytes.Buffer, name string, xres, yres int32, dpi bool) {
+	name = ippSafeString("attribute name", name, name)
 	buf.WriteByte(tagResolution)
 	binary.Write(buf, binary.BigEndian, uint16(len(name)))
 	buf.WriteString(name)
@@ -107,6 +185,7 @@ func writeResolutionAttribute(buf *bytes.Buffer, name string, xres, yres int32, 
 }
 
 func writeRangeOfIntegerAttribute(buf *bytes.Buffer, name string, lower, upper int32) {
+	name = ippSafeString("attribute name", name, name)
 	buf.WriteByte(tagRangeOfInteger)
 	binary.Write(buf, binary.BigEndian, uint16(len(name)))
 	buf.WriteString(name)
@@ -140,7 +219,12 @@ func buildRequest(operation uint16, requestID uint32, printerURI, requestingUser
 
 // sendIPP posts an IPP request (optionally followed by document data) to the
 // given HTTP(S) endpoint and parses the response header + attributes.
-func sendIPP(endpoint string, request *bytes.Buffer, document io.Reader) (*ippResponse, error) {
+// documentSize is the exact byte count document will yield (0 when document
+// is nil): known up front by every caller (a *bytes.Buffer/[]byte length, or
+// an *os.File's Stat().Size()), which is what lets Content-Length be set
+// explicitly below instead of net/http falling back to chunked
+// transfer-encoding for a body it can't measure itself.
+func sendIPP(endpoint string, request *bytes.Buffer, document io.Reader, documentSize int64) (*ippResponse, error) {
 	var body io.Reader = request
 	if document != nil {
 		body = io.MultiReader(request, document)
@@ -151,22 +235,30 @@ func sendIPP(endpoint string, request *bytes.Buffer, document io.Reader) (*ippRe
 		return nil, fmt.Errorf("build http request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/ipp")
+	req.ContentLength = int64(request.Len()) + documentSize
 
-	client := &http.Client{Timeout: ippClientTimeout}
-	resp, err := client.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("http post to %s: %w", endpoint, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		data, _ := io.ReadAll(resp.Body)
+		// A much smaller bound than the real response limit below: this is
+		// diagnostic text for a stderr message, not a document, and 16 MiB
+		// is unreasonably large for something %v-formatted straight into an
+		// error string.
+		const maxIPPErrorBodyBytes = 4 << 10
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, maxIPPErrorBodyBytes))
 		return nil, fmt.Errorf("unexpected HTTP status %s from %s: %s", resp.Status, endpoint, string(data))
 	}
 
-	raw, err := io.ReadAll(resp.Body)
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxIPPResponseBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("read ipp response body: %w", err)
+	}
+	if len(raw) > maxIPPResponseBytes {
+		return nil, fmt.Errorf("ipp response from %s exceeds the %d byte limit", endpoint, maxIPPResponseBytes)
 	}
 
 	return parseResponse(raw)

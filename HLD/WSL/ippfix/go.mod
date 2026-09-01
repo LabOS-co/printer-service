@@ -1,3 +1,3 @@
-module printersearch/ippfix
+module printersearch-hld/ippfix
 
-go 1.22
+go 1.25.0

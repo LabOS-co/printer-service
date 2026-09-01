@@ -35,11 +35,17 @@ func main() {
 	}
 }
 
+// usage always goes to stderr: every call site reaches it only via a usage
+// mistake or an unrecognized subcommand, both already exiting 1 - and stdout
+// is exactly what `> out.txt` would swallow, hiding the one message meant to
+// explain the failure.
 func usage() {
-	fmt.Println("usage:")
-	fmt.Println("  printersearch info  -host <ip> [-port 631] [-path /ipp/print]")
-	fmt.Println("  printersearch print -host <ip> [-port 631] [-path /ipp/print] -file <path.pdf>")
-	fmt.Println("  printersearch bench -host <ip> -ports 9001,9002,9003 -file <path.pdf> -requests 30 -concurrency 3")
+	fmt.Fprintln(os.Stderr, "usage:")
+	fmt.Fprintln(os.Stderr, "  printersearch info   -host <ip> [-port 631] [-path /ipp/print] [-timeout 60s]")
+	fmt.Fprintln(os.Stderr, "  printersearch print  -host <ip> [-port 631] [-path /ipp/print] -file <path.pdf> [-timeout 60s]")
+	fmt.Fprintln(os.Stderr, "  printersearch jobs   -host <ip> [-port 631] [-path /ipp/print] [-timeout 60s]")
+	fmt.Fprintln(os.Stderr, "  printersearch cancel -host <ip> [-port 631] [-path /ipp/print] -job-id <n> [-timeout 60s]")
+	fmt.Fprintln(os.Stderr, "  printersearch bench  -host <ip> -ports 9001,9002,9003 -file <path.pdf> -requests 30 -concurrency 3 [-timeout 60s]")
 }
 
 func currentUser() string {
@@ -70,15 +76,49 @@ func printAttributes(attrs []ippAttribute) {
 	}
 }
 
+// openDocument opens path and returns it alongside its exact size, for the
+// streaming sendIPP call in runPrint to declare as an explicit
+// Content-Length. That declaration is a hard contract once made: net/http
+// writes at most that many bytes to the wire (io.LimitReader in its own
+// transfer writer) and errors only afterward on a mismatch - so a size that
+// isn't knowable up front doesn't fail loud, it silently changes what
+// actually gets sent. A FIFO, /dev/stdin, a process-substitution path, or a
+// procfs file all report Size()==0 from Stat, which would put a
+// well-framed Print-Job carrying an EMPTY document on the wire; a regular
+// file being mutated concurrently would have the wire body silently
+// truncated to whatever size was true at Stat time. os.ReadFile (what this
+// replaced) had no such gap, since it read the actual bytes rather than
+// trusting a metadata field - hence rejecting anything that isn't a
+// regular file outright, rather than only degrading gracefully.
+func openDocument(path string) (*os.File, int64) {
+	f, err := os.Open(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error opening file %s: %v\n", path, err)
+		os.Exit(1)
+	}
+	info, err := f.Stat()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error stat'ing file %s: %v\n", path, err)
+		os.Exit(1)
+	}
+	if !info.Mode().IsRegular() {
+		fmt.Fprintf(os.Stderr, "error: %s is not a regular file; its size can't be declared up front for streaming\n", path)
+		os.Exit(1)
+	}
+	return f, info.Size()
+}
+
 func runInfo(args []string) {
 	fs := flag.NewFlagSet("info", flag.ExitOnError)
 	host := fs.String("host", "", "printer IP or hostname (required)")
 	port := fs.Int("port", 631, "IPP port")
 	path := fs.String("path", "/ipp/print", "IPP resource path")
+	timeout := fs.Duration("timeout", 0, "overall request timeout (0 = the 60s default)")
 	fs.Parse(args)
+	setClientTimeout(*timeout)
 
 	if *host == "" {
-		fmt.Println("error: -host is required")
+		fmt.Fprintln(os.Stderr, "error: -host is required")
 		os.Exit(1)
 	}
 
@@ -88,9 +128,9 @@ func runInfo(args []string) {
 	req := buildRequest(opGetPrinterAttributes, 1, uri, currentUser(), nil)
 
 	fmt.Printf("Sending Get-Printer-Attributes to %s\n", endpoint)
-	resp, err := sendIPP(endpoint, req, nil)
+	resp, err := sendIPP(endpoint, req, nil, 0)
 	if err != nil {
-		fmt.Printf("FAILED: %v\n", err)
+		fmt.Fprintf(os.Stderr, "FAILED: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -114,18 +154,23 @@ func runPrint(args []string) {
 	lastPage := fs.Int("last-page", 0, "last page to print (page-ranges); 0 = print all pages (default)")
 	resolution := fs.Int("resolution", 300, "print-resolution in dpi (explicit, avoids gs falling back to 600dpi/8-bit which overflowed this printer's spool area)")
 	hold := fs.Bool("hold", false, "submit with job-hold-until=indefinite instead of printing immediately (for inspection)")
+	timeout := fs.Duration("timeout", 0, "overall request timeout (0 = the 60s default)")
 	fs.Parse(args)
+	setClientTimeout(*timeout)
 
 	if *host == "" || *file == "" {
-		fmt.Println("error: -host and -file are required")
+		fmt.Fprintln(os.Stderr, "error: -host and -file are required")
 		os.Exit(1)
 	}
 
-	data, err := os.ReadFile(*file)
-	if err != nil {
-		fmt.Printf("error reading file %s: %v\n", *file, err)
-		os.Exit(1)
-	}
+	// Streamed via os.Open rather than os.ReadFile (B4): the whole point of
+	// bench.go's own os.ReadFile is loading the payload once so disk I/O
+	// doesn't skew concurrently-measured latency (see bench.go's doc
+	// comment) - runPrint is the one-shot CLI path with no such measurement
+	// to protect, so there's no reason to hold the entire document in
+	// memory here.
+	doc, size := openDocument(*file)
+	defer doc.Close()
 
 	name := *jobName
 	if name == "" {
@@ -159,10 +204,10 @@ func runPrint(args []string) {
 		}
 	})
 
-	fmt.Printf("Sending Print-Job (%d bytes) to %s\n", len(data), endpoint)
-	resp, err := sendIPP(endpoint, req, bytes.NewReader(data))
+	fmt.Printf("Sending Print-Job (%d bytes) to %s\n", size, endpoint)
+	resp, err := sendIPP(endpoint, req, doc, size)
 	if err != nil {
-		fmt.Printf("FAILED: %v\n", err)
+		fmt.Fprintf(os.Stderr, "FAILED: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -174,7 +219,7 @@ func runPrint(args []string) {
 	// the exact way a pinned media/printer-resolution attribute can be
 	// silently dropped and produce a corrupt print while looking like success.
 	if resp.StatusCode != 0x0000 {
-		fmt.Printf("FAILED: printer reported %s, not a clean success - check for [REJECTED BY PRINTER] attributes above.\n", statusName(resp.StatusCode))
+		fmt.Fprintf(os.Stderr, "FAILED: printer reported %s, not a clean success - check for [REJECTED BY PRINTER] attributes above.\n", statusName(resp.StatusCode))
 		os.Exit(1)
 	}
 	fmt.Println("Print job submitted successfully.")
@@ -185,10 +230,12 @@ func runJobs(args []string) {
 	host := fs.String("host", "", "printer IP or hostname (required)")
 	port := fs.Int("port", 631, "IPP port")
 	path := fs.String("path", "/ipp/print", "IPP resource path")
+	timeout := fs.Duration("timeout", 0, "overall request timeout (0 = the 60s default)")
 	fs.Parse(args)
+	setClientTimeout(*timeout)
 
 	if *host == "" {
-		fmt.Println("error: -host is required")
+		fmt.Fprintln(os.Stderr, "error: -host is required")
 		os.Exit(1)
 	}
 
@@ -204,9 +251,9 @@ func runJobs(args []string) {
 		buf.WriteByte(0)
 	})
 
-	resp, err := sendIPP(endpoint, req, nil)
+	resp, err := sendIPP(endpoint, req, nil, 0)
 	if err != nil {
-		fmt.Printf("FAILED: %v\n", err)
+		fmt.Fprintf(os.Stderr, "FAILED: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -220,10 +267,12 @@ func runCancel(args []string) {
 	port := fs.Int("port", 631, "IPP port")
 	path := fs.String("path", "/ipp/print", "IPP resource path")
 	jobID := fs.Int("job-id", 0, "job id to cancel (required)")
+	timeout := fs.Duration("timeout", 0, "overall request timeout (0 = the 60s default)")
 	fs.Parse(args)
+	setClientTimeout(*timeout)
 
 	if *host == "" || *jobID == 0 {
-		fmt.Println("error: -host and -job-id are required")
+		fmt.Fprintln(os.Stderr, "error: -host and -job-id are required")
 		os.Exit(1)
 	}
 
@@ -234,9 +283,9 @@ func runCancel(args []string) {
 		writeIntegerAttribute(buf, tagInteger, "job-id", int32(*jobID))
 	})
 
-	resp, err := sendIPP(endpoint, req, nil)
+	resp, err := sendIPP(endpoint, req, nil, 0)
 	if err != nil {
-		fmt.Printf("FAILED: %v\n", err)
+		fmt.Fprintf(os.Stderr, "FAILED: %v\n", err)
 		os.Exit(1)
 	}
 
