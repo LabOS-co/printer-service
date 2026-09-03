@@ -1,27 +1,24 @@
-# Compiled binaries (each module is rebuilt locally per CLAUDE.md's build instructions)
+# Compiled binaries (each module is rebuilt locally per CLAUDE.md's build instructions;
+# CLAUDE.md's recipe builds from each module's root, so the binary lands beside go.mod,
+# not nested under cmd/<name>/)
 *.exe
 /printersearch
 /ippfix/ippfix-linux
-/HLD/WSL/printersearch
-/HLD/WSL/printersearch-linux
-# printersearch-hld: `go build` with no -o names its output after the
-# module's last path element (HLD/WSL's module was renamed from
-# printersearch to printersearch-hld in B5 to resolve a module-path
-# collision with the frozen root module of the same original name).
-/HLD/WSL/printersearch-hld
-/HLD/WSL/ippfix/ippfix
-/HLD/deploy/printgateway-linux-amd64
-/HLD/deploy/printgateway
+/src/printersearch/printersearch
+/src/printersearch/printersearch-linux
+/src/ippfix/ippfix
+/src/printgateway/printgateway-linux-amd64
+/src/printgateway/printgateway
 
-# Node (HLD/*.docx generator scripts)
-/HLD/node_modules/
+# Node (docs/*.docx generator scripts)
+/docs/node_modules/
 
 # Generated/scratch output from WSL load-test and printer-emulator runs
-/HLD/WSL/emu-spool/
-/HLD/WSL/emu15-spool/
-/HLD/WSL/work/
-/HLD/WSL/bench-payload.bin
-/HLD/win-bench/out.prn
+/src/ops/emu-spool/
+/src/ops/emu15-spool/
+/src/printersearch/work/
+/src/printersearch/bench-payload.bin
+/src/win-bench/out.prn
 
 # MS Word lock files (created while a .docx deliverable is open)
 ~$*

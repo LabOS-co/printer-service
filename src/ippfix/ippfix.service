@@ -1,5 +1,5 @@
 [Unit]
-# G1: HLD/STATUS.md names ippfix.service three times as what makes this
+# G1: docs/STATUS.md names ippfix.service three times as what makes this
 # proxy survive a reboot, but the unit itself was never committed to the
 # repo - it existed only inside the live WSL distro and was lost on every
 # reinstall. This is that file.

@@ -23,10 +23,11 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-# BASE is this script's own directory (HLD/WSL) - see setup-emulators.sh's
+# BASE is this script's own directory (src/ops) - see setup-emulators.sh's
 # comment for why that beats a hardcoded absolute path.
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEPLOY="$BASE/../deploy"
+DEPLOY="$BASE/../printgateway"
+IPPFIX="$BASE/../ippfix"
 
 install_service_user() {
   local user=$1
@@ -57,7 +58,7 @@ install_printgateway() {
 }
 
 install_ippfix() {
-  local bin="$BASE/ippfix/ippfix"
+  local bin="$IPPFIX/ippfix"
   if [ ! -f "$bin" ]; then
     echo "warning: $bin not found - build it first (see CLAUDE.md's \"Build and run\"); skipping ippfix install" >&2
     return
@@ -66,13 +67,13 @@ install_ippfix() {
   install_service_user ippfix
   mkdir -p /opt/ippfix
   install -m 755 -o ippfix -g ippfix "$bin" /opt/ippfix/ippfix
-  if [ -f "$BASE/ippfix/printer-template.json" ]; then
-    install -m 644 -o ippfix -g ippfix "$BASE/ippfix/printer-template.json" /opt/ippfix/printer-template.json
+  if [ -f "$IPPFIX/printer-template.json" ]; then
+    install -m 644 -o ippfix -g ippfix "$IPPFIX/printer-template.json" /opt/ippfix/printer-template.json
   else
     echo "note: no printer-template.json next to ippfix yet - generate one with 'ippfix -gen-template' (see CLAUDE.md) before starting the service"
   fi
 
-  install -m 644 "$BASE/ippfix/ippfix.service" /etc/systemd/system/ippfix.service
+  install -m 644 "$IPPFIX/ippfix.service" /etc/systemd/system/ippfix.service
   echo "installed ippfix.service (edit its ExecStart -target/-listen for this deployment before starting)"
 }
 

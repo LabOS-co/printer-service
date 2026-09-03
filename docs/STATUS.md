@@ -1,8 +1,9 @@
-# printerSearch/HDL — status (last updated 2026-09-01)
+# printer-server/src — status (last updated 2026-09-01)
 
-Continuation of LAB-16894 under `C:\printerSearch\HDL`. The original POC in
-`C:\printerSearch` (outside HDL) is **frozen as a backup — do not modify it**.
-Everything below is new work built on top of it.
+Continuation of LAB-16894 under `src/` (this repo's working copy is at
+`C:\GitProjects\printer-server`). The original POC at the repo root is
+**frozen as a backup — do not modify it**. Everything below is new work
+built on top of it.
 
 ## What's here
 
@@ -11,9 +12,10 @@ Everything below is new work built on top of it.
 - `cups-vs-spooler-comparison.docx` / `cups-vs-spooler-comparison-en.docx` —
   performance comparison, CUPS+IPP vs. Windows Spooler+SumatraPDF, backed by
   real measurements (sources: `build_comparison.js` / `build_comparison_en.js`).
-- `WSL/` — the working Go code (copied from the old POC, `ippfix` rebuilt) and
-  all the test/benchmark tooling. See below for what's running there.
-- `win-bench/` — Windows-side benchmark (`win-bench.ps1`) plus the file-backed
+- `src/printersearch/`, `src/ippfix/`, `src/ops/` (moved from `WSL/`) — the working Go code
+  (copied from the old POC, `ippfix` rebuilt) and all the test/benchmark tooling. See below
+  for what's running there.
+- `src/win-bench/` — Windows-side benchmark (`win-bench.ps1`) plus the file-backed
   test printer setup.
 
 ## Environment: CUPS now runs natively in WSL, not Docker
@@ -69,12 +71,12 @@ longer needed/relevant).
 
 ## `ippfix` — rebuilt as a template-overlay proxy (not a single-field patch)
 
-`WSL/ippfix/main.go` is a new, more general version of the original POC's
+`src/ippfix/cmd/ippfix/main.go` (moved from `WSL/ippfix/main.go`) is a new, more general version of the original POC's
 proxy. Instead of hardcoding "replace empty naturalLanguage with en-us", it:
 
 1. Captures a full "golden" snapshot of the printer's real
    `Get-Printer-Attributes` response once (`-gen-template`), with known
-   tag-level fixes applied (`WSL/ippfix/printer-template.json`, 86 attributes).
+   tag-level fixes applied (`src/ippfix/printer-template.json`, 86 attributes).
 2. At request time, applies the same tag-level fix (empty naturalLanguage/
    charset → sane default) to the **entire** message, not just one group —
    the first version of this session's rewrite only fixed the
@@ -96,7 +98,7 @@ time) — worth re-verifying against the real printer before relying on it.
 Run as systemd service `ippfix.service` (survives reboots on its own, unlike
 the old Docker `docker exec -d` approach).
 
-## Load-testing rig built this phase (all in `WSL/`)
+## Load-testing rig built this phase (all in `src/printersearch/` / `src/ops/`, formerly `WSL/`)
 
 - `printersearch bench` — new subcommand on the existing Go IPP client
   (`bench.go`). Submits N jobs at configurable concurrency across multiple
@@ -116,7 +118,7 @@ the old Docker `docker exec -d` approach).
 - `cups-resource-bench.sh` — wraps `printersearch bench`, sampling `cupsd`'s
   own CPU/RSS plus any Ghostscript/filter child processes it spawns, every
   ~10ms, for CPU/memory reporting alongside latency.
-- `win-bench/win-bench.ps1` — the Windows-side equivalent: submits N jobs via
+- `src/win-bench/win-bench.ps1` — the Windows-side equivalent: submits N jobs via
   `SumatraPDF -print-to` against a **file-backed local printer**
   (`BenchFilePrinter`, port = a literal file path, driver = real
   "Brother MFC-L2700DW series") so it exercises the real spooler+driver
@@ -277,7 +279,7 @@ just the bare distro. Everything below was rebuilt from scratch this session:
 
 ## Sixth phase (2026-08-25): bench statistics honesty fix (B3, part of the printer-server hardening plan)
 
-`WSL/bench.go`'s `report()` had two measurement bugs, both fixed this phase (no behavior
+`src/printersearch/cmd/printersearch/bench.go`'s (formerly `WSL/bench.go`'s) `report()` had two measurement bugs, both fixed this phase (no behavior
 change to `bench`'s job submission itself, only to what the numbers mean):
 
 - **Failed requests' accept-latency was folded into the success percentiles.** `elapsed`
@@ -345,14 +347,14 @@ a class of typo-silently-drops-data bug the review also flagged.
 
 ## Seventh phase (2026-08-26 through 2026-09-01): printgateway hardening plan completed
 
-The full "bulletproof printgateway" plan (`HLD/deploy` hardening + S3/Vault/logstash +
-`HLD/WSL` client robustness + ops) reached its last suggested-order-of-execution step this
+The full "bulletproof printgateway" plan (`src/printgateway` hardening + S3/Vault/logstash +
+`src/printersearch` client robustness + ops) reached its last suggested-order-of-execution step this
 phase. Full step-by-step detail, every code-review pass, and every deliberately-deferred
 finding live in the plan document itself (`let-s-go-over-the-proud-wombat.md`'s own
 "Progress" section) and are not repeated here — this entry is the STATUS.md-level pointer
 CLAUDE.md's own convention asks for, not a duplicate.
 
-**`HLD/deploy` (Print Gateway):** all P0 fixes (uncancellable `lp`, unguarded IPP-parser
+**`src/printgateway` (Print Gateway):** all P0 fixes (uncancellable `lp`, unguarded IPP-parser
 slice — WSL side, discarded spool `Close()` error, unmitigated SSRF on `file_url`, the
 shared-`LogMetaData` race, zero-value `http.Server`) are in. Added since the sixth-phase
 entry above: HashiCorp Vault secrets (print token, S3 credentials, logstash address —
@@ -365,7 +367,7 @@ each at or near 100% statement coverage, verified by hand-mutation, not just the
 `main()` is now a thin `os.Exit` wrapper around a testable `run(ctx, stopSignals, args,
 getenv) error`.
 
-**`HLD/WSL` (`printersearch-hld` client + `bench`):** the two remaining P0s (IPP-parser
+**`src/printersearch` (client + `bench`):** the two remaining P0s (IPP-parser
 bounds checks, bench statistics honesty) were already fixed in earlier phases; this phase
 added honest IPP success/failure sub-code reporting (`successful-ok-ignored-or-substituted-
 attributes` no longer counted as a clean success), and client robustness — explicit
@@ -373,10 +375,15 @@ attributes` no longer counted as a clean success), and client robustness — exp
 on every subcommand, a bounded response read, a rune-safe clamp on any attribute name/value
 that would otherwise overflow the wire framing's `uint16` length prefix, and `os.Open`
 streaming in `runPrint` (guarded against a non-regular file, after a review caught that an
-unguarded stream could silently truncate the document on the wire). Module renamed
-`printersearch` → `printersearch-hld` (its `ippfix` submodule too) to stop colliding with the
-frozen root module's identical name, which had been blocking any `go.work` spanning both
-trees.
+unguarded stream could silently truncate the document on the wire). Module was briefly renamed
+`printersearch` → `printersearch-hld` (its then-nested `ippfix` module too) to stop colliding
+with the frozen root module's identical name, which had been blocking any `go.work` spanning
+both trees. No `go.work` ties the two trees together and none is planned, so the collision was
+never live in practice; both modules were renamed back to their plain `printersearch` and
+`ippfix` names once the leftover POC "-hld" naming was flagged as stale — so the collision,
+which this rename-back reintroduces (the root module and `src/printersearch` are both literally
+named `printersearch` again), stays latent; it would only become live if a `go.work` ever
+spanned both trees.
 
 **Ops:** `printgateway.service` and `ippfix.service` are now committed to the repo (neither
 existed anywhere but inside the live WSL distro before this, despite this document naming
@@ -389,14 +396,14 @@ the script's own location.
 full list with reasoning): no concurrency limit on `/print`; `go-packages/logs`' own
 unsynchronized sequence-number counter races under concurrent requests (upstream, not
 fixable from here); `-race` cannot run natively on this Windows dev box (no C toolchain) —
-verified instead in WSL where gcc is available; `HLD/WSL/ippfix`'s two flagged defects
+verified instead in WSL where gcc is available; `src/ippfix`'s two flagged defects
 (silent truncation on a parse failure, a base64-decode failure silently producing a
 zero-length attribute) remain unfixed, since `ippfix` was explicitly kept out of this plan's
 scope.
 
 ## Open items / not yet done
 
-- **Superseded by the seventh phase above**: `HLD/deploy` is now a hardened prototype Print
+- **Superseded by the seventh phase above**: `src/printgateway` is now a hardened prototype Print
   Gateway (Vault secrets, S3 storage, logstash logging, graceful shutdown, near-100% test
   coverage), not just POC/benchmark-quality code proving the path's viability — this line
   described the state before that phase and is kept only as the historical record of what

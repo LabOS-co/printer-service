@@ -3,7 +3,7 @@
 # C:\printerSearch path that has been stale (and case-typo'd, HDL vs HLD)
 # since the working copy moved to C:\GitProjects\printer-server.
 param(
-    [string]$File = (Join-Path (Split-Path $PSScriptRoot -Parent) "WSL\printDemo.pdf"),
+    [string]$File = (Join-Path (Split-Path $PSScriptRoot -Parent) "printersearch\testdata\printDemo.pdf"),
     [string]$Printer = "BenchFilePrinter",
     [string]$Sumatra = "\\gaia\netlims$\AutoLims\MainRls\bin\SumatraPDF.exe",
     [int]$Requests = 30,

@@ -19,8 +19,8 @@ lp -d <printer-name> <path>
 
 `<printer-name>` must already exist as a CUPS queue (`lpadmin`-configured,
 with a static PPD, and behind `ippfix` if that specific printer needs it —
-exactly the setup already built and tested in `WSL/setup-15-queues.sh` /
-`WSL/setup-cups-queues-for-emulators.sh`). This server does not talk IPP
+exactly the setup already built and tested in `src/ops/setup-15-queues.sh` /
+`src/ops/setup-cups-queues-for-emulators.sh`). This server does not talk IPP
 itself, does not know about PPDs/media/resolution, and does not decide
 whether a printer needs `ippfix` — CUPS's own queue configuration handles
 all of that already. If you want to print to a printer that doesn't have a
@@ -459,13 +459,13 @@ per-request lines from the handler chain are traceable by id.
 ## Building and running
 
 This needs to run where CUPS is, i.e. inside the WSL Ubuntu install (see
-`HDL/STATUS.md` for how to get that environment up). Build for Linux from
+`docs/STATUS.md` for how to get that environment up). Build for Linux from
 Windows and copy the resulting binary over, or build directly inside WSL:
 
 ```bash
 # from Windows (cross-compile):
-cd HDL/deploy
-GOOS=linux GOARCH=amd64 go build -o printgateway-linux-amd64 .
+cd src/printgateway
+GOOS=linux GOARCH=amd64 go build -o printgateway-linux-amd64 ./cmd/printgateway
 # copy printgateway-linux-amd64 into the WSL filesystem, then inside WSL:
 chmod +x printgateway-linux-amd64
 ./printgateway-linux-amd64            # listens on :8090
@@ -474,8 +474,8 @@ chmod +x printgateway-linux-amd64
 
 ```bash
 # or, directly inside WSL, if a Go toolchain is installed there:
-cd deploy
-go build -o printgateway .
+cd src/printgateway
+go build -o printgateway ./cmd/printgateway
 ./printgateway
 ```
 

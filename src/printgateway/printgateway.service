@@ -1,6 +1,6 @@
 [Unit]
 # G1: version-controlled so `systemctl is-active printgateway` survives a
-# WSL distro reinstall (HLD/STATUS.md already names this requirement for
+# WSL distro reinstall (docs/STATUS.md already names this requirement for
 # ippfix; before this file, printgateway had no unit at all, despite
 # CLAUDE.md's own lesson that a long-running WSL process not run as a
 # systemd unit does not survive the invoking shell exiting, let alone a

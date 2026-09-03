@@ -15,13 +15,13 @@ and is built independently. There is no test suite, no linter config, and no git
 ### The two generations
 
 - **Root (`main.go`, `ipp.go`, `ippfix/`, `docker/`, `win/`)** — the original Docker+CUPS POC.
-  `HLD/STATUS.md` says this is **frozen as a backup — do not modify it.** Read it for history;
-  make changes under `HLD/`.
-- **`HLD/`** — all current work. CUPS runs natively in a WSL2 `Ubuntu-24.04` distro (the Docker
+  `STATUS.md` (root) says this is **frozen as a backup — do not modify it.** Read it for history;
+  make changes under `src/`.
+- **`src/`** — all current work. CUPS runs natively in a WSL2 `Ubuntu-24.04` distro (the Docker
   `cups-poc` container is gone), `ippfix` was rewritten as a template-overlay proxy, and the
   benchmark/load-test rig and the Print Gateway prototype live here.
 
-`STATUS.md` (root) and `HLD/STATUS.md` are the authoritative running logs — **read the relevant
+`STATUS.md` (root) and `docs/STATUS.md` are the authoritative running logs — **read the relevant
 one before starting work**, and update it when a phase completes. They carry the full root-cause
 chain, per-machine environment gotchas, and "how to resume after a restart" steps that are not
 derivable from the code.
@@ -29,42 +29,45 @@ derivable from the code.
 ## Architecture
 
 ```
-caller ──HTTP──> printgateway (HLD/deploy) ──`lp -d <queue>`──> cupsd (WSL) ──IPP──> ippfix ──IPP──> printer
-                                                                     └──── or directly ──IPP──> printer
+caller ──HTTP──> printgateway (src/printgateway) ──`lp -d <queue>`──> cupsd (WSL) ──IPP──> ippfix ──IPP──> printer
+                                                                          └──── or directly ──IPP──> printer
 printersearch (Go IPP client) ────────raw IPP────────> a CUPS queue path, or the printer directly
 ```
 
-- **`printersearch`** (root `main.go`+`ipp.go`; `HLD/WSL/` adds `bench.go`) — hand-rolled IPP
-  client, stdlib only, no third-party IPP library. Subcommands `info` / `print` / `jobs` /
-  `cancel`, plus `bench` in the HLD copy. It speaks IPP to *either* a printer's own endpoint or a
+- **`printersearch`** (root `main.go`+`ipp.go`; `src/printersearch/` adds `bench.go`) — hand-rolled
+  IPP client, stdlib only, no third-party IPP library. Subcommands `info` / `print` / `jobs` /
+  `cancel`, plus `bench` in the src copy. It speaks IPP to *either* a printer's own endpoint or a
   CUPS queue path (`-path /printers/<queue>`) — that interchangeability is what the benchmarks rely on.
 - **`ippfix`** — reverse proxy between CUPS and a printer whose firmware returns malformed IPP.
-  The root version patches one bug (empty `naturalLanguage` values → `en-us`). `HLD/WSL/ippfix/` is
+  The root version patches one bug (empty `naturalLanguage` values → `en-us`). `src/ippfix/` is
   the general version: it applies tag-level fixes to the **whole** message (the broken field appears
   in the response's operation-attributes group too, which strict clients check first) and then
   overlays the printer-attributes group against a captured golden template (`printer-template.json`)
   — live value wins if valid, template fills gaps. Generate a template with `-gen-template`.
-- **`printgateway`** (`HLD/deploy/`) — HTTP prototype, `POST /print`, either `multipart/form-data`
+- **`printgateway`** (`src/printgateway/`) — HTTP prototype, `POST /print`, either `multipart/form-data`
   (file attached) or `application/json` `{"printer","file_url"}` (server downloads it). It does
   **not** speak IPP — it shells out to `lp -d <printer> <path>` and lets the pre-configured CUPS
-  queue handle PPD/media/resolution/`ippfix`. See `HLD/deploy/README.md` for the full contract and
-  the explicit list of HLD features deliberately not implemented. It is the only module wired to
+  queue handle PPD/media/resolution/`ippfix`. See `src/printgateway/README.md` for the full contract
+  and the explicit list of HLD features deliberately not implemented. It is the only module wired to
   the shared **`github.com/LabOS-co/go-packages`** monorepo (`logs` for logging via
   `logs.GetConsoleLogger()`, `error_handler` for the standard labOS JSON error envelope) — see the
   README's "labOS shared library" section for why `GetConsoleLogger()`/env-var token rather than
   the full `settings`+`secret_store` stack, and follow that same pattern for any other real
   service extracted from this POC.
-- **`win/`** and **`HLD/win-bench/`** — the control arm: print through the Windows spooler via
+- **`win/`** and **`src/win-bench/`** — the control arm: print through the Windows spooler via
   `SumatraPDF -print-to`, to compare against the CUPS/IPP path. Not part of the deliverable.
 
 ## Build and run
 
 ```bash
-# each module builds independently, from its own directory
-go build -o printersearch.exe .                 # root
-cd HLD/WSL && go build -o printersearch .       # HLD client + bench
-cd HLD/deploy && GOOS=linux GOARCH=amd64 go build -o printgateway-linux-amd64 .
-cd HLD/WSL/ippfix && GOOS=linux GOARCH=amd64 go build -o ippfix .
+# each module builds independently; build from its module root (where go.mod
+# lives) naming the ./cmd/<name> package, so the binary lands beside go.mod
+# rather than nested under cmd/ - that's the path install-services.sh's
+# DEPLOY/IPPFIX vars and .gitignore's binary entries both assume.
+go build -o printersearch.exe .                           # root
+cd src/printersearch && go build -o printersearch ./cmd/printersearch
+cd src/printgateway && GOOS=linux GOARCH=amd64 go build -o printgateway-linux-amd64 ./cmd/printgateway
+cd src/ippfix && GOOS=linux GOARCH=amd64 go build -o ippfix ./cmd/ippfix
 ```
 
 `printgateway` and `ippfix` must run where CUPS is (inside WSL); cross-compile from Windows and
@@ -75,26 +78,26 @@ copy the binary in, or build inside WSL.
 ./printersearch.exe print -host localhost -path /printers/brother-fixed -file printDemo.pdf -resolution 300
 # inspect a printer's raw IPP capability response (first step in diagnosing any new printer)
 ./printersearch.exe info -host 192.168.252.210
-# load test: N jobs at fixed concurrency across several CUPS queues
+# load test: N jobs at fixed concurrency across several CUPS queues (run from src/printersearch/)
 ./printersearch bench -host 127.0.0.1 -port 631 -paths /printers/q-hp-laserjet,/printers/q-canon-ir \
-  -requests 700 -concurrency 20 -file printDemo.pdf -wait-completion
+  -requests 700 -concurrency 20 -file testdata/printDemo.pdf -wait-completion
 # gateway
 PRINT_GATEWAY_TOKEN='<secret>' ./printgateway-linux-amd64        # 127.0.0.1:8090 by default
 ```
 
 WSL environment setup/reset scripts (run as root inside `wsl -d Ubuntu-24.04 -u root`):
-`HLD/WSL/setup-15-printers.sh` (15 `ippeveprinter` virtual printers as systemd units),
+`src/ops/setup-15-printers.sh` (15 `ippeveprinter` virtual printers as systemd units),
 `setup-15-queues.sh` (matching CUPS queues), `setup-emulators.sh` /
 `setup-cups-queues-for-emulators.sh` (the earlier 3-printer fleet), and
 `cups-resource-bench.sh` (bench run plus cupsd/filter CPU+RSS sampling).
 
 ### Documents
 
-Every `.docx` in `HLD/` is generated — never edit the Word file, edit the `build_*.js` beside it
+Every `.docx` in `docs/` is generated — never edit the Word file, edit the `build_*.js` beside it
 and regenerate:
 
 ```bash
-cd HLD && npm install && node build_hld_phase1.js     # writes print-gateway-hld-phase1.docx
+cd docs && npm install && node build_hld_phase1.js     # writes print-gateway-hld-phase1.docx
 ```
 
 `build_spec.js` → spec, `build_spec_ha.js` → HA/queue/security spec, `build_hld_foundation.js` and
@@ -121,7 +124,7 @@ an `_en` English twin. Each script writes exactly one file, named at the bottom 
   name is silently ignored and Ghostscript falls back to 600dpi/8-bit, overflowing the printer spool.
 - **cups-filters version matters.** The original Debian bookworm setup pinned 1.28 deliberately;
   Ubuntu 24.04 + 2.0.0 is stricter and refused the raw malformed printer response entirely (which is
-  exactly why the HLD `ippfix` had to be generalized). 1.28.17's generated PPD also needs its
+  exactly why `src/ippfix` had to be generalized). 1.28.17's generated PPD also needs its
   `cupsFilter2` line changed from `image/urf` to `image/pwg-raster` to dodge a raster margin bug;
   2.0.0 appears to have fixed that, but **that is verified only against the emulator, not the real printer.**
 - **Prefer a static PPD queue over live `-m everywhere` negotiation** against a printer with a broken
@@ -130,12 +133,13 @@ an `_en` English twin. Each script writes exactly one file, named at the bottom 
 
 ## Environment gotchas (this machine)
 
-- **Fixed (2026-09-01, Workstream G2):** `HLD/WSL/*.sh` and `HLD/win-bench/win-bench.ps1` used to
-  hardcode `C:\printerSearch` / `/mnt/c/printerSearch` (a path that hasn't existed since the working
-  copy became `C:\GitProjects\printer-server`, with a case typo — `HDL` vs `HLD` — that only worked
-  because drvfs is case-insensitive). Each now derives its base path from its own location instead.
-  Some in-repo *comments* (this file included, historically) may still cite the old path when
-  describing something that predates the fix — that's prose, not something a script reads.
+- **Fixed (2026-09-01, Workstream G2):** the scripts now under `src/ops/*.sh` and
+  `src/win-bench/win-bench.ps1` used to hardcode `C:\printerSearch` / `/mnt/c/printerSearch` (a path
+  that hasn't existed since the working copy became `C:\GitProjects\printer-server`, with a case
+  typo — `HDL` vs `HLD` — that only worked because drvfs is case-insensitive). Each now derives its
+  base path from its own location instead. Some in-repo *comments* (this file included, historically)
+  may still cite the old path when describing something that predates the fix — that's prose, not
+  something a script reads.
 - Git Bash/MSYS mangles Unix-looking paths passed through `wsl.exe` or `docker exec`
   (`/mnt/c/...`, `/printers/brother-fixed`) — prefix such commands with `MSYS_NO_PATHCONV=1`.
 - Long-running processes in WSL must be **systemd units**. `wsl.exe ... bash -c "... &"` does not

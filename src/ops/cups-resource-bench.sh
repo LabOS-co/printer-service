@@ -12,7 +12,7 @@ set -uo pipefail
 # been stale (and case-typo'd) since the working copy moved to
 # C:\GitProjects\printer-server - see setup-emulators.sh's comment.
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$BASE"
+cd "$BASE/../printersearch" || exit 1
 
 CUPSD_PID=$(pgrep -x cupsd | head -1)
 if [ -z "$CUPSD_PID" ]; then
@@ -63,7 +63,7 @@ cleanup_sampler() {
 }
 trap cleanup_sampler EXIT
 
-./printersearch bench "$@"
+./printersearch bench -file testdata/printDemo.pdf "$@"
 BENCH_EXIT=$?
 
 # jobs are accepted asynchronously - give background filters (gs, etc.) time
