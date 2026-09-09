@@ -82,7 +82,7 @@ copy the binary in, or build inside WSL.
 ./printersearch bench -host 127.0.0.1 -port 631 -paths /printers/q-hp-laserjet,/printers/q-canon-ir \
   -requests 700 -concurrency 20 -file testdata/printDemo.pdf -wait-completion
 # gateway
-PRINT_GATEWAY_TOKEN='<secret>' ./printgateway-linux-amd64        # 127.0.0.1:8090 by default
+PRINT_GATEWAY_TOKEN='<secret>' ./printgateway-linux-amd64        # 0.0.0.0:8090 by default, PORT/PRINT_GATEWAY_BIND_HOST to override
 ```
 
 WSL environment setup/reset scripts (run as root inside `wsl -d Ubuntu-24.04 -u root`):

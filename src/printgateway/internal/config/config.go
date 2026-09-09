@@ -17,13 +17,27 @@ import (
 )
 
 const (
-	// DefaultAddr is used when no address is given on the command line. Loopback-only by default.
-	DefaultAddr = "127.0.0.1:8090"
+	// DefaultPort is used when neither PortAliasEnv nor PortEnv is set.
+	DefaultPort = 8090
+	// PortEnv names the TCP port to listen on. Under Nomad this is the dynamically allocated port,
+	// injected as PORT — matches go-packages/system_args' own env var name so both agree on the
+	// same value. Deliberately env-only, not settable from the JSON config file: like
+	// AllowPrivateTargetsEnv, an operator must not be able to silently move the bind port via a
+	// config file that's harder to audit than the environment a process was launched with.
+	PortEnv = "PORT"
+	// PortAliasEnv overrides PortEnv when set, the same precedence VaultAddrEnv/SecretStoreURLEnv
+	// already use below. PORT is unnamespaced and among the most commonly pre-set variables in a
+	// shell or base image; PRINT_GATEWAY_PORT lets an operator pin this service's port deliberately
+	// without depending on nothing else in the environment ever exporting a bare PORT.
+	PortAliasEnv = "PRINT_GATEWAY_PORT"
 
-	AddrSourceDefault = "default"
-	AddrSourceArgv    = "argv"
-	// AddrSourceFile: Addr has no env var, so a config file is the only way to set it under systemd.
-	AddrSourceFile = "file"
+	// DefaultBindHost binds every interface. Nomad allocates the port dynamically and Consul/Traefik
+	// must reach it from outside the allocating host's own network namespace, so loopback-only can
+	// no longer be the default the way it was when the address was a fixed, manually-chosen one.
+	DefaultBindHost = "0.0.0.0"
+	// BindHostEnv overrides the bind host — set to "127.0.0.1" to restore loopback-only listening
+	// for a manual local run. Env-only for the same reason as PortEnv.
+	BindHostEnv = "PRINT_GATEWAY_BIND_HOST"
 
 	// AuthTokenEnv carries the shared secret compared against the X-Labos-Print-Token header.
 	AuthTokenEnv = "PRINT_GATEWAY_TOKEN"
@@ -153,7 +167,10 @@ const (
 
 // Config holds the service's runtime configuration.
 type Config struct {
-	Addr string
+	// Port is the TCP port the HTTP server listens on.
+	Port int
+	// BindHost is the host the HTTP server listens on. See Addr for the combined "host:port" form.
+	BindHost string
 
 	// AuthToken starts as PRINT_GATEWAY_TOKEN; main.go overwrites it with secrets.ResolveToken's result.
 	AuthToken string
@@ -218,11 +235,15 @@ type Config struct {
 	// several packages that would otherwise alias the same map through an exported field.
 	sources map[string]string
 
-	// AddrSource labels how Addr was determined ("default", "argv", or "file").
-	AddrSource string
-
 	// ConfigFilePath is the path a config file was actually read from, or "" if none was.
 	ConfigFilePath string
+}
+
+// Addr is the "<BindHost>:<Port>" address the HTTP server listens on.
+func (c Config) Addr() string {
+	// JoinHostPort, not Sprintf: an IPv6 literal ("::", "::1") must be bracketed, or net.Listen
+	// rejects it with "too many colons in address".
+	return net.JoinHostPort(c.BindHost, strconv.Itoa(c.Port))
 }
 
 // Source returns the label describing how the setting named by the given env var was supplied,
@@ -287,8 +308,9 @@ type fileFileStorage struct {
 // filePrintgateway is everything specific to running this service, the "resource/printgateway"
 // counterpart to the reference convention's "resource/controlplane".
 type filePrintgateway struct {
-	// Addr has no env var at all (see AddrSourceFile), so it is resolved separately from the
-	// file/env/default table below.
+	// Addr only still exists here to turn a leftover "addr" key from before Port/BindHost went
+	// env-only into an actionable error instead of a generic "unknown field" one — see
+	// mergeFileConfig. It is never read into Config.
 	Addr *string `json:"addr"`
 	// LogLevel: unlike every other file-sourced string, an explicit "" here is a startup error, not
 	// a suppression — see mergeFileConfig.
@@ -425,26 +447,21 @@ func loadConfigFile(path string, readFile func(string) ([]byte, error)) (fileCon
 // mergeFileConfig overlays fc onto cfg (which already holds the env/default resolution) and
 // returns the sources map recording, per env-var name, the "<path>:<jsonPath>" label of every
 // setting the file actually supplied. File beats env unconditionally for every setting it names —
-// precedence is file -> env -> default. The one exception is Addr: argv already outranks env
-// today and must go on outranking the file too (argv -> file -> default), hence addrSource being
-// a pointer.
+// precedence is file -> env -> default. Port/BindHost are not among them: like AllowPrivateTargetsEnv,
+// they are enforced env-only at the type level — BindHost has no field in fileConfig at all, so
+// naming it fails as an unknown field; Addr keeps a field purely to reject it with an actionable
+// message (below), since it named the same setting under its pre-Nomad meaning.
 //
 // Every env override is validated by Load before this function runs, so a malformed env var is
 // still a startup error even for a setting the file goes on to supersede.
-func mergeFileConfig(cfg *Config, fc fileConfig, path string, addrSource *string) (map[string]string, error) {
+func mergeFileConfig(cfg *Config, fc fileConfig, path string) (map[string]string, error) {
 	label := func(jsonPath string) string { return path + ":" + jsonPath }
 	sources := make(map[string]string)
 	pg := fc.Printgateway
 
-	if pg.Addr != nil && *addrSource != AddrSourceArgv {
-		// Validated here even though argv's own address never has been: under systemd this is the
-		// only way to set the listen address, so failing fast on a typo beats failing after
-		// "listening on <typo>" has already been logged.
-		if _, _, err := net.SplitHostPort(*pg.Addr); err != nil {
-			return nil, fmt.Errorf("%s: invalid address %q: %w", label("resource/printgateway.addr"), *pg.Addr, err)
-		}
-		cfg.Addr = *pg.Addr
-		*addrSource = AddrSourceFile
+	if pg.Addr != nil {
+		return nil, fmt.Errorf("%s: resource/printgateway.addr is no longer supported; set %s and, if needed, %s instead",
+			label("resource/printgateway.addr"), PortEnv, BindHostEnv)
 	}
 
 	if pg.LogLevel != nil {
@@ -590,16 +607,22 @@ func mergeFileConfig(cfg *Config, fc fileConfig, path string, addrSource *string
 	return sources, nil
 }
 
-// Load builds Config from argv (an address override), the environment, and — when ConfigPathEnv
-// names one — a JSON config file that wins over the environment (never over argv's address). It
-// fails on a present-but-malformed override from either source, naming the offending variable or JSON path.
-func Load(args []string, getenv func(string) string, readFile func(string) ([]byte, error)) (Config, error) {
-	addr := DefaultAddr
-	addrSource := AddrSourceDefault
-	if len(args) > 1 {
-		addr = args[1]
-		addrSource = AddrSourceArgv
+// Load builds Config from the environment and — when ConfigPathEnv names one — a JSON config file
+// that wins over the environment. It fails on a present-but-malformed override from either source,
+// naming the offending variable or JSON path.
+func Load(getenv func(string) string, readFile func(string) ([]byte, error)) (Config, error) {
+	port := DefaultPort
+	portRaw, portSrc := getenv(PortEnv), PortEnv
+	if v := getenv(PortAliasEnv); v != "" {
+		portRaw, portSrc = v, PortAliasEnv
 	}
+	if portRaw != "" {
+		var err error
+		if port, err = parsePort(portRaw, portSrc); err != nil {
+			return Config{}, err
+		}
+	}
+	bindHost := overrideString(getenv, BindHostEnv, DefaultBindHost)
 
 	secretStoreURL := getenv(VaultAddrEnv)
 	if v := getenv(SecretStoreURLEnv); v != "" {
@@ -614,7 +637,8 @@ func Load(args []string, getenv func(string) string, readFile func(string) ([]by
 	}
 
 	cfg := Config{
-		Addr:      addr,
+		Port:      port,
+		BindHost:  bindHost,
 		AuthToken: getenv(AuthTokenEnv),
 
 		SecretStoreURL:      secretStoreURL,
@@ -718,17 +742,15 @@ func Load(args []string, getenv func(string) string, readFile func(string) ([]by
 
 	// Config file layer: read after every env/default value above is resolved, so mergeFileConfig
 	// only has to overlay what the file actually names.
-	cfg.AddrSource = addrSource
 	if path := getenv(ConfigPathEnv); path != "" {
 		fc, err := loadConfigFile(path, readFile)
 		if err != nil {
 			return Config{}, err
 		}
-		sources, err := mergeFileConfig(&cfg, fc, path, &addrSource)
+		sources, err := mergeFileConfig(&cfg, fc, path)
 		if err != nil {
 			return Config{}, err
 		}
-		cfg.AddrSource = addrSource
 		cfg.ConfigFilePath = path
 		cfg.sources = sources
 	}
@@ -791,6 +813,16 @@ func parseDuration(raw, src string) (time.Duration, error) {
 		return 0, fmt.Errorf("%s: %q must be positive; net/http reads a non-positive timeout as no timeout at all", src, raw)
 	}
 	return d, nil
+}
+
+// parsePort is the parse-and-validate half of a TCP port number, valid range 1-65535. src labels
+// the error with whichever env var actually supplied raw.
+func parsePort(raw, src string) (int, error) {
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 || n > 65535 {
+		return 0, fmt.Errorf("%s: invalid port %q, want an integer between 1 and 65535", src, raw)
+	}
+	return n, nil
 }
 
 func overrideBytes(getenv func(string) string, name string, def int) (int, error) {

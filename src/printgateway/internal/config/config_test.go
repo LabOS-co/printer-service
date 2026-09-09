@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"slices"
 	"strings"
 	"testing"
@@ -15,9 +16,6 @@ func env(m map[string]string) func(string) string {
 	return func(k string) string { return m[k] }
 }
 
-// progName stands in for os.Args[0]: Load reads the address from args[1].
-const progName = "printgateway"
-
 // noFiles fails the test if readFile is ever called.
 func noFiles(t *testing.T) func(string) ([]byte, error) {
 	t.Helper()
@@ -28,11 +26,11 @@ func noFiles(t *testing.T) func(string) ([]byte, error) {
 }
 
 // mustLoad fails the test if Load errors.
-func mustLoad(t *testing.T, args []string, m map[string]string) Config {
+func mustLoad(t *testing.T, m map[string]string) Config {
 	t.Helper()
-	cfg, err := Load(args, env(m), noFiles(t))
+	cfg, err := Load(env(m), noFiles(t))
 	if err != nil {
-		t.Fatalf("Load(%v, %v) returned an unexpected error: %v", args, m, err)
+		t.Fatalf("Load(%v) returned an unexpected error: %v", m, err)
 	}
 	return cfg
 }
@@ -67,14 +65,14 @@ func fileWith(dotted string, value any) string {
 }
 
 // mustLoadFile is mustLoad's equivalent for a case that needs the file layer to actually engage.
-func mustLoadFile(t *testing.T, args []string, m map[string]string, fileContent string) Config {
+func mustLoadFile(t *testing.T, m map[string]string, fileContent string) Config {
 	t.Helper()
 	envVars := make(map[string]string, len(m)+1)
 	for k, v := range m {
 		envVars[k] = v
 	}
 	envVars[ConfigPathEnv] = testConfigPath
-	cfg, err := Load(args, env(envVars), files(map[string]string{testConfigPath: fileContent}))
+	cfg, err := Load(env(envVars), files(map[string]string{testConfigPath: fileContent}))
 	if err != nil {
 		t.Fatalf("Load with config file content %s returned an unexpected error: %v", fileContent, err)
 	}
@@ -97,14 +95,16 @@ func requireErrContaining(t *testing.T, err error, substrs ...string) {
 func TestLoadDefaults(t *testing.T) {
 	t.Parallel()
 
-	cfg := mustLoad(t, []string{progName}, nil)
+	cfg := mustLoad(t, nil)
 
 	checks := []struct {
 		field string
 		got   any
 		want  any
 	}{
-		{"Addr", cfg.Addr, DefaultAddr},
+		{"Addr", cfg.Addr(), fmt.Sprintf("%s:%d", DefaultBindHost, DefaultPort)},
+		{"Port", cfg.Port, DefaultPort},
+		{"BindHost", cfg.BindHost, DefaultBindHost},
 		{"ReadHeaderTimeout", cfg.ReadHeaderTimeout, DefaultReadHeaderTimeout},
 		{"ReadTimeout", cfg.ReadTimeout, DefaultReadTimeout},
 		{"WriteTimeout", cfg.WriteTimeout, DefaultWriteTimeout},
@@ -151,42 +151,93 @@ func TestLoadDefaults(t *testing.T) {
 	}
 }
 
-// TestDefaultAddrIsLoopback pins the property, not just the constant: the listen address is the
-// service's first line of defence, so a default that bound every interface must fail visibly here.
-func TestDefaultAddrIsLoopback(t *testing.T) {
+// TestDefaultBindHostIsEveryInterface pins the property, not just the constant: under Nomad,
+// Consul/Traefik must reach the allocated port from outside the host's own network namespace, so
+// a default that fell back to loopback-only would fail visibly here rather than silently breaking
+// discovery.
+func TestDefaultBindHostIsEveryInterface(t *testing.T) {
 	t.Parallel()
 
-	if !strings.HasPrefix(DefaultAddr, "127.0.0.1:") {
-		t.Errorf("DefaultAddr = %q, want a 127.0.0.1 address", DefaultAddr)
+	ip := net.ParseIP(DefaultBindHost)
+	if ip == nil || !ip.IsUnspecified() {
+		t.Errorf("DefaultBindHost = %q, want the unspecified address (binds every interface)", DefaultBindHost)
 	}
 }
 
-func TestLoadAddr(t *testing.T) {
+func TestLoadPortAndBindHost(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name string
-		args []string
-		want string
+		name     string
+		port     string
+		bindHost string
+		want     string
 	}{
-		{"no args at all", nil, DefaultAddr},
-		{"program name only", []string{progName}, DefaultAddr},
-		{"address override", []string{progName, "0.0.0.0:9999"}, "0.0.0.0:9999"},
-		{"trailing args are ignored", []string{progName, ":9999", "unused"}, ":9999"},
-		{
-			// Pinned as current behavior, not endorsed: an empty args[1] is taken verbatim, and
-			// net/http resolves "" to ":http" (port 80 on every interface). Update this row if
-			// Load is later changed to reject it.
-			"an empty address argument is taken verbatim", []string{progName, ""}, "",
-		},
+		{"neither set: compiled defaults", "", "", fmt.Sprintf("%s:%d", DefaultBindHost, DefaultPort)},
+		{"PORT override", "9999", "", fmt.Sprintf("%s:9999", DefaultBindHost)},
+		{"bind host override", "", "127.0.0.1", fmt.Sprintf("127.0.0.1:%d", DefaultPort)},
+		{"both overridden", "9999", "127.0.0.1", "127.0.0.1:9999"},
+		{"max valid port 65535 is accepted", "65535", "", fmt.Sprintf("%s:65535", DefaultBindHost)},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := mustLoad(t, tt.args, nil).Addr; got != tt.want {
+			cfg := mustLoad(t, map[string]string{PortEnv: tt.port, BindHostEnv: tt.bindHost})
+			if got := cfg.Addr(); got != tt.want {
 				t.Errorf("Addr = %q, want %q", got, tt.want)
 			}
+		})
+	}
+}
+
+// TestLoadPortAliasPrecedence mirrors TestLoadSecretStoreURLPrecedence's pattern: PRINT_GATEWAY_PORT
+// overrides the unnamespaced PORT, the same way SECRET_STORE_URL overrides VAULT_ADDR.
+func TestLoadPortAliasPrecedence(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		port      string
+		aliasPort string
+		wantPort  int
+	}{
+		{"neither set: compiled default", "", "", DefaultPort},
+		{"PORT alone", "9999", "", 9999},
+		{"PRINT_GATEWAY_PORT alone", "", "8888", 8888},
+		{"PRINT_GATEWAY_PORT overrides PORT", "9999", "8888", 8888},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := mustLoad(t, map[string]string{PortEnv: tt.port, PortAliasEnv: tt.aliasPort})
+			if cfg.Port != tt.wantPort {
+				t.Errorf("Port = %d, want %d", cfg.Port, tt.wantPort)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsMalformedPort(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		value string
+	}{
+		{"not a number", "soon"},
+		{"zero", "0"},
+		{"negative", "-1"},
+		{"one above the max", "65536"},
+		{"above 65535", "70000"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Load(env(map[string]string{PortEnv: tt.value}), noFiles(t))
+			requireErrContaining(t, err, PortEnv, "invalid port")
 		})
 	}
 }
@@ -211,7 +262,7 @@ func TestLoadSecretStoreURLPrecedence(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			cfg := mustLoad(t, []string{progName}, map[string]string{
+			cfg := mustLoad(t, map[string]string{
 				VaultAddrEnv:      tt.vaultAddr,
 				SecretStoreURLEnv: tt.override,
 			})
@@ -252,7 +303,7 @@ func TestLoadDurationOverridesArePairedCorrectly(t *testing.T) {
 	for _, s := range durationSettings {
 		t.Run(s.envVar, func(t *testing.T) {
 			t.Parallel()
-			cfg := mustLoad(t, []string{progName}, map[string]string{s.envVar: s.override.String()})
+			cfg := mustLoad(t, map[string]string{s.envVar: s.override.String()})
 
 			for _, other := range durationSettings {
 				want := other.def
@@ -288,7 +339,7 @@ func TestLoadRejectsMalformedDurations(t *testing.T) {
 	for _, tt := range values {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := Load([]string{progName}, env(map[string]string{SubmitTimeoutEnv: tt.value}), noFiles(t))
+			_, err := Load(env(map[string]string{SubmitTimeoutEnv: tt.value}), noFiles(t))
 			requireErrContaining(t, err, SubmitTimeoutEnv, tt.wantInErr)
 		})
 	}
@@ -312,7 +363,7 @@ func TestLoadByteSizeOverrides(t *testing.T) {
 	for _, s := range byteSizeSettings {
 		t.Run(s.envVar, func(t *testing.T) {
 			t.Parallel()
-			cfg := mustLoad(t, []string{progName}, map[string]string{s.envVar: "8192"})
+			cfg := mustLoad(t, map[string]string{s.envVar: "8192"})
 			if got := s.get(cfg); got != 8192 {
 				t.Errorf("%s=8192 gave %d, want 8192", s.envVar, got)
 			}
@@ -336,7 +387,7 @@ func TestLoadByteSizeOverrideAcceptsLargeValues(t *testing.T) {
 	t.Parallel()
 
 	const large = int64(5_000_000_000)
-	cfg := mustLoad(t, []string{progName}, map[string]string{
+	cfg := mustLoad(t, map[string]string{
 		FetchMaxBytesEnv: "5000000000",
 		S3MaxBytesEnv:    "5000000000",
 	})
@@ -359,7 +410,7 @@ func TestLoadRejectsMalformedByteSizes(t *testing.T) {
 		for _, v := range values {
 			t.Run(s.envVar+"="+v, func(t *testing.T) {
 				t.Parallel()
-				_, err := Load([]string{progName}, env(map[string]string{s.envVar: v}), noFiles(t))
+				_, err := Load(env(map[string]string{s.envVar: v}), noFiles(t))
 				requireErrContaining(t, err, s.envVar, "invalid byte size")
 			})
 		}
@@ -386,7 +437,7 @@ func TestLoadBoolOverrides(t *testing.T) {
 		for raw, want := range values {
 			t.Run(s.envVar+"="+raw, func(t *testing.T) {
 				t.Parallel()
-				cfg := mustLoad(t, []string{progName}, map[string]string{s.envVar: raw})
+				cfg := mustLoad(t, map[string]string{s.envVar: raw})
 				if got := s.get(cfg); got != want {
 					t.Errorf("%s=%q gave %v, want %v", s.envVar, raw, got, want)
 				}
@@ -419,7 +470,7 @@ func TestLoadRejectsMalformedBools(t *testing.T) {
 		for _, v := range []string{"yes", "on", "2", "maybe"} {
 			t.Run(s.envVar+"="+v, func(t *testing.T) {
 				t.Parallel()
-				_, err := Load([]string{progName}, env(map[string]string{s.envVar: v}), noFiles(t))
+				_, err := Load(env(map[string]string{s.envVar: v}), noFiles(t))
 				requireErrContaining(t, err, s.envVar, "invalid boolean")
 			})
 		}
@@ -439,7 +490,7 @@ func TestLoadLogLevel(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			cfg := mustLoad(t, []string{progName}, map[string]string{LogLevelEnv: tt.set})
+			cfg := mustLoad(t, map[string]string{LogLevelEnv: tt.set})
 			if cfg.LogLevel != tt.want {
 				t.Errorf("LogLevel = %q, want %q", cfg.LogLevel, tt.want)
 			}
@@ -465,7 +516,7 @@ func TestLoadPassesThroughStringSettings(t *testing.T) {
 		S3SecretKeyEnv:         "the-secret-key",
 		LogServerEnv:           "logstash.internal:514",
 	}
-	cfg := mustLoad(t, []string{progName}, m)
+	cfg := mustLoad(t, m)
 
 	for field, pair := range map[string]struct{ got, want string }{
 		"AuthToken":           {cfg.AuthToken, m[AuthTokenEnv]},
@@ -553,7 +604,7 @@ func TestLoadWiresFetchAllowedHosts(t *testing.T) {
 
 	t.Run("parsed list reaches the field", func(t *testing.T) {
 		t.Parallel()
-		cfg := mustLoad(t, []string{progName}, map[string]string{FetchAllowedHostsEnv: "A.example.com, b.example.com"})
+		cfg := mustLoad(t, map[string]string{FetchAllowedHostsEnv: "A.example.com, b.example.com"})
 		if want := []string{"a.example.com", "b.example.com"}; !slices.Equal(cfg.FetchAllowedHosts, want) {
 			t.Errorf("FetchAllowedHosts = %v, want %v", cfg.FetchAllowedHosts, want)
 		}
@@ -561,7 +612,7 @@ func TestLoadWiresFetchAllowedHosts(t *testing.T) {
 
 	t.Run("a bad entry fails startup", func(t *testing.T) {
 		t.Parallel()
-		_, err := Load([]string{progName}, env(map[string]string{FetchAllowedHostsEnv: "s3.example.com:443"}), noFiles(t))
+		_, err := Load(env(map[string]string{FetchAllowedHostsEnv: "s3.example.com:443"}), noFiles(t))
 		requireErrContaining(t, err, FetchAllowedHostsEnv, "invalid host entry")
 	})
 }
@@ -688,7 +739,7 @@ func TestLoadValidatesTimeoutBudgets(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := Load([]string{progName}, env(tt.envs), noFiles(t))
+			_, err := Load(env(tt.envs), noFiles(t))
 
 			if tt.wantInErr == "" {
 				if err != nil {
@@ -710,7 +761,7 @@ func TestLoadValidatesTimeoutBudgets(t *testing.T) {
 func TestLoadIgnoresTheConfigFileUnlessNamed(t *testing.T) {
 	t.Parallel()
 
-	cfg := mustLoad(t, []string{progName}, map[string]string{AuthTokenEnv: "t"})
+	cfg := mustLoad(t, map[string]string{AuthTokenEnv: "t"})
 
 	if cfg.ConfigFilePath != "" {
 		t.Errorf("ConfigFilePath = %q, want empty when %s is unset", cfg.ConfigFilePath, ConfigPathEnv)
@@ -731,8 +782,8 @@ func TestLoadEmptyFileObjectMatchesEnvOnlyStartup(t *testing.T) {
 		S3BucketEnv:   "print-documents",
 		LogLevelEnv:   "debug",
 	}
-	without := mustLoad(t, []string{progName}, envs)
-	withEmptyFile := mustLoadFile(t, []string{progName}, envs, "{}")
+	without := mustLoad(t, envs)
+	withEmptyFile := mustLoadFile(t, envs, "{}")
 
 	// Config carries an unexported sources map, so reflect.DeepEqual/== on the whole struct isn't
 	// an option — the exported, setting-bearing fields are compared explicitly instead.
@@ -740,8 +791,9 @@ func TestLoadEmptyFileObjectMatchesEnvOnlyStartup(t *testing.T) {
 		field         string
 		without, with any
 	}{
-		{"Addr", without.Addr, withEmptyFile.Addr},
-		{"AddrSource", without.AddrSource, withEmptyFile.AddrSource},
+		{"Addr", without.Addr(), withEmptyFile.Addr()},
+		{"Port", without.Port, withEmptyFile.Port},
+		{"BindHost", without.BindHost, withEmptyFile.BindHost},
 		{"AuthToken", without.AuthToken, withEmptyFile.AuthToken},
 		{"ReadHeaderTimeout", without.ReadHeaderTimeout, withEmptyFile.ReadHeaderTimeout},
 		{"ReadTimeout", without.ReadTimeout, withEmptyFile.ReadTimeout},
@@ -806,7 +858,7 @@ func TestLoadFileValuesWinOverEnv(t *testing.T) {
 		},
 		"resource/file_storage": {"host": "s3.example.com:9000"}
 	}`
-	cfg := mustLoadFile(t, []string{progName}, envs, fileBody)
+	cfg := mustLoadFile(t, envs, fileBody)
 
 	if cfg.ReadTimeout != 4*time.Minute {
 		t.Errorf("ReadTimeout = %s, want 4m (the file's value)", cfg.ReadTimeout)
@@ -894,7 +946,7 @@ func TestLoadFileOverridesArePairedCorrectly(t *testing.T) {
 				envs[other.envVar] = other.envRaw
 			}
 
-			cfg := mustLoadFile(t, []string{progName}, envs, fileBodyFor(current))
+			cfg := mustLoadFile(t, envs, fileBodyFor(current))
 
 			if got := current.get(cfg); got != current.fileWant {
 				t.Errorf("with only %s set via the file: %s = %v, want %v", current.jsonPath, current.envVar, got, current.fileWant)
@@ -944,7 +996,7 @@ func TestLoadFileZeroValuesAreRejected(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			envs := map[string]string{AuthTokenEnv: "t", ConfigPathEnv: testConfigPath}
-			_, err := Load([]string{progName}, env(envs), files(map[string]string{testConfigPath: fileWith(tt.jsonPath, tt.value)}))
+			_, err := Load(env(envs), files(map[string]string{testConfigPath: fileWith(tt.jsonPath, tt.value)}))
 			requireErrContaining(t, err, testConfigPath, tt.jsonPath, tt.wantInErr)
 		})
 	}
@@ -970,7 +1022,7 @@ func TestLoadFileRejectsSecretAndEnvOnlyKeys(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			envs := map[string]string{AuthTokenEnv: "t", ConfigPathEnv: testConfigPath}
-			_, err := Load([]string{progName}, env(envs), files(map[string]string{testConfigPath: tt.body}))
+			_, err := Load(env(envs), files(map[string]string{testConfigPath: tt.body}))
 			requireErrContaining(t, err, "unknown field")
 		})
 	}
@@ -984,7 +1036,7 @@ func TestLoadFileAllowedHosts(t *testing.T) {
 
 	t.Run("an explicit empty array suppresses the env allowlist", func(t *testing.T) {
 		t.Parallel()
-		cfg := mustLoadFile(t, []string{progName}, map[string]string{
+		cfg := mustLoadFile(t, map[string]string{
 			AuthTokenEnv:         "t",
 			FetchAllowedHostsEnv: "s3.example.com",
 		}, `{"resource/printgateway": {"fetch": {"allowedHosts": []}}}`)
@@ -995,7 +1047,7 @@ func TestLoadFileAllowedHosts(t *testing.T) {
 
 	t.Run("a non-empty array normalizes like the env-sourced list", func(t *testing.T) {
 		t.Parallel()
-		cfg := mustLoadFile(t, []string{progName}, map[string]string{AuthTokenEnv: "t"}, `{"resource/printgateway": {"fetch": {"allowedHosts": ["S3.Example.COM"]}}}`)
+		cfg := mustLoadFile(t, map[string]string{AuthTokenEnv: "t"}, `{"resource/printgateway": {"fetch": {"allowedHosts": ["S3.Example.COM"]}}}`)
 		if want := []string{"s3.example.com"}; !slices.Equal(cfg.FetchAllowedHosts, want) {
 			t.Errorf("FetchAllowedHosts = %v, want %v", cfg.FetchAllowedHosts, want)
 		}
@@ -1004,7 +1056,7 @@ func TestLoadFileAllowedHosts(t *testing.T) {
 	t.Run("a bad entry names the JSON path, not the env var", func(t *testing.T) {
 		t.Parallel()
 		envs := map[string]string{AuthTokenEnv: "t", ConfigPathEnv: testConfigPath}
-		_, err := Load([]string{progName}, env(envs), files(map[string]string{
+		_, err := Load(env(envs), files(map[string]string{
 			testConfigPath: `{"resource/printgateway": {"fetch": {"allowedHosts": ["s3.example.com:443"]}}}`,
 		}))
 		requireErrContaining(t, err, testConfigPath+":resource/printgateway.fetch.allowedHosts", "invalid host entry")
@@ -1019,7 +1071,7 @@ func TestLoadFileAllowedHosts(t *testing.T) {
 func TestLoadFileEmptyStringSuppressesAnEnvValue(t *testing.T) {
 	t.Parallel()
 
-	cfg := mustLoadFile(t, []string{progName}, map[string]string{
+	cfg := mustLoadFile(t, map[string]string{
 		AuthTokenEnv:  "t",
 		S3EndpointEnv: "minio.internal:9000",
 	}, `{"resource/file_storage": {"host": ""}}`)
@@ -1036,7 +1088,7 @@ func TestLoadFileEmptyStringSuppressesAnEnvValue(t *testing.T) {
 func TestLoadFileEmptyStringSuppressesAnEnvCredential(t *testing.T) {
 	t.Parallel()
 
-	cfg := mustLoadFile(t, []string{progName}, map[string]string{
+	cfg := mustLoadFile(t, map[string]string{
 		AuthTokenEnv:   "t",
 		S3AccessKeyEnv: "stale-env-access-key",
 	}, `{"resource/file_storage": {"s3-user": ""}}`)
@@ -1052,7 +1104,7 @@ func TestLoadFileLogLevelEmptyStringIsRejected(t *testing.T) {
 	t.Parallel()
 
 	envs := map[string]string{AuthTokenEnv: "t", ConfigPathEnv: testConfigPath}
-	_, err := Load([]string{progName}, env(envs), files(map[string]string{
+	_, err := Load(env(envs), files(map[string]string{
 		testConfigPath: `{"resource/printgateway": {"logLevel": ""}}`,
 	}))
 	requireErrContaining(t, err, testConfigPath+":resource/printgateway.logLevel", "must not be empty")
@@ -1095,7 +1147,7 @@ func TestLoadFileLogServerCombinesHostAndPort(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			cfg := mustLoadFile(t, []string{progName}, map[string]string{
+			cfg := mustLoadFile(t, map[string]string{
 				AuthTokenEnv: "t",
 				LogServerEnv: "stale-env-log:9999",
 			}, tt.body)
@@ -1119,7 +1171,7 @@ func TestLoadValidateErrorsNameTheFileSource(t *testing.T) {
 	// Default ReadTimeout (5m) + max(FetchTimeout,S3Timeout) (60s) + SubmitTimeout (30s) = 6.5m;
 	// a file-sourced WriteTimeout of 1m must trip validate's write-budget check.
 	envs := map[string]string{AuthTokenEnv: "t", ConfigPathEnv: testConfigPath}
-	_, err := Load([]string{progName}, env(envs), files(map[string]string{
+	_, err := Load(env(envs), files(map[string]string{
 		testConfigPath: fileWith("resource/printgateway.timeouts.write", "1m"),
 	}))
 
@@ -1145,7 +1197,7 @@ func TestConfigSourceFallsBackToTheEnvVarName(t *testing.T) {
 func TestLoadFileExplicitNullBehavesAsAbsent(t *testing.T) {
 	t.Parallel()
 
-	cfg := mustLoadFile(t, []string{progName}, map[string]string{AuthTokenEnv: "t"}, `{"resource/printgateway": {"timeouts": {"write": null}}}`)
+	cfg := mustLoadFile(t, map[string]string{AuthTokenEnv: "t"}, `{"resource/printgateway": {"timeouts": {"write": null}}}`)
 
 	if cfg.WriteTimeout != DefaultWriteTimeout {
 		t.Errorf("WriteTimeout = %s, want the default %s when the file sets it to null", cfg.WriteTimeout, DefaultWriteTimeout)
@@ -1159,7 +1211,7 @@ func TestLoadFileMissingPathErrors(t *testing.T) {
 	t.Parallel()
 
 	envs := map[string]string{AuthTokenEnv: "t", ConfigPathEnv: "/nope/does-not-exist.json"}
-	_, err := Load([]string{progName}, env(envs), files(nil))
+	_, err := Load(env(envs), files(nil))
 	requireErrContaining(t, err, ConfigPathEnv, "/nope/does-not-exist.json")
 }
 
@@ -1167,7 +1219,7 @@ func TestLoadFileMalformedJSONErrors(t *testing.T) {
 	t.Parallel()
 
 	envs := map[string]string{AuthTokenEnv: "t", ConfigPathEnv: testConfigPath}
-	_, err := Load([]string{progName}, env(envs), files(map[string]string{testConfigPath: `{not valid json`}))
+	_, err := Load(env(envs), files(map[string]string{testConfigPath: `{not valid json`}))
 	requireErrContaining(t, err, testConfigPath)
 }
 
@@ -1177,7 +1229,7 @@ func TestLoadFileTrailingContentErrors(t *testing.T) {
 	t.Parallel()
 
 	envs := map[string]string{AuthTokenEnv: "t", ConfigPathEnv: testConfigPath}
-	_, err := Load([]string{progName}, env(envs), files(map[string]string{testConfigPath: `{} {}`}))
+	_, err := Load(env(envs), files(map[string]string{testConfigPath: `{} {}`}))
 	requireErrContaining(t, err, testConfigPath, "exactly one JSON value")
 }
 
@@ -1201,7 +1253,7 @@ func TestLoadFileTypeMismatchNamesTheJSONPathNotAGoType(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			envs := map[string]string{AuthTokenEnv: "t", ConfigPathEnv: testConfigPath}
-			_, err := Load([]string{progName}, env(envs), files(map[string]string{testConfigPath: tt.fileContent}))
+			_, err := Load(env(envs), files(map[string]string{testConfigPath: tt.fileContent}))
 			if err == nil {
 				t.Fatal("expected an error, got nil")
 			}
@@ -1235,57 +1287,20 @@ func TestLoadFileEmptyOrNullBodyErrors(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			envs := map[string]string{AuthTokenEnv: "t", ConfigPathEnv: testConfigPath}
-			_, err := Load([]string{progName}, env(envs), files(map[string]string{testConfigPath: tt.fileContent}))
+			_, err := Load(env(envs), files(map[string]string{testConfigPath: tt.fileContent}))
 			requireErrContaining(t, err, testConfigPath, tt.wantInErr)
 		})
 	}
 }
 
-// TestLoadFileInvalidAddrErrors proves a malformed service.addr fails fast at startup, labeled
-// with the file source, rather than reaching net.Listen and failing after "listening" was logged.
-func TestLoadFileInvalidAddrErrors(t *testing.T) {
+// TestLoadFileAddrKeyIsRejected proves resource/printgateway.addr's removal from the file layer
+// was deliberate, not a silent regression: naming it now fails fast as an unknown field, the same
+// way allowPrivateTargets is already enforced env-only at the type level. Port/BindHost are
+// env-only for the identical reason (see PortEnv/BindHostEnv's doc comments).
+func TestLoadFileAddrKeyIsRejected(t *testing.T) {
 	t.Parallel()
 
 	envs := map[string]string{AuthTokenEnv: "t", ConfigPathEnv: testConfigPath}
-	_, err := Load([]string{progName}, env(envs), files(map[string]string{testConfigPath: fileWith("resource/printgateway.addr", "not-a-valid-address")}))
-	requireErrContaining(t, err, testConfigPath, "resource/printgateway.addr", "not-a-valid-address")
-}
-
-// TestLoadAddrPrecedenceWithFile pins the one exception to "file always wins over env": Addr's
-// precedence stays argv -> file -> default.
-func TestLoadAddrPrecedenceWithFile(t *testing.T) {
-	t.Parallel()
-
-	t.Run("argv wins over the file", func(t *testing.T) {
-		t.Parallel()
-		cfg := mustLoadFile(t, []string{progName, "0.0.0.0:7777"}, map[string]string{AuthTokenEnv: "t"}, fileWith("resource/printgateway.addr", "0.0.0.0:8888"))
-		if cfg.Addr != "0.0.0.0:7777" {
-			t.Errorf("Addr = %q, want the argv value %q", cfg.Addr, "0.0.0.0:7777")
-		}
-		if cfg.AddrSource != AddrSourceArgv {
-			t.Errorf("AddrSource = %q, want %q", cfg.AddrSource, AddrSourceArgv)
-		}
-	})
-
-	t.Run("the file wins over the default when there is no argv", func(t *testing.T) {
-		t.Parallel()
-		cfg := mustLoadFile(t, []string{progName}, map[string]string{AuthTokenEnv: "t"}, fileWith("resource/printgateway.addr", "0.0.0.0:8888"))
-		if cfg.Addr != "0.0.0.0:8888" {
-			t.Errorf("Addr = %q, want the file's value %q", cfg.Addr, "0.0.0.0:8888")
-		}
-		if cfg.AddrSource != AddrSourceFile {
-			t.Errorf("AddrSource = %q, want %q", cfg.AddrSource, AddrSourceFile)
-		}
-	})
-
-	t.Run("neither argv nor file leaves the default", func(t *testing.T) {
-		t.Parallel()
-		cfg := mustLoadFile(t, []string{progName}, map[string]string{AuthTokenEnv: "t"}, "{}")
-		if cfg.Addr != DefaultAddr {
-			t.Errorf("Addr = %q, want the default %q", cfg.Addr, DefaultAddr)
-		}
-		if cfg.AddrSource != AddrSourceDefault {
-			t.Errorf("AddrSource = %q, want %q", cfg.AddrSource, AddrSourceDefault)
-		}
-	})
+	_, err := Load(env(envs), files(map[string]string{testConfigPath: fileWith("resource/printgateway.addr", "0.0.0.0:8888")}))
+	requireErrContaining(t, err, testConfigPath, "addr")
 }

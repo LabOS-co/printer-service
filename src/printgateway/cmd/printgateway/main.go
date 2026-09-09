@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -38,7 +39,7 @@ func main() {
 	// The discarded error here is safe: GetLoggerWithSettings does no I/O and always returns nil.
 	logger, _ := logs.GetLoggerWithSettings(logs.LogsSettings{Format: logs.FormatJSON}, config.ServiceName)
 
-	if err := run(ctx, stop, os.Args, os.Getenv, os.ReadFile, logger); err != nil {
+	if err := run(ctx, stop, os.Getenv, os.ReadFile, logger); err != nil {
 		os.Exit(1)
 	}
 }
@@ -52,10 +53,10 @@ func main() {
 // disposition before Shutdown (letting a second signal force-kill) while a test drives that
 // branch with a plain context.WithCancel instead of a real OS signal — deriving the context
 // from signal.NotifyContext inside run itself would register a live signal handler per test.
-func run(ctx context.Context, stopSignals func(), args []string, getenv func(string) string, readFile func(string) ([]byte, error), logger logs.Logger) error {
+func run(ctx context.Context, stopSignals func(), getenv func(string) string, readFile func(string) ([]byte, error), logger logs.Logger) error {
 	startupMeta := &logs.LogMetaData{Service: config.ServiceName}
 
-	cfg, err := config.Load(args, getenv, readFile)
+	cfg, err := config.Load(getenv, readFile)
 	if err != nil {
 		logger.LogError(fmt.Sprintf("invalid configuration: %v", err), startupMeta)
 		return err
@@ -66,14 +67,10 @@ func run(ctx context.Context, stopSignals func(), args []string, getenv func(str
 		logger.LogError(fmt.Sprintf("%s: invalid level %q, defaulting to info: %v", cfg.Source(config.LogLevelEnv), cfg.LogLevel, err), startupMeta)
 	}
 
-	// LogError, not LogInfo: the config-file/env precedence is inverted relative to every ops
-	// reflex, so an operator needs this line to survive a warn/error log level. Addr has no env
-	// var, so its file-sourced key is prepended explicitly since FileSourcedKeys() can't carry it.
+	// LogError, not LogInfo: the config-file/env precedence is inverted relative to every ops reflex,
+	// so an operator needs this line to survive a warn/error log level.
 	if cfg.ConfigFilePath != "" {
 		keys := cfg.FileSourcedKeys()
-		if cfg.AddrSource == config.AddrSourceFile {
-			keys = append([]string{"resource/printgateway.addr"}, keys...)
-		}
 		supplied := "(no settings)"
 		if len(keys) > 0 {
 			supplied = strings.Join(keys, ", ")
@@ -132,10 +129,20 @@ func run(ctx context.Context, stopSignals func(), args []string, getenv func(str
 	api := httpapi.New(cfg, logger, svc, presigner)
 	server := httpapi.NewServer(api)
 
+	// Listen before logging "listening": BindHost is an unvalidated env value (an operator typo
+	// there fails at net.Listen, not at config validation), so announcing an address before it's
+	// known to actually be bindable would repeat the exact "listening on <typo>" trap the deleted
+	// config-file address validation used to guard against.
+	ln, err := net.Listen("tcp", cfg.Addr())
+	if err != nil {
+		logger.LogError(fmt.Sprintf("cannot listen on %s: %v", cfg.Addr(), err), startupMeta)
+		return err
+	}
+
 	serveErr := make(chan error, 1)
 	go func() {
-		logger.LogInfo(fmt.Sprintf("print gateway (prototype) listening on %s (addr source: %s)", cfg.Addr, cfg.AddrSource), startupMeta)
-		serveErr <- server.ListenAndServe()
+		logger.LogInfo(fmt.Sprintf("print gateway (prototype) listening on %s", ln.Addr()), startupMeta)
+		serveErr <- server.Serve(ln)
 	}()
 
 	select {

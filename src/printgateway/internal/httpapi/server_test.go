@@ -18,7 +18,7 @@ import (
 // applied, rather than the zero-value-heavy literal newTestAPI uses elsewhere.
 func fullConfig(t *testing.T) config.Config {
 	t.Helper()
-	cfg, err := config.Load([]string{"printgateway"}, func(key string) string {
+	cfg, err := config.Load(func(key string) string {
 		if key == config.AuthTokenEnv {
 			return "test-token"
 		}
@@ -110,7 +110,8 @@ func TestGracefulShutdownLetsAnInFlightRequestFinish(t *testing.T) {
 
 	svc := printgw.NewService(&fakeSubmitter{}, nil, nil, printgw.Timeouts{Submit: time.Second}, 0)
 	cfg := fullConfig(t)
-	cfg.Addr = "127.0.0.1:0"
+	cfg.BindHost = "127.0.0.1"
+	cfg.Port = 0
 	a := New(cfg, &capturingLogger{}, svc, nil)
 	srv := NewServer(a)
 
@@ -124,7 +125,7 @@ func TestGracefulShutdownLetsAnInFlightRequestFinish(t *testing.T) {
 	})
 	srv.Handler = mux
 
-	ln, err := net.Listen("tcp", cfg.Addr)
+	ln, err := net.Listen("tcp", cfg.Addr())
 	if err != nil {
 		t.Fatal(err)
 	}

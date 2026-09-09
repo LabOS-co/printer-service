@@ -14,9 +14,9 @@
 	//
 	//        wsl -d Ubuntu
 	//        cd /mnt/c/GitProjects/printer-server/src/printgateway
-	//        PRINT_GATEWAY_TOKEN=dev-token \
+	//        PRINT_GATEWAY_TOKEN=dev-token PRINT_GATEWAY_BIND_HOST=127.0.0.1 \
 	//          dlv debug ./cmd/printgateway --headless --api-version=2 \
-	//            --accept-multiclient --listen=127.0.0.1:2345 -- 127.0.0.1:8090
+	//            --accept-multiclient --listen=127.0.0.1:2345
 	//
 	//      Delve was installed into the Ubuntu distro on 2026-09-07 and lives
 	//      at /root/go/bin/dlv (the distro's default user is root, and ~/go/bin
@@ -51,14 +51,14 @@
 			"mode": "debug",
 			"program": "${workspaceFolder}/src/printgateway/cmd/printgateway",
 			"cwd": "${workspaceFolder}/src/printgateway",
-			// os.Args[1] is the listen address override (config.Load); drop it
-			// to fall back to config.DefaultAddr, 127.0.0.1:8090.
-			"args": [
-				"127.0.0.1:8090"
-			],
 			"env": {
 				"PRINT_GATEWAY_TOKEN": "dev-token",
 				"PRINT_GATEWAY_LOG_LEVEL": "debug",
+				// Default bind is 0.0.0.0 (every interface) now that Nomad/Consul/Traefik need to
+				// reach it from outside the host's own namespace; pinned to loopback-only here since
+				// this is a local debug session, not a deployed one, and ALLOW_PRIVATE_TARGETS below
+				// would otherwise turn a LAN-reachable listener into an open SSRF proxy.
+				"PRINT_GATEWAY_BIND_HOST": "127.0.0.1",
 				// The fetch guard rejects private/loopback targets by default;
 				// a dev box downloading test PDFs from itself needs this on.
 				"PRINT_GATEWAY_ALLOW_PRIVATE_TARGETS": "true"

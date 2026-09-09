@@ -90,7 +90,7 @@ func noReadFile(t *testing.T) func(string) ([]byte, error) {
 func TestRunReturnsErrorOnInvalidConfig(t *testing.T) {
 	t.Parallel()
 
-	err := run(context.Background(), func() {}, []string{"printgateway"}, envMap(map[string]string{
+	err := run(context.Background(), func() {}, envMap(map[string]string{
 		config.AuthTokenEnv:   "t",
 		config.ReadTimeoutEnv: "not-a-duration",
 	}), noReadFile(t), &recordingLogger{})
@@ -105,7 +105,7 @@ func TestRunReturnsErrorOnInvalidConfig(t *testing.T) {
 func TestRunReturnsErrorWhenNoPrintTokenIsResolvable(t *testing.T) {
 	t.Parallel()
 
-	err := run(context.Background(), func() {}, []string{"printgateway"}, envMap(nil), noReadFile(t), &recordingLogger{})
+	err := run(context.Background(), func() {}, envMap(nil), noReadFile(t), &recordingLogger{})
 	if err == nil {
 		t.Fatal("expected an error when neither Vault nor PRINT_GATEWAY_TOKEN produce a token")
 	}
@@ -145,6 +145,28 @@ func freeAddr(t *testing.T) string {
 	return addr
 }
 
+// envWithPort merges vars with PORT taken from addr ("host:port") and BindHost pinned to
+// 127.0.0.1, so a test can still pin run()'s listener to a specific, pre-reserved local address
+// now that Addr is env-only rather than a positional argument. Pinning BindHost explicitly matters
+// here, not just for dialing back in: freeAddr (below) only ever reserves a port on 127.0.0.1, and
+// letting run() fall through to its 0.0.0.0 default would (a) widen freeAddr's already-inherent
+// TOCTOU race — a port free on loopback isn't necessarily free on the wildcard address — and (b)
+// open a LAN-reachable listener for the duration of the test, not just a loopback one.
+func envWithPort(t *testing.T, addr string, vars map[string]string) map[string]string {
+	t.Helper()
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("invalid test address %q: %v", addr, err)
+	}
+	merged := make(map[string]string, len(vars)+2)
+	for k, v := range vars {
+		merged[k] = v
+	}
+	merged[config.PortEnv] = port
+	merged[config.BindHostEnv] = "127.0.0.1"
+	return merged
+}
+
 // TestRunGracefulShutdownReturnsNil drives the shutdown path via a cancellable context rather than
 // a real OS signal, and proves the server was accepting connections before shutdown, stopSignals
 // ran while it still was, and the server has genuinely stopped accepting afterward.
@@ -169,9 +191,9 @@ func TestRunGracefulShutdownReturnsNil(t *testing.T) {
 	runErr := make(chan error, 1)
 	logger := &recordingLogger{}
 	go func() {
-		runErr <- run(ctx, stopSignals, []string{"printgateway", addr}, envMap(map[string]string{
+		runErr <- run(ctx, stopSignals, envMap(envWithPort(t, addr, map[string]string{
 			config.AuthTokenEnv: "test-token",
-		}), noReadFile(t), logger)
+		})), noReadFile(t), logger)
 	}()
 
 	waitForDial(t, addr, 5*time.Second)
@@ -197,19 +219,33 @@ func TestRunGracefulShutdownReturnsNil(t *testing.T) {
 }
 
 // TestRunReturnsErrorOnListenFailure occupies a real port first so ListenAndServe fails
-// immediately and deterministically.
+// immediately and deterministically. Occupies config.DefaultBindHost specifically (not just
+// 127.0.0.1): run() now binds the default host unless told otherwise, and 0.0.0.0 vs. 127.0.0.1
+// don't reliably conflict as separate bind targets on every platform, so occupying anything else
+// risks run() binding successfully instead of failing.
 func TestRunReturnsErrorOnListenFailure(t *testing.T) {
 	t.Parallel()
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := net.Listen("tcp", config.DefaultBindHost+":0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer ln.Close()
-	occupied := ln.Addr().String()
+	// ln.Addr().String() can render as "[::]:<port>" on some platforms even though it was bound to
+	// 0.0.0.0 — take just the port and rebuild the address the way run() itself will report it
+	// (config.DefaultBindHost:<port>), rather than asserting against that platform-specific rendering.
+	_, occupiedPort, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	occupied := config.DefaultBindHost + ":" + occupiedPort
 
-	err = run(context.Background(), func() {}, []string{"printgateway", occupied}, envMap(map[string]string{
+	// Not envWithPort: that helper pins BindHost to 127.0.0.1, but this test specifically needs
+	// run() to bind the same DefaultBindHost the occupying listener above used, or there's no
+	// conflict to fail on.
+	err = run(context.Background(), func() {}, envMap(map[string]string{
 		config.AuthTokenEnv: "test-token",
+		config.PortEnv:      occupiedPort,
 	}), noReadFile(t), &recordingLogger{})
 	if err == nil {
 		t.Fatalf("expected an error binding an already-occupied address %s, got nil", occupied)
@@ -230,7 +266,7 @@ func TestRunCoversS3AndPrivateTargetsWarningPaths(t *testing.T) {
 
 	runErr := make(chan error, 1)
 	go func() {
-		runErr <- run(ctx, func() {}, []string{"printgateway", addr}, envMap(map[string]string{
+		runErr <- run(ctx, func() {}, envMap(envWithPort(t, addr, map[string]string{
 			config.AuthTokenEnv:           "test-token",
 			config.S3EndpointEnv:          "localhost:9000",
 			config.S3BucketEnv:            "docs",
@@ -238,7 +274,7 @@ func TestRunCoversS3AndPrivateTargetsWarningPaths(t *testing.T) {
 			config.S3SecretKeyEnv:         "secret-key",
 			config.S3RegionEnv:            "us-east-1",
 			config.AllowPrivateTargetsEnv: "true",
-		}), noReadFile(t), logger)
+		})), noReadFile(t), logger)
 	}()
 
 	waitForDial(t, addr, 5*time.Second)
@@ -277,7 +313,7 @@ func TestNewObjectStoreUnconfiguredIsSilentlyNil(t *testing.T) {
 	t.Parallel()
 
 	logger := &recordingLogger{}
-	cfg, err := config.Load([]string{"printgateway"}, envMap(map[string]string{config.AuthTokenEnv: "t"}), noReadFile(t))
+	cfg, err := config.Load(envMap(map[string]string{config.AuthTokenEnv: "t"}), noReadFile(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +331,7 @@ func TestNewObjectStoreHalfConfiguredIsNilAndLogged(t *testing.T) {
 	t.Parallel()
 
 	logger := &recordingLogger{}
-	cfg, err := config.Load([]string{"printgateway"}, envMap(map[string]string{
+	cfg, err := config.Load(envMap(map[string]string{
 		config.AuthTokenEnv:  "t",
 		config.S3EndpointEnv: "http://localhost:9000",
 		// S3BucketEnv deliberately left unset.
@@ -317,7 +353,7 @@ func TestNewObjectStoreMissingCredentialsIsNilAndLogged(t *testing.T) {
 	t.Parallel()
 
 	logger := &recordingLogger{}
-	cfg, err := config.Load([]string{"printgateway"}, envMap(map[string]string{
+	cfg, err := config.Load(envMap(map[string]string{
 		config.AuthTokenEnv:  "t",
 		config.S3EndpointEnv: "http://localhost:9000",
 		config.S3BucketEnv:   "docs",
@@ -340,7 +376,7 @@ func TestNewObjectStoreFullyConfiguredSucceeds(t *testing.T) {
 	t.Parallel()
 
 	logger := &recordingLogger{}
-	cfg, err := config.Load([]string{"printgateway"}, envMap(map[string]string{
+	cfg, err := config.Load(envMap(map[string]string{
 		config.AuthTokenEnv:   "t",
 		config.S3EndpointEnv:  "localhost:9000",
 		config.S3BucketEnv:    "docs",
@@ -375,7 +411,7 @@ func TestNewObjectStoreEmptyRegionWarnsButStillSucceeds(t *testing.T) {
 	t.Parallel()
 
 	logger := &recordingLogger{}
-	cfg, err := config.Load([]string{"printgateway"}, envMap(map[string]string{
+	cfg, err := config.Load(envMap(map[string]string{
 		config.AuthTokenEnv:   "t",
 		config.S3EndpointEnv:  "localhost:9000",
 		config.S3BucketEnv:    "docs",
@@ -420,7 +456,7 @@ func TestRunReturnsErrorOnMissingConfigFile(t *testing.T) {
 	t.Parallel()
 
 	const missing = "/etc/printgateway/does-not-exist.json"
-	err := run(context.Background(), func() {}, []string{"printgateway"}, envMap(map[string]string{
+	err := run(context.Background(), func() {}, envMap(map[string]string{
 		config.AuthTokenEnv:  "t",
 		config.ConfigPathEnv: missing,
 	}), mapReadFile(nil), &recordingLogger{})
@@ -433,25 +469,26 @@ func TestRunReturnsErrorOnMissingConfigFile(t *testing.T) {
 	}
 }
 
-// TestRunStartsFromAConfigFile proves the config file reaches the live listener, not just the
-// returned Config, by supplying the address via service.addr (the only way to set Addr under systemd).
+// TestRunStartsFromAConfigFile proves a config file's settings reach the live listener, not just
+// the returned Config, using a harmless timeout key (the address itself is env-only now; see
+// config.TestLoadFileAddrKeyIsRejected for why resource/printgateway.addr no longer works — that's
+// config.Load's own validation, so it's proven once there rather than re-proven through run() here).
 func TestRunStartsFromAConfigFile(t *testing.T) {
 	t.Parallel()
 
 	addr := freeAddr(t)
-	const configPath = "/etc/printgateway/run-addr-test.json"
-	fileBody := fmt.Sprintf(`{"resource/printgateway": {"addr": %q}}`, addr)
+	const configPath = "/etc/printgateway/run-file-test.json"
+	fileBody := `{"resource/printgateway": {"timeouts": {"idle": "90s"}}}`
 
 	ctx, cancel := context.WithCancel(context.Background())
 	logger := &recordingLogger{}
 
 	runErr := make(chan error, 1)
 	go func() {
-		// No positional address in args: service.addr is the only thing naming a listen address here.
-		runErr <- run(ctx, func() {}, []string{"printgateway"}, envMap(map[string]string{
+		runErr <- run(ctx, func() {}, envMap(envWithPort(t, addr, map[string]string{
 			config.AuthTokenEnv:  "test-token",
 			config.ConfigPathEnv: configPath,
-		}), mapReadFile(map[string]string{configPath: fileBody}), logger)
+		})), mapReadFile(map[string]string{configPath: fileBody}), logger)
 	}()
 
 	waitForDial(t, addr, 5*time.Second)
@@ -484,10 +521,10 @@ func TestRunLogsFileSourcedSettingsWithTheirFileOrigin(t *testing.T) {
 
 	runErr := make(chan error, 1)
 	go func() {
-		runErr <- run(ctx, func() {}, []string{"printgateway", addr}, envMap(map[string]string{
+		runErr <- run(ctx, func() {}, envMap(envWithPort(t, addr, map[string]string{
 			config.AuthTokenEnv:  "test-token",
 			config.ConfigPathEnv: configPath,
-		}), mapReadFile(map[string]string{configPath: fileBody}), logger)
+		})), mapReadFile(map[string]string{configPath: fileBody}), logger)
 	}()
 
 	waitForDial(t, addr, 5*time.Second)
@@ -541,11 +578,11 @@ func TestRunAllowPrivateTargetsStaysEnvOnly(t *testing.T) {
 
 	runErr := make(chan error, 1)
 	go func() {
-		runErr <- run(ctx, func() {}, []string{"printgateway", addr}, envMap(map[string]string{
+		runErr <- run(ctx, func() {}, envMap(envWithPort(t, addr, map[string]string{
 			config.AuthTokenEnv:           "test-token",
 			config.ConfigPathEnv:          configPath,
 			config.AllowPrivateTargetsEnv: "true",
-		}), mapReadFile(map[string]string{configPath: fileBody}), logger)
+		})), mapReadFile(map[string]string{configPath: fileBody}), logger)
 	}()
 
 	waitForDial(t, addr, 5*time.Second)

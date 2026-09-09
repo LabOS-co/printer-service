@@ -143,12 +143,17 @@ only reports that the process is up and serving.
 The server is closed to anything that is not the calling system, in two
 independent layers — the same model `HtmlToPdf` relies on, plus a token:
 
-1. **Listen address.** It binds `127.0.0.1:8090` by default, so it is not
-   reachable from any other machine at all. A positional address argument
-   overrides this, and so does the config file's `resource/printgateway.addr`
-   key (the argument wins if both are given — see "Configuration file"
-   below); use a specific internal interface, never `:8090`, which would
-   listen on every interface including any external one.
+1. **Listen address.** It binds `0.0.0.0:8090` by default — every interface —
+   since under Nomad the port is dynamically allocated and Consul/Traefik
+   must be able to reach it from outside the allocating host's own network
+   namespace. Set `PORT` (or the higher-precedence `PRINT_GATEWAY_PORT`) to
+   change the port, and `PRINT_GATEWAY_BIND_HOST` to restrict which interface
+   it binds — set it to `127.0.0.1` for a manual local run that should stay
+   closed to every other machine, matching this module's original loopback-only
+   default. Neither is settable from the config file (see "Configuration
+   file" below): like `PRINT_GATEWAY_ALLOW_PRIVATE_TARGETS`, the listen
+   address must come from the environment a process was actually launched
+   with, not a file that's easier to leave stale.
 2. **Shared token.** Every request must carry the header
    `X-Labos-Print-Token`, matched in constant time against the resolved print
    token (`PRINT_GATEWAY_TOKEN`, or Vault — see "Secrets (Vault)" below). A
@@ -185,21 +190,17 @@ to before it existed.
 Every setting the file names wins over its env var unconditionally; every
 setting the file omits (or the file itself is entirely absent) falls
 through to the env var, then the compiled default, exactly as before. The
-one exception is the listen address: because `Addr` has no env var at all,
-its order is **positional argument → `resource/printgateway.addr` →
-default**, with the argument winning even over the file — a config file
-must never silently override an address someone passed deliberately on the
-command line. `resource/printgateway.addr` is nonetheless the single
-highest-value key in the file: it is the *only* way to set the listen
-address under `systemd`, which invokes the binary with no positional
-argument.
+listen address (`PORT`/`PRINT_GATEWAY_PORT`/`PRINT_GATEWAY_BIND_HOST`) is
+the one exception, in the other direction: it's env-only, with no config-file
+key at all — a leftover `resource/printgateway.addr` key from before this
+was env-only fails fast with a message naming what to set instead, rather
+than a bare "unknown field" error.
 
 ```json
 {
   "resource/log":         { "host": "logstash.internal", "port": "514" },
   "resource/file_storage": { "host": "s3.eu-west-1.amazonaws.com", "s3-user": "...", "s3-password": "..." },
   "resource/printgateway": {
-    "addr": "127.0.0.1:8090",
     "logLevel": "info",
     "timeouts":    { "readHeader": "10s", "read": "5m", "write": "8m",
                      "idle": "60s", "shutdownGrace": "2m", "submit": "30s" },
@@ -352,11 +353,10 @@ version, not an oversight.
   neither `printservice.config.json` nor `printservice.config.local.json` is
   baked into the image. Bind-mount whichever one applies (the `.local.json`
   one if it carries a real S3 credential — see "Two files, two purposes"
-  above) and set `PRINT_GATEWAY_CONFIG` to wherever it's mounted. Note
-  `docker-entrypoint.sh` ends in `exec … "$@"`, so any wrapper that passes a
-  positional address — even an *empty* one — silently outranks
-  `resource/printgateway.addr`, the same "argument always wins" rule as
-  everywhere else.
+  above) and set `PRINT_GATEWAY_CONFIG` to wherever it's mounted. The listen
+  address is set via `PORT`/`PRINT_GATEWAY_BIND_HOST` env vars now, not a
+  positional argument — `docker-entrypoint.sh`'s `exec … "$@"` passes through
+  whatever args it's given, but printgateway itself no longer reads any.
   **`docker-compose.yml`** (same directory) wires this automatically for
   local/dev use: `docker compose up` builds the image, bind-mounts
   `printservice.config.local.json` to `/etc/printgateway/printservice.config.json`,
@@ -763,8 +763,9 @@ cd src/printgateway
 GOOS=linux GOARCH=amd64 go build -o printgateway-linux-amd64 ./cmd/printgateway
 # copy printgateway-linux-amd64 into the WSL filesystem, then inside WSL:
 chmod +x printgateway-linux-amd64
-./printgateway-linux-amd64            # listens on :8090
-./printgateway-linux-amd64 :9000      # or pick a different port
+./printgateway-linux-amd64                    # listens on 0.0.0.0:8090
+PORT=9000 ./printgateway-linux-amd64          # or pick a different port
+PRINT_GATEWAY_BIND_HOST=127.0.0.1 ./printgateway-linux-amd64  # loopback-only, for a local test
 ```
 
 ```bash

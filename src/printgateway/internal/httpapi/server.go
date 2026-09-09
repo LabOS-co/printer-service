@@ -21,7 +21,7 @@ func NewServer(a *API) *http.Server {
 	mux.HandleFunc("/status", a.statusHandler)
 
 	return &http.Server{
-		Addr:              a.cfg.Addr,
+		Addr:              a.cfg.Addr(),
 		Handler:           a.handlerChain(mux),
 		ReadHeaderTimeout: a.cfg.ReadHeaderTimeout,
 		ReadTimeout:       a.cfg.ReadTimeout,

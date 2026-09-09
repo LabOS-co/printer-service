@@ -562,7 +562,7 @@ func TestResolveS3CredentialsSourceLabelsAFileSuppliedCredential(t *testing.T) {
 		}
 		return nil, fmt.Errorf("no such file %s", p)
 	}
-	cfg, err := config.Load([]string{"printgateway"}, getenv, readFile)
+	cfg, err := config.Load(getenv, readFile)
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
 	}
@@ -597,7 +597,7 @@ func TestResolveS3CredentialsSourceLabelsAMixedFileAndEnvCredential(t *testing.T
 		}
 		return nil, fmt.Errorf("no such file %s", p)
 	}
-	cfg, err := config.Load([]string{"printgateway"}, getenv, readFile)
+	cfg, err := config.Load(getenv, readFile)
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
 	}
@@ -635,7 +635,7 @@ func TestResolveS3CredentialsFileSuppressionFailsClosed(t *testing.T) {
 		}
 		return nil, fmt.Errorf("no such file %s", p)
 	}
-	cfg, err := config.Load([]string{"printgateway"}, getenv, readFile)
+	cfg, err := config.Load(getenv, readFile)
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
 	}

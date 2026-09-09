@@ -1,6 +1,5 @@
 {
   "resource/printgateway": {
-    "addr": "127.0.0.1:8090",
     "logLevel": "info",
     "timeouts": {
       "readHeader": "10s",

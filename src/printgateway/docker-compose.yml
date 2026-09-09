@@ -17,12 +17,14 @@
 # host.docker.internal + a bridge network + published port are needed
 # instead (see git history for that variant).
 #
-# No `ports:`/`command:` override needed either: host networking means
-# printgateway's own default bind address (127.0.0.1:8090) already listens
-# directly in the WSL distro's network namespace, reachable both from
-# inside that distro and from Windows via WSL2's localhost forwarding —
-# and keeping it loopback-only matches the "closed to everything but the
-# calling system" model described in README's "Listen address" section.
+# No `ports:` override needed: host networking means printgateway listens
+# directly in the WSL distro's network namespace, reachable both from inside
+# that distro and from Windows via WSL2's localhost forwarding. Its own
+# default bind address is now 0.0.0.0 (every interface, for Nomad/Consul/
+# Traefik reachability — see README's "Listen address" section), so
+# PRINT_GATEWAY_BIND_HOST is pinned to 127.0.0.1 below to keep this
+# local/dev compose file's original "closed to everything but the calling
+# system" model.
 #
 # printservice.config.local.json (repo root, git-ignored — see .gitignore
 # and README's "Two files, two purposes") is the file actually bind-mounted
@@ -42,6 +44,7 @@ services:
       # .env.example) or export it in the shell running `docker compose up`.
       PRINT_GATEWAY_TOKEN: ${PRINT_GATEWAY_TOKEN:?PRINT_GATEWAY_TOKEN must be set (see .env.example)}
       PRINT_GATEWAY_CONFIG: /etc/printgateway/printservice.config.json
+      PRINT_GATEWAY_BIND_HOST: 127.0.0.1
       LOG_SERVER: 192.168.254.83:514
     volumes:
       - ../../printservice.config.local.json:/etc/printgateway/printservice.config.json:ro
