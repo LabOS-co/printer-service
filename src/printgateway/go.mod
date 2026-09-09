@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/LabOS-co/go-packages/error_handler v1.2.4
 	github.com/LabOS-co/go-packages/logs v1.5.2
+	github.com/go-chi/chi/v5 v5.3.2
 )
 
 require (

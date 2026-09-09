@@ -6,15 +6,16 @@ import (
 	"strings"
 
 	"github.com/LabOS-co/go-packages/logs"
+	"github.com/go-chi/chi/v5"
 
 	"printgateway/internal/config"
 )
 
-// NewServer builds the HTTP server for this API on its own ServeMux.
+// NewServer builds the HTTP server for this API on its own chi router.
 // Timeouts/limits all come from a.cfg rather than the http.Server zero
 // value, which would let a slow or silent client hold a connection forever.
 func NewServer(a *API) *http.Server {
-	mux := http.NewServeMux()
+	mux := chi.NewRouter()
 	mux.HandleFunc("/print", a.requireToken(a.printHandler))
 	mux.HandleFunc("/files/presign", a.requireToken(a.presignHandler))
 	// Unauthenticated: the network-proxy's health check has no token.
