@@ -1,4 +1,4 @@
-# printer-server/src — status (last updated 2026-09-01)
+# printer-server/src — status (last updated 2026-09-07)
 
 Continuation of LAB-16894 under `src/` (this repo's working copy is at
 `C:\GitProjects\printer-server`). The original POC at the repo root is
@@ -400,6 +400,86 @@ verified instead in WSL where gcc is available; `src/ippfix`'s two flagged defec
 (silent truncation on a parse failure, a base64-decode failure silently producing a
 zero-length attribute) remain unfixed, since `ippfix` was explicitly kept out of this plan's
 scope.
+
+## Eighth phase (2026-09-07): printgateway JSON config-file layer
+
+Added a config-file layer above the `PRINT_GATEWAY_*` env vars, per the plan at
+`docs/config-file-layer-plan.md` (superseded on discovery mechanics — see that doc's status
+banner and its §4/§6 correction notes) and the authoritative staged plan
+`ok-so-now-create-cached-squid.md`. Discovery is **explicit-only**: read only when
+`PRINT_GATEWAY_CONFIG` names the file, matching precedence **config file → env var → compiled
+default** (the one exception: `service.addr` is `argv → file → default`, since argv already
+outranked env for the listen address and must go on outranking the file too). Landed as four
+independently-reviewed stages, each Opus-reviewed and green on `go build/vet/test` before the
+next started:
+
+1. A behavior-preserving refactor splitting each existing env-override helper's parse-and-validate
+   half out, so the file layer could share it without duplicating validation wording — zero test
+   changes, zero behavior change, verified by the pre-existing suite passing untouched.
+2. Inert provenance infrastructure (`Config.sources`, `Source()`, `FileSourcedKeys()`,
+   `AddrSource`, `ConfigFilePath`), wired into `validate`/`main.go`/`internal/secrets`'s messages
+   before any file-reading code existed, so every message was provably byte-identical at that
+   point (the `sources` map was always empty).
+3. The file layer itself: `fileConfig` (pointer-scalar JSON mirror of the document),
+   `decodeFileConfig` (strict decode — unknown fields and trailing content both rejected,
+   `UnmarshalTypeError` rebuilt into JSON-vocabulary wording rather than leaking a Go struct
+   name), the merge logic, `Load`/`run`'s new `readFile` parameter, the required startup line
+   naming which keys a file supplied, and a full Go test matrix (config_test.go + main_test.go).
+   `allowPrivateTargets` is enforced env-only **at the type level** — no field for it exists
+   anywhere in `fileConfig`, so naming it in the JSON fails as an unknown field, not merely as an
+   undocumented convention.
+4. Data and docs (this entry): `printservice.config.json` rewritten with the real settings —
+   its previous body was a leftover unrelated OpenAPI document for a different service
+   (`OperationsService`, LAB-19590) that nothing ever read. The committed example deliberately
+   **omits** `objectStore.endpoint`/`bucket`/`region` and `logging.server` rather than setting
+   them to `""`, since those four keys treat an explicit `""` as "suppress the env var" — an
+   earlier draft that set them to `""`/a placeholder would have silently disabled a working
+   env-configured S3 setup and logstash address on any deployment that turned the file on; this
+   was caught in review before it shipped. `README.md` gained a full "Configuration file"
+   section plus a config-file-key column on the timeouts/limits and S3 tables.
+
+**Deliberately deferred, not a gap in this phase's scope:** a JSON Schema for editor/CI
+validation (tracked in `docs/config-file-layer-plan.md`); case-insensitive JSON key matching
+under `DisallowUnknownFields` and a duplicate-group-key-merges-rather-than-errors quirk, both
+verified live and documented rather than fixed; `secrets.ResolveLogServer`'s startup line still
+reporting `env` as the source even when the config file is what supplied `logging.server`; Stage
+5 deployment work (Docker/systemd mounting notes, `install-services.sh` wiring) is written up in
+the plan but not yet landed as a repo change.
+
+## Ninth phase (2026-09-08): S3 credentials in the file, then a full reshape to labOS's `resource/*` convention
+
+Two follow-up changes to the eighth phase's config-file layer, both by explicit user instruction:
+
+**S3 credentials became file-settable.** `PRINT_GATEWAY_S3_ACCESS_KEY`/`_SECRET_KEY` were
+originally excluded from the file as secrets (eighth phase, §1's "Locked decisions"). Reversed
+deliberately for a deployment model where the file itself is rendered from Vault at process start
+(e.g. a Vault Agent template), not committed or hand-edited. `secrets.ResolveS3Credentials`'s
+Vault-then-env precedence is unchanged; its returned `source` now correctly reports `"file"` (or
+`"file+env"` for a credential pair split across both sources — a case worth naming on its own
+rather than picking one). Mechanical safeguard added alongside: `printservice.config.local.json`
+(git-ignored) is the file a real deployment puts an actual credential in; the tracked
+`printservice.config.json` must stay secret-free, and `install-services.sh` installs it at mode
+`600` owned by the `printgateway` service user (not `root:root` like `printgateway.env` — this
+file is read directly by the running Go process, not by systemd before it starts).
+
+**Then a full reshape to the labOS `resource/*` convention**, matching how other services (e.g.
+`OperationsService`) already structure their own config files, provided as a reference file from
+a real deployment. `internal/config/config.go`'s `fileConfig` type tree and `mergeFileConfig` were
+rewritten: cross-cutting infrastructure (the S3 connection, the logstash destination) now lives in
+its own top-level `resource/log`/`resource/file_storage` blocks, while everything specific to this
+service moved under `resource/printgateway`. Three explicit decisions: no top-level `version` key
+(the reference convention has none, and the eighth phase's future-compat version-check mechanism
+was dropped entirely to match); no `resource/service_discovery`/`resource/cache` placeholders
+(printgateway uses neither Consul nor Redis — naming them is an unknown-field error, not an inert
+stub); bucket/region and every other printgateway-specific S3 setting stay under
+`resource/printgateway.objectStore`, not the shared `resource/file_storage` block, mirroring how
+the reference's own service-specific block picks its bucket via `fileBackupStore.path` rather than
+through the shared resource. Full mapping table and the reasoning behind each decision are in
+`docs/config-file-layer-plan.md` §7. Every test file, both JSON config files, and
+`README.md`'s "Configuration file" section were updated to match — see that section for the
+current, accurate shape; `docs/config-file-layer-plan.md`'s earlier sections (§2's JSON example
+in particular) are explicitly marked stale rather than rewritten in place, to keep the change
+history legible.
 
 ## Open items / not yet done
 
