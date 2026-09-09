@@ -110,9 +110,16 @@ an `_en` English twin. Each script writes exactly one file, named at the bottom 
   three modules; IPP encoding/decoding is written by hand against RFC 8010/8011. Keep it that way.
   `printgateway` is the one exception, since it depends on the shared labOS `go-packages` library
   (see above) — that's expected for anything that's an actual HTTP service rather than a CLI/proxy.
-- **Comments explain *why*, at length.** Most non-obvious lines here exist because of a diagnosed
-  bug (a printer firmware violation, a cups-filters bug, an IPP attribute-name mistake). When you
-  work around something, write down the root cause next to it — that is the established style.
+- **Comments stay short; code explains itself.** (Revised 2026-09-09 — the previous convention here
+  called for long *why*-comments; that produced comment blocks longer than the code they described
+  and is no longer wanted.) Doc comments on exported functions/types are one or two sentences, not
+  paragraphs. Inside a function body, don't add a comment that explains *what* the code does or
+  restates the logic in prose — if it needs that, rename variables/functions or extract a
+  well-named helper instead. The one exception: a single terse line is still warranted for a truly
+  non-obvious constraint that would cause a real bug if violated (e.g. "must run before X: Y
+  reads a still-zero field otherwise") — a diagnosed root cause (a printer firmware violation, a
+  cups-filters bug, an IPP attribute-name mistake) still deserves a one-line note next to the
+  workaround, just not a multi-paragraph one.
 - **Hebrew RTL docx**: mixed Hebrew/English text must go through `splitBidiSegments()`/`Runs()`,
   which puts Latin spans in their own `TextRun` with `rightToLeft: false`. Do **not** insert Unicode
   bidi control characters (LRI U+2066 / PDI U+2069) — that was tried and rendered as visible
