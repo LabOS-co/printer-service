@@ -26,3 +26,25 @@
 # OS/editor cruft
 .DS_Store
 Thumbs.db
+
+# printgateway config file, credential-bearing variant. /printservice.config.json
+# itself stays tracked and MUST stay secret-free (a working example reproducing
+# today's env-only defaults, see src/printgateway/README.md's "Configuration
+# file" section) — this pattern is for a real deployment's copy, e.g. one a
+# Vault Agent template renders with actual objectStore.accessKey/secretKey
+# values baked in. install-services.sh prefers this file over the tracked
+# example when present, specifically so a real credential is never staged
+# inside the git working copy under the tracked file's own name.
+/printservice.config.local.json
+
+# docker-compose reads this automatically for PRINT_GATEWAY_TOKEN (see
+# src/printgateway/docker-compose.yml and .env.example) — same
+# never-commit-a-filled-in-copy rule as everywhere else.
+/src/printgateway/.env
+
+# Go module cache (GOPATH/pkg/mod), ends up under the repo root when GOPATH
+# is pointed here — build cache, not source.
+/pkg/
+
+# Generated Postman/Newman run output from tests/scripts — not source.
+/tests/reports/

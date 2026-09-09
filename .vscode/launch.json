@@ -1,27 +1,255 @@
 {
-  "version": "0.2.0",
-  "configurations": [
-    {
-      "name": "Debug Print Gateway",
-      "type": "go",
-      "request": "launch",
-      "mode": "debug",
-      "program": "${workspaceFolder}/src/printgateway",
-      "env": {
-        "PRINT_GATEWAY_TOKEN": "dev-token"
-      },
-      "cwd": "${workspaceFolder}/src/printgateway",
-      "args": [],
-      "showLog": "rpc"
-    },
-    {
-      "name": "Attach to WSL Print Gateway",
-      "type": "go",
-      "request": "attach",
-      "mode": "remote",
-      "host": "127.0.0.1",
-      "port": 2345,
-      "cwd": "/mnt/c/GitProjects/printer-server/src/printgateway"
-    }
-  ]
+	// Debug configurations for every Go module in this repo, in both worlds:
+	//
+	//   A) "(local)" configs — dlv runs on whatever machine VS Code itself is
+	//      attached to. Open the folder on Windows and they build/run a Windows
+	//      binary; reopen it through Remote-WSL ("WSL: Connect to WSL using
+	//      Distro..." on Ubuntu, then open /mnt/c/GitProjects/printer-server)
+	//      and the exact same configs build/run a Linux binary next to cupsd.
+	//      ${workspaceFolder} resolves per host, so no path edits are needed.
+	//
+	//   B) "(attach: WSL)" configs — VS Code stays on Windows, the process runs
+	//      inside WSL under a headless Delve, and we attach over TCP. Start the
+	//      target first, from a WSL shell in the module's directory:
+	//
+	//        wsl -d Ubuntu
+	//        cd /mnt/c/GitProjects/printer-server/src/printgateway
+	//        PRINT_GATEWAY_TOKEN=dev-token \
+	//          dlv debug ./cmd/printgateway --headless --api-version=2 \
+	//            --accept-multiclient --listen=127.0.0.1:2345 -- 127.0.0.1:8090
+	//
+	//      Delve was installed into the Ubuntu distro on 2026-09-07 and lives
+	//      at /root/go/bin/dlv (the distro's default user is root, and ~/go/bin
+	//      is not on PATH — invoke it by absolute path, or add it). Reinstall
+	//      with `go install github.com/go-delve/delve/cmd/dlv@latest`. Note the
+	//      distro's system Go is 1.22.2 while these modules require 1.25.0, so
+	//      every build there downloads a toolchain via GOTOOLCHAIN=auto — the
+	//      first build after a WSL reset is slow, and needs network.
+	//
+	//      --listen MUST be 127.0.0.1, not 0.0.0.0. WSL2's localhost forwarding
+	//      relays per address family, and dlv 1.27.1 given 0.0.0.0 opens an
+	//      IPv6 socket (`ss -4ltn` shows nothing, `ss -6ltn` shows *:2345), so
+	//      Windows only ever mirrors it onto [::1] — attaching to 127.0.0.1
+	//      then fails with "connect ECONNREFUSED 127.0.0.1:2345" even though
+	//      dlv is plainly running. Bound to 127.0.0.1 it opens a real IPv4
+	//      socket and forwarding works, which is what these configs assume.
+	//      Each module gets its own port so two can be debugged at once.
+	//      substitutePath maps the Windows workspace path Delve reports back
+	//      to what the editor has open.
+	//
+	// Which world to pick: printgateway shells out to `lp` and ippfix proxies to
+	// cupsd, so anything end-to-end has to run in WSL (A-in-Remote-WSL or B).
+	// Running printgateway on Windows is still useful for everything up to job
+	// submission — auth, config, fetch/SSRF guard, S3, presign — but POST /print
+	// will fail at the `lp` exec since there is no lp.exe on PATH.
+	"version": "0.2.0",
+	"configurations": [
+		{
+			"name": "printgateway (local)",
+			"type": "go",
+			"request": "launch",
+			"mode": "debug",
+			"program": "${workspaceFolder}/src/printgateway/cmd/printgateway",
+			"cwd": "${workspaceFolder}/src/printgateway",
+			// os.Args[1] is the listen address override (config.Load); drop it
+			// to fall back to config.DefaultAddr, 127.0.0.1:8090.
+			"args": [
+				"127.0.0.1:8090"
+			],
+			"env": {
+				"PRINT_GATEWAY_TOKEN": "dev-token",
+				"PRINT_GATEWAY_LOG_LEVEL": "debug",
+				// The fetch guard rejects private/loopback targets by default;
+				// a dev box downloading test PDFs from itself needs this on.
+				"PRINT_GATEWAY_ALLOW_PRIVATE_TARGETS": "true"
+			},
+			"showLog": true,
+			"logOutput": "debugger"
+		},
+		{
+			"name": "printersearch (local)",
+			"type": "go",
+			"request": "launch",
+			"mode": "debug",
+			"program": "${workspaceFolder}/src/printersearch/cmd/printersearch",
+			"cwd": "${workspaceFolder}/src/printersearch",
+			// Subcommands: info | print | jobs | cancel | bench. Swap these for
+			// whatever you're diagnosing; `info` against a new printer first.
+			"args": [
+				"info",
+				"-host",
+				"127.0.0.1",
+				"-port",
+				"631",
+				"-path",
+				"/printers/brother-direct"
+			],
+			// CLI output is much easier to read (and interrupt) in a terminal
+			// than in the debug console.
+			"console": "integratedTerminal"
+		},
+		{
+			"name": "printersearch print (local)",
+			"type": "go",
+			"request": "launch",
+			"mode": "debug",
+			"program": "${workspaceFolder}/src/printersearch/cmd/printersearch",
+			"cwd": "${workspaceFolder}/src/printersearch",
+			"args": [
+				"print",
+				"-host",
+				"127.0.0.1",
+				"-port",
+				"631",
+				"-path",
+				"/printers/brother-direct",
+				"-file",
+				"testdata/printDemo.pdf",
+				// It is `printer-resolution` on the wire, not `print-resolution`;
+				// a wrong name is silently ignored and Ghostscript falls back to
+				// 600dpi/8-bit, overflowing the printer spool.
+				"-resolution",
+				"300"
+			],
+			"console": "integratedTerminal"
+		},
+		{
+			"name": "ippfix (local)",
+			"type": "go",
+			"request": "launch",
+			"mode": "debug",
+			"program": "${workspaceFolder}/src/ippfix/cmd/ippfix",
+			"cwd": "${workspaceFolder}/src/ippfix",
+			"args": [
+				"-listen",
+				":6310",
+				"-target",
+				"http://192.168.252.210:631",
+				"-template",
+				"printer-template.json"
+			],
+			"console": "integratedTerminal"
+		},
+		{
+			"name": "printgateway (attach: WSL, :2345)",
+			"type": "go",
+			"request": "attach",
+			"mode": "remote",
+			"host": "127.0.0.1",
+			"port": 2345,
+			"apiVersion": 2,
+			"cwd": "${workspaceFolder}/src/printgateway",
+			"substitutePath": [
+				{
+					"from": "${workspaceFolder}",
+					"to": "/mnt/c/GitProjects/printer-server"
+				}
+			],
+			"showLog": true,
+			"logOutput": "debugger"
+		},
+		{
+			"name": "ippfix (attach: WSL, :2346)",
+			"type": "go",
+			"request": "attach",
+			"mode": "remote",
+			"host": "127.0.0.1",
+			"port": 2346,
+			"apiVersion": 2,
+			"cwd": "${workspaceFolder}/src/ippfix",
+			"substitutePath": [
+				{
+					"from": "${workspaceFolder}",
+					"to": "/mnt/c/GitProjects/printer-server"
+				}
+			]
+		},
+		{
+			"name": "printersearch (attach: WSL, :2347)",
+			"type": "go",
+			"request": "attach",
+			"mode": "remote",
+			"host": "127.0.0.1",
+			"port": 2347,
+			"apiVersion": 2,
+			"cwd": "${workspaceFolder}/src/printersearch",
+			"substitutePath": [
+				{
+					"from": "${workspaceFolder}",
+					"to": "/mnt/c/GitProjects/printer-server"
+				}
+			]
+		},
+		{
+			// For a binary already deployed in WSL by src/ops/install-services.sh
+			// and running as a systemd unit: attach Delve to the live PID from a
+			// root WSL shell, then attach the editor here.
+			//   sudo dlv attach $(pidof printgateway-linux-amd64) \
+			//     --headless --api-version=2 --listen=127.0.0.1:2348
+			"name": "attach to running WSL service (:2348)",
+			"type": "go",
+			"request": "attach",
+			"mode": "remote",
+			"host": "127.0.0.1",
+			"port": 2348,
+			"apiVersion": 2,
+			"cwd": "${workspaceFolder}/src/printgateway",
+			"substitutePath": [
+				{
+					"from": "${workspaceFolder}",
+					"to": "/mnt/c/GitProjects/printer-server"
+				}
+			]
+		},
+		{
+			// Same idea but entirely inside one machine — use it from a
+			// Remote-WSL window to grab a locally running process, or on
+			// Windows for printersearch.exe. VS Code shows a process picker.
+			"name": "attach to local process (picker)",
+			"type": "go",
+			"request": "attach",
+			"mode": "local",
+			"processId": "${command:pickGoProcess}"
+		},
+		{
+			"name": "test: package of current file",
+			"type": "go",
+			"request": "launch",
+			"mode": "test",
+			"program": "${fileDirname}",
+			"args": [
+				"-test.v"
+			]
+		},
+		{
+			"name": "test: printgateway (all packages)",
+			"type": "go",
+			"request": "launch",
+			"mode": "test",
+			"program": "${workspaceFolder}/src/printgateway/...",
+			"args": [
+				"-test.v"
+			]
+		},
+		{
+			"name": "test: single test in current file",
+			"type": "go",
+			"request": "launch",
+			"mode": "test",
+			"program": "${fileDirname}",
+			"args": [
+				"-test.v",
+				"-test.run",
+				"${input:testName}"
+			]
+		}
+	],
+	"inputs": [
+		{
+			"id": "testName",
+			"type": "promptString",
+			"description": "Test name regex (e.g. TestPrintHandler_Multipart)",
+			"default": "Test"
+		}
+	]
 }
