@@ -1,9 +1,6 @@
 #!/bin/bash
 set -euo pipefail
 
-# See setup-emulators.sh's comment: BASE comes from this script's own
-# location, not a hardcoded path that has been stale (and case-typo'd)
-# since the working copy moved to C:\GitProjects\printer-server.
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # name:port:manufacturer:model:supports_pdf(1/0)

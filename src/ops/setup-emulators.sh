@@ -1,12 +1,6 @@
 #!/bin/bash
 set -euo pipefail
 
-# BASE is derived from this script's own location rather than a hardcoded
-# absolute path, which drifted stale the moment the working copy moved (it
-# used to point at /mnt/c/printerSearch, a path that hasn't existed since
-# this repo became C:\GitProjects\printer-server - see CLAUDE.md's
-# "Environment gotchas" section) and even carried a case typo (HDL vs HLD)
-# that only worked by accident because drvfs is case-insensitive.
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 mkdir -p "$BASE/emu-spool/p1"

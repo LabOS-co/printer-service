@@ -1,16 +1,9 @@
 #!/bin/bash
-# Runs `printersearch bench` while sampling two things every ~10ms, so the
-# result compares apples-to-apples against the Windows-side measurements
-# (win-bench.ps1: spoolsv.exe = orchestrator, SumatraPDF.exe = renderer):
-#   - cupsd itself (the orchestrator, analogous to spoolsv.exe)
-#   - any short-lived filter/renderer child processes CUPS forks per job to
-#     actually convert PDF -> raster (gs, pdftopdf, gstoraster, rastertopwg,
-#     etc.) - analogous to SumatraPDF.exe on the Windows side.
+# Runs `printersearch bench` while sampling cupsd and its filter/renderer
+# child processes every ~10ms, for comparison against win-bench.ps1's
+# spoolsv.exe/SumatraPDF.exe measurements.
 set -uo pipefail
 
-# BASE comes from this script's own location, not a hardcoded path that has
-# been stale (and case-typo'd) since the working copy moved to
-# C:\GitProjects\printer-server - see setup-emulators.sh's comment.
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$BASE/../printersearch" || exit 1
 
@@ -51,12 +44,7 @@ sampler() {
 sampler &
 SAMPLER_PID=$!
 
-# Without this, Ctrl-C (or any early exit - a bad flag rejected by
-# `printersearch bench` itself, since that failure is deliberately NOT fatal
-# to this script - see `set -uo pipefail` above, no `-e`) orphaned the 10ms
-# sampler loop, left running forever until the shell that started it exited.
-# Idempotent against the explicit kill/wait below on the normal path: a
-# process already reaped just makes kill/wait fail quietly.
+# Without this trap, an early exit leaves the 10ms sampler loop orphaned and running forever.
 cleanup_sampler() {
   kill "$SAMPLER_PID" 2>/dev/null || true
   wait "$SAMPLER_PID" 2>/dev/null || true
@@ -66,8 +54,7 @@ trap cleanup_sampler EXIT
 ./printersearch bench -file testdata/printDemo.pdf "$@"
 BENCH_EXIT=$?
 
-# jobs are accepted asynchronously - give background filters (gs, etc.) time
-# to actually spawn and finish before stopping the sampler and reporting.
+# Jobs are accepted asynchronously; give filters time to spawn and finish before sampling stops.
 sleep 8
 
 cleanup_sampler

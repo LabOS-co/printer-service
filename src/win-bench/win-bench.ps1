@@ -1,7 +1,4 @@
-# $PSScriptRoot is this script's own directory - used to default $File
-# relative to the actual checkout location instead of a hardcoded
-# C:\printerSearch path that has been stale (and case-typo'd, HDL vs HLD)
-# since the working copy moved to C:\GitProjects\printer-server.
+# Windows-side print benchmark: submits jobs to SumatraPDF through the spooler and reports latency/resource stats.
 param(
     [string]$File = (Join-Path (Split-Path $PSScriptRoot -Parent) "printersearch\testdata\printDemo.pdf"),
     [string]$Printer = "BenchFilePrinter",
@@ -12,14 +9,10 @@ param(
 
 Write-Host "win-bench: $Requests requests, concurrency=$Concurrency, printer=$Printer, file=$File"
 
-# --- submit jobs with bounded concurrency, timing each one, sampling
-#     spoolsv.exe/SumatraPDF.exe resource usage inline on every poll tick
-#     (a separate Start-Job was tried first but its own startup lag meant it
-#     never got a sample in before short runs finished - sampling inline in
-#     the same loop that already polls for job completion avoids that) ---
+# Resource sampling is done inline in the polling loop, not a separate Start-Job, because a background job's own startup lag missed samples on short runs.
 $latencies = New-Object System.Collections.ArrayList
 $samples = New-Object System.Collections.ArrayList
-$running = @()  # each entry: @{ Process=...; Stopwatch=... }
+$running = @()
 $submitted = 0
 $overallSw = [System.Diagnostics.Stopwatch]::StartNew()
 
@@ -80,8 +73,7 @@ Write-Host ("total wall time: {0:N1}ms, throughput: {1:N1} req/s" -f $overallSw.
 Write-Host ""
 Write-Host "=== resource usage during the run ==="
 
-# spoolsv.exe is one long-lived process: CPU cost attributable to this run
-# is the delta between its cumulative CPU time at the first and last sample.
+# spoolsv.exe is long-lived, so its run cost is the CPU-time delta between first and last sample, not the raw cumulative value.
 $spoolSamples = $samples | Where-Object { $_.Name -eq "spoolsv" } | Sort-Object Time
 if ($spoolSamples.Count -ge 2) {
     $cpuDelta = ($spoolSamples[-1].CPU - $spoolSamples[0].CPU)
@@ -93,10 +85,7 @@ if ($spoolSamples.Count -ge 2) {
     Write-Host "spoolsv: not enough samples captured"
 }
 
-# SumatraPDF is one short-lived process per job: total CPU cost is the sum
-# of each instance's own final (max) cumulative CPU sample; peak memory is
-# the largest sum of concurrently-alive instances' working sets at any one
-# sampled instant (reflects real concurrent memory pressure, not one process).
+# SumatraPDF is short-lived per job, so total CPU sums each instance's final sample and peak memory is the largest concurrent-instance working-set sum (not one process's peak).
 $sumatraSamples = $samples | Where-Object { $_.Name -eq "SumatraPDF" }
 if ($sumatraSamples.Count -gt 0) {
     $perPidMaxCpu = $sumatraSamples | Group-Object Pid | ForEach-Object {
