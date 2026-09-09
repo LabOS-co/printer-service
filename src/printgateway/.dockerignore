@@ -1,0 +1,24 @@
+# Build context is src/printgateway itself (docker build src/printgateway),
+# so this only needs to exclude what's IN that directory and shouldn't reach
+# the build — mainly local build artifacts and anything carrying a secret.
+
+# Local/cross-compiled binaries — the image builds its own inside the
+# container; a stray host binary here must never be silently COPY'd in.
+printgateway
+printgateway-linux-amd64
+*.exe
+*.test
+
+# Never let a filled-in secrets file reach a build context or an image layer.
+printgateway.env.example
+*.env
+.env*
+
+# Postman collection, service unit, docs — irrelevant to the build and no
+# reason to bust Docker's layer cache every time one of them is edited.
+*.postman_collection.json
+*.service
+README.md
+
+# vendor/ is INTENTIONALLY NOT listed here — see the Dockerfile's own comment
+# for why this build depends on it existing in the build context.

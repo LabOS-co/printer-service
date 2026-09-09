@@ -15,24 +15,20 @@ import (
 	"printgateway/internal/config"
 )
 
-// printTokenPath/printTokenKey mirror the path/key the labOS side already
-// reads via gSecretManager (see README.md's Access control section), so a
-// Vault-backed deployment needs no new convention on that side.
+// printTokenPath/printTokenKey mirror the path/key the labOS side already reads
+// via gSecretManager, so a Vault-backed deployment needs no new convention there.
 const (
 	printTokenPath = "config/print_gateway"
 	printTokenKey  = "auth-token"
 )
 
-// logServerPath/logServerKey sit alongside the print token at the same
-// Vault path — both are this service's own config, not a shared convention
-// with another labOS component the way the print token is.
+// logServerPath/logServerKey sit alongside the print token at the same Vault path.
 const (
 	logServerPath = "config/print_gateway"
 	logServerKey  = "log-server"
 )
 
-// s3*Path/Key sit alongside the print token and log server at the same
-// Vault path — this service's own config, same convention.
+// s3*Path/Key sit alongside the print token and log server at the same Vault path.
 const (
 	s3AccessKeyPath = "config/print_gateway"
 	s3AccessKeyKey  = "s3-access-key"
@@ -40,27 +36,17 @@ const (
 	s3SecretKeyKey  = "s3-secret-key"
 )
 
-// vaultClient builds the secret_store client shared by every resolver in
-// this package (ResolveToken, ResolveLogServer, and any future one), so the
-// userpass-decrypt-then-authenticate logic lives in exactly one place
-// instead of drifting between call sites. Each caller gets its own fresh
-// login — a startup-only cost, not a per-request one — rather than this
-// package threading a single client through main.go, which would couple
-// independent resolvers to a shared calling convention.
-//
-// A package var, not a plain function, so tests can substitute a fake
-// secret_store.SecretStoreClient and exercise the Vault-success branches of
-// every resolver above without a reachable Vault server — there is no other
-// seam onto secret_store.Vault's concrete construction. Not safe to swap
-// from concurrently running tests; see secrets_test.go.
+// vaultClient builds the secret_store client shared by every resolver in this
+// package. A package var rather than a plain function, so tests can substitute a
+// fake secret_store.SecretStoreClient; not safe to swap from concurrently running
+// tests (see secrets_test.go).
 var vaultClient = defaultVaultClient
 
 func defaultVaultClient(cfg config.Config, logger logs.Logger, meta *logs.LogMetaData) (secret_store.SecretStoreClient, error) {
 	password := cfg.SecretStorePassword
 	if password != "" {
 		// SECRET_STORE_PASSWORD is expected encrypted, matching
-		// go-packages/settings.go's getSecretStoreSettings — a plaintext
-		// value here would authenticate with ciphertext and fail.
+		// go-packages/settings.go's getSecretStoreSettings.
 		decrypted, err := encryption.Decrypt(password)
 		if err != nil {
 			return nil, fmt.Errorf("can't decrypt %s: %w", config.SecretStorePasswordEnv, err)
@@ -76,45 +62,21 @@ func defaultVaultClient(cfg config.Config, logger logs.Logger, meta *logs.LogMet
 	}, logger, meta)
 }
 
-// ResolveToken resolves the shared print token (X-Labos-Print-Token). If
-// cfg.SecretStoreURL is empty, Vault is not configured at all: this returns
-// cfg.AuthToken (what config.Load already read from PRINT_GATEWAY_TOKEN)
-// unchanged — with one exception since F2: if that is empty too, no source
-// produced a token, and this is an error rather than a "successful" empty
-// resolution, so the process refuses to start instead of coming up and
-// answering 503 to every request forever.
+// ResolveToken resolves the shared print token (X-Labos-Print-Token). If Vault is
+// not configured, it returns cfg.AuthToken; if that is empty too, it errors rather
+// than starting up to answer 503 to every request forever.
 //
-// If Vault is configured, ResolveToken falls back to cfg.AuthToken on ANY
-// failure — client construction (bad or missing credentials), an
-// unreachable server, a malformed response, or the secret genuinely not
-// being there — not only on secret_store.ErrSecretNotFound. That is
-// deliberately broader than secret_store.GetSecretStringWithFallback, which
-// only falls back on a definite miss and returns any other error as-is (by
-// design: it must not mask a real outage with a possibly-stale value). Here
-// the product decision is the opposite: a misconfigured or down Vault must
-// degrade this prototype to env, not take the whole service down. Every
-// fallback is logged loudly (never the token value) so the degradation is
-// visible in the log even though it is not fatal.
+// If Vault is configured, it falls back to cfg.AuthToken on ANY failure (client
+// construction, an unreachable server, a malformed response, or a genuinely
+// missing secret) rather than only on a definite miss — a misconfigured or down
+// Vault must degrade this prototype to env, not take the service down. Every
+// fallback is logged (never the token value).
 //
-// The first read this performs also serves as Vault's "is it actually
-// reachable" startup probe: Vault(...) with a token does no I/O by itself
-// (see secret_store.Vault), so construction succeeding proves nothing on its
-// own.
-//
-// Returns (token, source, nil) on success, where source names which input
-// won ("vault", "env", or "env (vault fallback)") for the caller to log.
-// Returns an error whenever no source produced a token — whether Vault
-// wasn't configured at all, or Vault was tried and failed — and the
-// environment was also empty, naming what was tried.
+// Returns (token, source, nil) on success, where source names which input won
+// ("vault", "env", or "env (vault fallback)"). Returns an error only when no
+// source produced a usable token.
 func ResolveToken(cfg config.Config, logger logs.Logger, meta *logs.LogMetaData) (token, source string, err error) {
 	if cfg.SecretStoreURL == "" {
-		// Trimmed for the emptiness test only — a whitespace-only
-		// PRINT_GATEWAY_TOKEN (e.g. a trailing newline from a unit file's
-		// Environment=) must not "resolve" into a token nobody set on
-		// purpose. The untrimmed value is still what's returned and compared
-		// against on every request, so a legitimate token with meaningful
-		// leading/trailing space (unlikely, but not this function's call) is
-		// preserved exactly.
 		if strings.TrimSpace(cfg.AuthToken) == "" {
 			return "", "", fmt.Errorf("print token unavailable: vault is not configured and %s is not set", config.AuthTokenEnv)
 		}
@@ -135,31 +97,20 @@ func ResolveToken(cfg config.Config, logger logs.Logger, meta *logs.LogMetaData)
 		return fallbackToken(cfg)
 	}
 
-	// GetSecretString has no emptiness check — a present-but-blank value
-	// (an unset key, a botched `vault kv put`, a rotation that cleared it)
-	// reports as success. Treating that as a "resolved" token would set
-	// cfg.AuthToken to "", which requireToken then answers 503 to every
-	// request — a total outage disguised as a successful startup log line.
-	// Trimming catches whitespace-only values the same way.
+	// A present-but-blank Vault value is a successful read, not an error — must not
+	// "resolve" into an empty token that then 503s every request.
 	if strings.TrimSpace(value) == "" {
 		logger.LogError(fmt.Sprintf("vault %s (key %s) is empty; falling back to %s",
 			path, printTokenKey, config.AuthTokenEnv), meta)
 		return fallbackToken(cfg)
 	}
 
-	// Trimmed on return, matching ResolveS3Credentials: a trailing newline
-	// from a `vault kv put` heredoc passes the emptiness check above and
-	// then fails every request's token comparison forever, while this line
-	// logs a successful resolution. cfg.AuthToken (the env source) stays
-	// deliberately untrimmed — see fallbackToken — since that value is
-	// compared against on every request exactly as an operator set it; a
-	// Vault-stored secret has no equivalent reason to preserve whitespace.
+	// Trimmed on return (unlike cfg.AuthToken, kept untrimmed since it's compared
+	// against on every request exactly as an operator set it).
 	return strings.TrimSpace(value), "vault", nil
 }
 
-// fallbackToken is ResolveToken's env fallback, shared by both failure
-// sites above. Refuses to resolve only when the environment is empty too —
-// the one case where neither configured source produced a usable token.
+// fallbackToken is ResolveToken's env fallback, shared by both failure sites above.
 func fallbackToken(cfg config.Config) (string, string, error) {
 	if strings.TrimSpace(cfg.AuthToken) == "" {
 		return "", "", fmt.Errorf("print token unavailable: vault failed and %s is not set", config.AuthTokenEnv)
@@ -167,12 +118,8 @@ func fallbackToken(cfg config.Config) (string, string, error) {
 	return cfg.AuthToken, "env (vault fallback)", nil
 }
 
-// vaultPath prefixes path with labosEnv, matching the go-packages/settings
-// convention (<LABOS_ENV>/<path> relative to the KV mount). An empty
-// labosEnv leaves path unprefixed. Trims stray slashes off labosEnv first —
-// LABOS_ENV=staging/ would otherwise double the separator into
-// "staging//config/print_gateway", a path Vault reports as a plain miss
-// with nothing distinguishing it from a real one.
+// vaultPath prefixes path with labosEnv (<LABOS_ENV>/<path>, matching the
+// go-packages/settings convention). An empty labosEnv leaves path unprefixed.
 func vaultPath(labosEnv, path string) string {
 	labosEnv = strings.Trim(labosEnv, "/")
 	if labosEnv == "" {
@@ -181,34 +128,29 @@ func vaultPath(labosEnv, path string) string {
 	return labosEnv + "/" + path
 }
 
-// ResolveLogServer resolves the logstash address (host, port) main.go
-// hands to logger.SetLogstashLogger. Unlike ResolveToken, this is never
-// fatal: logstash shipping is an optional capability, and every failure —
-// Vault not configured, Vault tried and failed, a malformed value from
-// either source, or nothing configured anywhere — just means the service
-// stays on console-only logging, logged once so the degradation is visible.
+// ResolveLogServer resolves the logstash address (host, port) main.go hands to
+// logger.SetLogstashLogger. Never fatal: any failure just leaves the service on
+// console-only logging, logged once.
 //
-// Returns ("", 0, "") when nothing usable was found. source names which
-// input won ("vault" or "env") when host is non-empty.
+// Returns ("", 0, "") when nothing usable was found. source names which input won
+// ("vault" or "env") when host is non-empty.
 func ResolveLogServer(cfg config.Config, logger logs.Logger, meta *logs.LogMetaData) (host string, port int, source string) {
 	if cfg.SecretStoreURL != "" {
 		client, err := vaultClient(cfg, logger, meta)
 		if err != nil {
 			logger.LogError(fmt.Sprintf("vault client init failed: %v; log server falls back to %s",
-				err, config.LogServerEnv), meta)
+				err, cfg.Source(config.LogServerEnv)), meta)
 		} else {
 			path := vaultPath(cfg.LabosEnv, logServerPath)
 			value, err := secret_store.GetSecretString(client, path, logServerKey)
 			if err != nil {
-				// LogInfo, not LogError: unlike the print token, log-server is
-				// optional, and the overwhelmingly common reason this fails is
-				// simply that nobody set the key — not a fault worth an ERROR
-				// line on every single startup. logs.Logger has no LogWarn.
+				// LogInfo, not LogError: unlike the print token, this key is optional and
+				// usually just unset — not worth an ERROR line on every startup.
 				logger.LogInfo(fmt.Sprintf("vault read %s (key %s) unavailable: %v; log server falls back to %s",
-					path, logServerKey, err, config.LogServerEnv), meta)
+					path, logServerKey, err, cfg.Source(config.LogServerEnv)), meta)
 			} else if h, p, perr := parseHostPort(value); perr != nil {
 				logger.LogError(fmt.Sprintf("vault %s (key %s) is not a valid host:port: %v; log server falls back to %s",
-					path, logServerKey, perr, config.LogServerEnv), meta)
+					path, logServerKey, perr, cfg.Source(config.LogServerEnv)), meta)
 			} else {
 				return h, p, "vault"
 			}
@@ -221,106 +163,85 @@ func ResolveLogServer(cfg config.Config, logger logs.Logger, meta *logs.LogMetaD
 	h, p, err := parseHostPort(cfg.LogServer)
 	if err != nil {
 		logger.LogError(fmt.Sprintf("%s: invalid host:port %q: %v; logstash shipping disabled",
-			config.LogServerEnv, cfg.LogServer, err), meta)
+			cfg.Source(config.LogServerEnv), cfg.LogServer, err), meta)
 		return "", 0, ""
 	}
 	return h, p, "env"
 }
 
-// parseHostPort parses a "host:port" value shared by both the Vault and env
-// forms of the log server address. net.SplitHostPort rejects a missing
-// port outright rather than silently defaulting it — logs.LogsSettings'
-// own defaultPort (514) is a convenience for callers that never set Port at
-// all, not a license to accept an address with no port here.
-//
-// Trimmed for the same reason ResolveToken trims: a trailing newline or
-// space from a unit file's Environment= would otherwise land in the port
-// ("514\n" fails Atoi) or the host and disable shipping over whitespace.
-//
-// An empty host is rejected explicitly: SplitHostPort(":514") succeeds with
-// host == "" — a plausible "any interface" typo — which the caller's
-// `host != ""` check then drops with no log line at all, and (from the
-// Vault branch) without ever trying the env fallback. Every other bad value
-// here is loud; this one has to be too.
+// parseHostPort parses a "host:port" value shared by both the Vault and env forms
+// of the log server address.
 func parseHostPort(raw string) (host string, port int, err error) {
 	h, p, err := net.SplitHostPort(strings.TrimSpace(raw))
 	if err != nil {
 		return "", 0, err
 	}
 	if h == "" {
+		// SplitHostPort accepts ":514" with host == "" (a plausible "any interface"
+		// typo); reject explicitly rather than let the caller's `host != ""` check
+		// silently drop it with no log line.
 		return "", 0, fmt.Errorf("missing host in address %q", raw)
 	}
 	n, err := strconv.Atoi(p)
 	if err != nil || n <= 0 || n > 65535 {
 		return "", 0, fmt.Errorf("invalid port %q", p)
 	}
-	// SplitHostPort strips the brackets off an IPv6 literal, but
-	// logs.SetLogstashLogger rejoins the address with a plain
-	// fmt.Sprintf("%s:%d", ...) (logstash_logger.go) — "::1" + ":514"
-	// becomes "::1:514", which net.Dial rejects with "too many colons in
-	// address" (verified live). Put the brackets back so the value we
-	// return is the one that function can actually dial.
+	// Re-bracket an IPv6 literal: logs.SetLogstashLogger rejoins host+port with a
+	// plain "%s:%d", and an unbracketed "::1" there becomes "::1:514", which
+	// net.Dial rejects (verified live).
 	if strings.Contains(h, ":") {
 		h = "[" + h + "]"
 	}
 	return h, n, nil
 }
 
-// ResolveS3Credentials resolves the S3/MinIO access key and secret key.
-// Like ResolveLogServer (and unlike ResolveToken), this is never fatal: S3
-// is an additive capability behind config.S3Endpoint — multipart upload
-// remains the primary intake path per the HLD's own constraint, so a
-// missing or broken credential source here just means main.go skips
-// constructing objstore and the s3_key/presign endpoints answer 503, not
-// that the service refuses to start.
+// ResolveS3Credentials resolves the S3/MinIO access key and secret key. Never
+// fatal: a missing or broken source just means main.go skips constructing objstore
+// and the s3_key/presign endpoints answer 503.
 //
-// Returns ("", "", "") when neither Vault nor the environment produced both
-// values — main.go treats that the same as "S3 not configured", logged once
-// here so the degradation is visible.
+// Returns ("", "", "") when neither Vault nor the environment produced both values.
 func ResolveS3Credentials(cfg config.Config, logger logs.Logger, meta *logs.LogMetaData) (accessKey, secretKey, source string) {
 	if cfg.SecretStoreURL != "" {
 		client, err := vaultClient(cfg, logger, meta)
 		if err != nil {
 			logger.LogError(fmt.Sprintf("vault client init failed: %v; S3 credentials fall back to %s/%s",
-				err, config.S3AccessKeyEnv, config.S3SecretKeyEnv), meta)
+				err, cfg.Source(config.S3AccessKeyEnv), cfg.Source(config.S3SecretKeyEnv)), meta)
 		} else {
 			ak, akErr := secret_store.GetSecretString(client, vaultPath(cfg.LabosEnv, s3AccessKeyPath), s3AccessKeyKey)
 			sk, skErr := secret_store.GetSecretString(client, vaultPath(cfg.LabosEnv, s3SecretKeyPath), s3SecretKeyKey)
 			switch {
 			case akErr != nil:
 				logger.LogInfo(fmt.Sprintf("vault read of S3 access key unavailable: %v; S3 credentials fall back to %s/%s",
-					akErr, config.S3AccessKeyEnv, config.S3SecretKeyEnv), meta)
+					akErr, cfg.Source(config.S3AccessKeyEnv), cfg.Source(config.S3SecretKeyEnv)), meta)
 			case skErr != nil:
 				logger.LogInfo(fmt.Sprintf("vault read of S3 secret key unavailable: %v; S3 credentials fall back to %s/%s",
-					skErr, config.S3AccessKeyEnv, config.S3SecretKeyEnv), meta)
+					skErr, cfg.Source(config.S3AccessKeyEnv), cfg.Source(config.S3SecretKeyEnv)), meta)
 			case strings.TrimSpace(ak) == "" || strings.TrimSpace(sk) == "":
-				// Same empty-value trap as ResolveToken: a present-but-blank
-				// secret must not "resolve" into a client that authenticates
-				// with an empty credential and fails on first real request.
 				logger.LogError("vault S3 access/secret key is empty; S3 credentials fall back to "+
-					config.S3AccessKeyEnv+"/"+config.S3SecretKeyEnv, meta)
+					cfg.Source(config.S3AccessKeyEnv)+"/"+cfg.Source(config.S3SecretKeyEnv), meta)
 			default:
-				// Trimmed on return, unlike ResolveToken's deliberate
-				// untrimmed AuthToken (a bearer token could in principle
-				// contain meaningful whitespace; an S3 access/secret key
-				// cannot). Returning the untrimmed value here would let a
-				// trailing newline from a `vault kv put` heredoc — which
-				// passed the emptiness check above — reach minio-go and
-				// fail every request with SignatureDoesNotMatch, while this
-				// line logs a successful resolution.
 				return strings.TrimSpace(ak), strings.TrimSpace(sk), "vault"
 			}
 		}
 	}
 
-	// Trimmed for the same reason the Vault branch above is: a trailing
-	// newline from a unit file's Environment= is the realistic way an S3
-	// key picks up whitespace, and unlike AuthToken there's no legitimate
-	// reason for one to contain meaningful space.
 	accessKey = strings.TrimSpace(cfg.S3AccessKey)
 	secretKey = strings.TrimSpace(cfg.S3SecretKey)
 	if accessKey == "" || secretKey == "" {
 		return "", "", ""
 	}
-	return accessKey, secretKey, "env"
+	// Reported separately as "file+env" when only one of the two came from the
+	// config file, since that mid-migration/mid-rotation state needs to be named
+	// rather than collapsed into either single label.
+	akFromFile := cfg.Source(config.S3AccessKeyEnv) != config.S3AccessKeyEnv
+	skFromFile := cfg.Source(config.S3SecretKeyEnv) != config.S3SecretKeyEnv
+	switch {
+	case akFromFile && skFromFile:
+		source = "file"
+	case akFromFile || skFromFile:
+		source = "file+env"
+	default:
+		source = "env"
+	}
+	return accessKey, secretKey, source
 }

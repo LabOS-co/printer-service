@@ -76,6 +76,20 @@ exclusive — sending both is a `400`.
 `printer` (the CUPS queue name — run `lpstat -p` to see what's available) is
 required in all three options.
 
+`copies` (optional, all three options - a form field in option 1, a JSON
+number in options 2/3) requests that many copies of the same document as a
+single CUPS job (`lp -n`), not N separate submissions. Omitting the field
+(or sending JSON `null`, treated the same as omitted), or sending `1`,
+behaves exactly as before `copies` existed. A non-numeric value, an empty
+value, or a value outside `1`-`100` is a `400`.
+
+```bash
+curl -X POST http://localhost:8090/print \
+  -F "printer=q-hp-laserjet" \
+  -F "file=@/home/youruser/invoice.pdf" \
+  -F "copies=3"
+```
+
 The two JSON bodies (options 2/3, and `/files/presign` below) are decoded
 strictly: a field name not listed above is a `400`, as is any content after
 the one JSON value (a caller accidentally concatenating two bodies, for
@@ -87,7 +101,7 @@ rejected.
 Success response (either option):
 
 ```json
-{"status":"submitted","output":"request id is q-hp-laserjet-42 (1 file(s))\n"}
+{"status":"submitted","output":"request id is q-hp-laserjet-42 (0 file(s))\n"}
 ```
 
 Failure returns a non-2xx HTTP status with a labOS-standard error envelope
@@ -106,15 +120,35 @@ shutdown" below) gets `413`, naming the limit in `errorDetails.details`,
 rather than the generic `400` every other malformed-body case gets — the two
 are otherwise indistinguishable from the response alone.
 
+## Health check
+
+`GET /status`, unauthenticated (no `X-Labos-Print-Token` needed) — the
+network-proxy in front of this service polls it as a liveness check, the
+same way it polls the VC++ labOS services' own `GET /status`
+(`ApplicationHealthCheck`/`StatusResourceHandler` in the main repo). Always
+`200 OK` with a plain-text body:
+
+```
+Running. Label: printgateway
+ Working set memory usage (MB): 12
+ Virtual memory usage (MB): 71
+```
+
+Unlike the VC++ health check, there is currently no failure condition (no
+job-timeout or out-of-memory check) that would turn this into a `5xx` — it
+only reports that the process is up and serving.
+
 ## Access control
 
 The server is closed to anything that is not the calling system, in two
 independent layers — the same model `HtmlToPdf` relies on, plus a token:
 
 1. **Listen address.** It binds `127.0.0.1:8090` by default, so it is not
-   reachable from any other machine at all. Passing an address argument
-   overrides this — use a specific internal interface, never `:8090`, which
-   would listen on every interface including any external one.
+   reachable from any other machine at all. A positional address argument
+   overrides this, and so does the config file's `resource/printgateway.addr`
+   key (the argument wins if both are given — see "Configuration file"
+   below); use a specific internal interface, never `:8090`, which would
+   listen on every interface including any external one.
 2. **Shared token.** Every request must carry the header
    `X-Labos-Print-Token`, matched in constant time against the resolved print
    token (`PRINT_GATEWAY_TOKEN`, or Vault — see "Secrets (Vault)" below). A
@@ -127,6 +161,240 @@ The token never appears in this repository or in the labOS source. On the
 labOS side it comes from `gSecretManager` (`config/print_gateway`,
 key `auth-token`); here it comes from the environment, or from Vault when
 configured — see "Secrets (Vault)" below.
+
+### Configuration file
+
+Every setting — including, as one deliberate exception explained below, the
+S3 credential pair — can be set from a JSON config file, shaped as the
+`resource/*` convention other labOS services already use for their own
+config files (e.g. `OperationsService`'s), not a shape invented for this
+service alone: cross-cutting infrastructure (the S3 connection, the
+logstash destination) gets its own top-level `resource/*` block, shared in
+spirit with whatever else on the same host reads it, while everything
+specific to running *this* service lives under `resource/printgateway`.
+`printservice.config.json` at the repo root is the **tracked, committed**
+working example: it reproduces today's defaults exactly and must never
+carry a real secret value (see "Two files, two purposes" below for the
+git-ignored counterpart that does). Discovery is **explicit-only**: the
+file is read if and only if `PRINT_GATEWAY_CONFIG` names its path — there
+is no default path and no probing, so a deployment that never sets that
+variable is completely unaffected by this feature, byte-for-byte identical
+to before it existed.
+
+**Precedence: config file → environment variable → compiled default.**
+Every setting the file names wins over its env var unconditionally; every
+setting the file omits (or the file itself is entirely absent) falls
+through to the env var, then the compiled default, exactly as before. The
+one exception is the listen address: because `Addr` has no env var at all,
+its order is **positional argument → `resource/printgateway.addr` →
+default**, with the argument winning even over the file — a config file
+must never silently override an address someone passed deliberately on the
+command line. `resource/printgateway.addr` is nonetheless the single
+highest-value key in the file: it is the *only* way to set the listen
+address under `systemd`, which invokes the binary with no positional
+argument.
+
+```json
+{
+  "resource/log":         { "host": "logstash.internal", "port": "514" },
+  "resource/file_storage": { "host": "s3.eu-west-1.amazonaws.com", "s3-user": "...", "s3-password": "..." },
+  "resource/printgateway": {
+    "addr": "127.0.0.1:8090",
+    "logLevel": "info",
+    "timeouts":    { "readHeader": "10s", "read": "5m", "write": "8m",
+                     "idle": "60s", "shutdownGrace": "2m", "submit": "30s" },
+    "limits":      { "maxHeaderBytes": 65536, "maxUploadBytes": 67108864, "maxJsonBytes": 8192 },
+    "fetch":       { "timeout": "60s", "maxBytes": 67108864 },
+    "objectStore": { "insecure": false, "timeout": "60s", "maxBytes": 67108864, "presignTtl": "15m" }
+  }
+}
+```
+
+Every top-level `resource/*` block is optional, and so is every key within
+one — an absent key leaves its env var (or default) in effect. Durations
+are `time.ParseDuration` strings (`"9m"`, `"90s"`); byte sizes are plain
+JSON integers, not strings (`65536`, never `"64KiB"`), and a fractional
+number (`65536.5`) is rejected the same as a non-numeric one. There is no
+`version` key — this format has no future-compat version gate at all,
+matching the `resource/*` convention it mirrors exactly rather than adding
+a key that convention doesn't have.
+
+**`""` is not the same as "key not present", for three keys only:**
+`resource/file_storage.host`, `resource/printgateway.objectStore.bucket`,
+and `resource/printgateway.objectStore.region` treat an explicit `""` as a
+deliberate, meaningful value that **suppresses** the corresponding env var
+(e.g. `"resource/file_storage": {"host": ""}` is how an operator disables
+object storage from the file without touching the deployment's env vars) —
+*omitting* the key entirely is what leaves the env var in effect.
+`resource/printgateway.fetch.allowedHosts` follows the same rule at the
+list level: an explicit `[]` means "no allowlist" (suppresses the env
+var), while omitting the key leaves it in effect. `resource/log`'s `host`
+and `port` follow it too, but only together: if BOTH resolve to empty
+string the combined `LOG_SERVER` value is suppressed; naming only one side
+is passed through for `LOG_SERVER`'s own parser to reject as malformed
+(the same fail-fast every other bad value gets), not treated as a partial
+suppression. **`resource/printgateway.logLevel` is the one exception to the
+exception**: an explicit `""` there is a startup error, not a suppression,
+since a blank log level is meaningless. Getting an equivalent version of
+this wrong in an earlier draft of the shipped example was caught in review
+before it shipped — `printservice.config.json` deliberately omits
+`resource/log` and `resource/file_storage` entirely rather than setting
+their fields to `""`, so that committing it and pointing
+`PRINT_GATEWAY_CONFIG` at it changes nothing about S3/logstash
+configuration.
+
+**The one deliberate exception to "secrets never go in this file":**
+`resource/file_storage.s3-user`/`s3-password` (env vars
+`PRINT_GATEWAY_S3_ACCESS_KEY`/`PRINT_GATEWAY_S3_SECRET_KEY`) ARE valid file
+keys, same `""`-suppresses-env rule as `resource/file_storage.host`. This
+exists for a specific deployment model: the file itself rendered at
+process start from Vault (e.g. a Vault Agent template writing the JSON
+just before the service starts), not committed or hand-edited — the
+opposite of every other setting's "safe to commit an example" property.
+Precedence for these two is otherwise unchanged: `secrets.ResolveS3Credentials`
+still tries Vault first and only falls back to whichever of file/env
+supplied a value after that (the startup log names the winning source as
+`vault`, `env`, `file`, or — if one credential came from the file and the
+other from the env, a mixed state worth calling out on its own rather than
+picking one — `file+env`). Blanking a credential in the file (`"s3-user":
+""`) suppresses a stale env value the same way `resource/file_storage.host:
+""` does, and does so **fail closed**: `ResolveS3Credentials` then returns
+no usable credential at all (object storage disables itself, logging
+`credentials-source` and naming whichever source actually supplied — or
+blanked — each half), never a resurrected stale value.
+
+**If you put a real credential here, treat this file exactly like
+`printgateway.env`: mode `600`, never committed, generated per-deployment.**
+`install-services.sh` installs it at mode `600` owned by the `printgateway`
+service user specifically because of this — note that is a *different*
+owner than `printgateway.env` (`root:root`), since this file is read
+directly by the running Go process (`config.Load`'s `readFile`), not by
+`systemd` before the process starts.
+
+**Two files, two purposes — do not put a real credential in the tracked
+one.** `printservice.config.json` (tracked, committed) must always stay the
+secret-free working example above. A real deployment that puts an actual S3
+credential in this file uses `printservice.config.local.json` instead — a
+git-ignored name reserved for exactly this (see `.gitignore`) —
+and `install-services.sh` prefers it automatically when present, falling
+back to the tracked example only when it is absent. This is a mechanical
+guard, not just a naming convention: a credential written under the
+`.local.json` name cannot land in a commit by accident the way editing the
+tracked file in place could.
+
+**Never valid in the file, on purpose:** the print token, every Vault/
+`secret_store` bootstrap variable (`VAULT_ADDR`, `SECRET_STORE_URL`,
+`VAULT_TOKEN`, `SECRET_STORE_USERNAME`/`PASSWORD`, `LABOS_ENV`), and — the
+one enforced at the type level, not just by convention —
+`PRINT_GATEWAY_ALLOW_PRIVATE_TARGETS`. There is no `allowPrivateTargets`
+field anywhere in the Go type the file decodes into, so naming it in the
+JSON (at the top level or nested under `resource/printgateway`) fails
+exactly like any other typo: `json: unknown field "allowPrivateTargets"`.
+This is deliberate, not an oversight — putting it in the file would make a
+total SSRF bypass a config-file toggle instead of the environment-only,
+loudly-logged knob it is today. The S3 access/secret key pair is the one
+secret pulled out of this list — see above. Also absent, on purpose:
+Consul (`resource/service_discovery`) and Redis (`resource/cache`), which
+the same reference `resource/*` convention includes for services that use
+them — printgateway uses neither, so there is no field for either anywhere
+in this package's type tree, and naming them is an unknown-field error the
+same way `allowPrivateTargets` is, not an inert placeholder.
+
+A named-but-missing, named-but-unreadable, or malformed file — an unknown
+field, a wrong JSON type, or a non-positive duration or byte size — is a
+startup error naming both `PRINT_GATEWAY_CONFIG` and the path, the same
+fail-fast policy every env override already follows; it is never silently
+ignored, and it never silently falls back to `{}`. An empty file, or a
+file containing a literal JSON `null`, is also rejected explicitly, rather
+than reported as a bare decoder error or accepted as equivalent to `{}` —
+both are realistic "a bind mount stopped being mounted" failure modes, not
+hypothetical ones. Field-name matching stays case-insensitive under the
+strict decoder (`"MaxUploadBytes"` is accepted the same as
+`"maxUploadBytes"`), and a duplicate group key **merges** rather than
+erroring or discarding either occurrence
+(`{"resource/printgateway":{"timeouts":{"write":"9m"}},"resource/printgateway":{"timeouts":{"read":"4m"}}}`
+sets both) — see "What's deliberately not here yet" above; both are
+deferred to a future JSON Schema pass.
+
+**One surprising interaction, worth repeating from the timeouts table
+below:** the env var behind a setting is still validated even when the
+config file supersedes it. A malformed `PRINT_GATEWAY_WRITE_TIMEOUT` still
+fails startup even if the file's `resource/printgateway.timeouts.write` is
+valid and would have won anyway — deliberate, so a stale or fat-fingered
+env var left behind after migrating a setting into the file is caught
+immediately rather than resurfacing silently the day the file is removed.
+
+Every setting a file actually supplies is named in one startup log line
+(`config file <path> supplied: <keys>`), logged loudly enough to survive a
+warn/error `PRINT_GATEWAY_LOG_LEVEL` — the same treatment the
+`PRINT_GATEWAY_ALLOW_PRIVATE_TARGETS` warning gets, and for the same reason:
+precedence here is inverted relative to 12-factor and every ops reflex, so
+an operator debugging why an env var "has no effect" needs a one-line
+answer, not an incident. Every other startup message that already names an
+env var (a `validate` failure, the `AllowPrivateTargets` warning, an S3
+misconfiguration) is relabeled to show the file's `<path>:<jsonPath>`
+instead whenever the file is what actually supplied that value — except
+`PRINT_GATEWAY_ALLOW_PRIVATE_TARGETS`'s own line, which always shows the
+bare env var, because no file label could ever legitimately apply to it.
+
+**Known gap:** `ResolveLogServer`'s startup line still reports its source
+as `env` even when the config file is what actually supplied
+`resource/log`'s host/port — see "Logging" below. Fixing it is a
+follow-up, not done in this change.
+
+No `-config` command-line flag exists — `PRINT_GATEWAY_CONFIG` is the only
+way to name the file. This was a deliberate scope decision for the first
+version, not an oversight.
+
+**Deployment notes:**
+
+- **Docker:** the build context is `src/printgateway` (see `Dockerfile`), so
+  neither `printservice.config.json` nor `printservice.config.local.json` is
+  baked into the image. Bind-mount whichever one applies (the `.local.json`
+  one if it carries a real S3 credential — see "Two files, two purposes"
+  above) and set `PRINT_GATEWAY_CONFIG` to wherever it's mounted. Note
+  `docker-entrypoint.sh` ends in `exec … "$@"`, so any wrapper that passes a
+  positional address — even an *empty* one — silently outranks
+  `resource/printgateway.addr`, the same "argument always wins" rule as
+  everywhere else.
+  **`docker-compose.yml`** (same directory) wires this automatically for
+  local/dev use: `docker compose up` builds the image, bind-mounts
+  `printservice.config.local.json` to `/etc/printgateway/printservice.config.json`,
+  sets `PRINT_GATEWAY_CONFIG` to that path, and reads `PRINT_GATEWAY_TOKEN`
+  from a git-ignored `.env` file (copy `.env.example` and fill it in) —
+  so the config file lands inside the container just by running it, no
+  flags to remember. Runs on the default bridge network with
+  `CUPS_HOST=host.docker.internal` (verified live), NOT `network_mode:
+  host` — on Docker Desktop (Windows/Mac) the engine runs inside its own
+  dedicated WSL2 distro, separate from whatever distro actually runs CUPS,
+  so host networking would put the container in the *wrong* network
+  namespace; `host.docker.internal` is the address Docker Desktop always
+  routes to the real host regardless of which distro/VM anything runs in.
+  Requires `go mod vendor` to have been run first (see the `Dockerfile`'s
+  own header comment) and, of course, that `printservice.config.local.json`
+  actually exists — `docker compose up` fails fast naming the missing path
+  otherwise. On a native Linux Docker Engine (no Desktop layer),
+  `host.docker.internal` needs `extra_hosts: ["host.docker.internal:host-gateway"]`
+  added to the compose file, or `CUPS_HOST` pointed at the host's real
+  address instead.
+- **systemd:** install the file at mode `600`, owned by the `printgateway`
+  service user (see the credential-pair paragraph above for why that
+  ownership, not `root:root` — `install-services.sh` does this
+  automatically) and reference it via `PRINT_GATEWAY_CONFIG` in the unit's
+  environment file. Do not bake `PRINT_GATEWAY_CONFIG` into the unit by
+  default — a bind-mounted config file that stops being mounted turns a
+  healthy service into a startup failure, which argues for it being an
+  explicit, deliberate opt-in per deployment rather than a default.
+- **Rollback:** because unknown fields are a hard startup error, adding a
+  new key to the file and deploying it, then rolling the *binary* back
+  without also rolling the file back, makes the older binary refuse to
+  start (`unknown field`). Roll forward file-then-binary; roll back
+  binary-then-file.
+- `tests/scripts/profile.sh` regenerates the test harness's env file from
+  `tests/profiles.json` and will drop any hand-added `PRINT_GATEWAY_CONFIG`
+  — expected (the harness stays env-only on purpose, see
+  `docs/config-file-layer-plan.md`), but worth knowing if `tests/` output
+  looks like the config file was ignored.
 
 ### Secrets (Vault)
 
@@ -217,12 +485,12 @@ that requires an egress proxy for outbound traffic, every `file_url` fetch
 will fail — that's a known, accepted limitation of this prototype's
 implementation, not a bug.
 
-| Env var | Meaning |
-| :--- | :--- |
-| `PRINT_GATEWAY_ALLOW_PRIVATE_TARGETS` | `true` disables **every** target check above — address, port, and the post-connect recheck alike, not just the address block. Default `false`; **must stay `false` in any deployment reachable by an untrusted caller.** Exists as a config knob (rather than a test-only code path) because this prototype has no committed tests yet to need it privately; logged at `LogError` (survives any configured log level) when set. |
-| `PRINT_GATEWAY_FETCH_ALLOWED_HOSTS` | Optional comma-separated host-suffix allowlist (e.g. `s3.example.com,cdn.example.com`). Empty (the default) means any public host is fetchable — the address block above still applies regardless. |
-| `PRINT_GATEWAY_FETCH_TIMEOUT` | Bounds a single `file_url` download. Default `60s`. |
-| `PRINT_GATEWAY_FETCH_MAX_BYTES` | Bounds a downloaded response's size. Default `64` MiB. |
+| Env var | Config file key | Meaning |
+| :--- | :--- | :--- |
+| `PRINT_GATEWAY_ALLOW_PRIVATE_TARGETS` | *(env-only; setting `allowPrivateTargets` in the file is rejected as an unknown field — see "Configuration file" below)* | `true` disables **every** target check above — address, port, and the post-connect recheck alike, not just the address block. Default `false`; **must stay `false` in any deployment reachable by an untrusted caller.** Exists as a config knob (rather than a test-only code path) because this prototype has no committed tests yet to need it privately; logged at `LogError` (survives any configured log level) when set. |
+| `PRINT_GATEWAY_FETCH_ALLOWED_HOSTS` | `resource/printgateway.fetch.allowedHosts` (a JSON array, e.g. `["s3.example.com","cdn.example.com"]`, not a comma-separated string) | Optional host-suffix allowlist. Empty/omitted (the default) means any public host is fetchable — the address block above still applies regardless. In the file, an explicit `[]` means "no allowlist" and suppresses the env var the same way `resource/file_storage.host: ""` does; omitting the key entirely leaves the env var in effect. |
+| `PRINT_GATEWAY_FETCH_TIMEOUT` | `resource/printgateway.fetch.timeout` | Bounds a single `file_url` download. Default `60s`. |
+| `PRINT_GATEWAY_FETCH_MAX_BYTES` | `resource/printgateway.fetch.maxBytes` | Bounds a downloaded response's size. Default `64` MiB. |
 
 **`s3_key` bypasses all of the above by design** — it talks to a fixed,
 configured object-store endpoint with server-side credentials rather than a
@@ -244,22 +512,25 @@ lives in the shared `github.com/LabOS-co/go-packages/cloud_storage` package
 and `internal/fetch` play for `lp` and outbound HTTP. See "labOS shared
 library" below for that package's status.
 
-Configured entirely by environment; empty `PRINT_GATEWAY_S3_ENDPOINT` (the
-default) disables the feature entirely — `s3_key` and `/files/presign` both
-answer `503`, and nothing else in the service changes. This is **never** a
-startup failure, unlike the print token: a misconfigured or absent S3 setup
-just means the additive capability isn't available, not that the whole
-service is down.
+Configured by environment and, optionally, by the config file — including
+the credential pair, the one deliberate exception to this feature's
+"secrets never go in the file" rule; see "Configuration file" below for
+that exception's deployment model and file-permission implications. Empty
+`PRINT_GATEWAY_S3_ENDPOINT` (the default) disables the feature
+entirely — `s3_key` and `/files/presign` both answer `503`, and nothing else
+in the service changes. This is **never** a startup failure, unlike the
+print token: a misconfigured or absent S3 setup just means the additive
+capability isn't available, not that the whole service is down.
 
-| Env var | Meaning |
-| :--- | :--- |
-| `PRINT_GATEWAY_S3_ENDPOINT` | `host:port` of the S3/MinIO endpoint. Empty ⇒ object storage disabled. Half-configured (this set with `PRINT_GATEWAY_S3_BUCKET` empty, or vice versa) is logged loudly and disables object storage — same as every other broken-S3-config case, **never a startup failure**, matching the invariant stated above. |
-| `PRINT_GATEWAY_S3_BUCKET` | The one bucket this server reads/writes. There is no per-request bucket override or allowlist (see "deliberately not here yet" below). |
-| `PRINT_GATEWAY_S3_REGION` | Passed through to the S3 client and used to sign every request. **Strongly recommended, not optional in practice**: leaving it empty costs a live network round trip on first use, and — worse — if that lookup itself fails (e.g. against a non-AWS backend that doesn't answer it), the client silently signs as `us-east-1` instead of erroring, so a bad presigned URL fails on whoever tries to use it, with nothing here to trace it back to. Logged at `LogError` when left empty and S3 is otherwise configured. |
-| `PRINT_GATEWAY_S3_INSECURE` | `true` disables TLS to the endpoint (plain `http://`) — for a local/dev MinIO only. Default `false`. |
-| `PRINT_GATEWAY_S3_ACCESS_KEY` / `PRINT_GATEWAY_S3_SECRET_KEY` | Env-fallback credentials. Vault is tried first when configured (same Vault-then-env pattern as the print token — see "Secrets (Vault)" above), at the same path, keys `s3-access-key`/`s3-secret-key`. |
-| `PRINT_GATEWAY_S3_TIMEOUT` | Bounds a single `s3_key` download. Default `60s`. |
-| `PRINT_GATEWAY_S3_MAX_BYTES` | Bounds a downloaded object's size — checked against the object store's own authoritative size metadata before any byte is copied, unlike `file_url`'s Content-Length (at best a claim until the read catches a lie). Default `64` MiB. |
+| Env var | Config file key | Meaning |
+| :--- | :--- | :--- |
+| `PRINT_GATEWAY_S3_ENDPOINT` | `resource/file_storage.host` (a bare `host:port`, not a URL — no `https://` prefix; the vendored minio client builds `scheme://` + this value itself, and stripping the scheme is the caller's job) | `host:port` of the S3/MinIO endpoint. Empty ⇒ object storage disabled. Half-configured (this set with `PRINT_GATEWAY_S3_BUCKET` empty, or vice versa) is logged loudly and disables object storage — same as every other broken-S3-config case, **never a startup failure**, matching the invariant stated above. **An explicit `""` in the file suppresses the env value** — how an operator disables object storage from the file rather than editing the deployment's env vars — while *omitting* the key from the file leaves the env var in full effect. This is the one place `""` and "not present" mean different things; do not confuse it with `resource/printgateway.logLevel` below, where `""` is a startup error instead. |
+| `PRINT_GATEWAY_S3_BUCKET` | `resource/printgateway.objectStore.bucket` | The one bucket this server reads/writes. There is no per-request bucket override or allowlist (see "deliberately not here yet" below). Same `""`-suppresses-env rule as `resource/file_storage.host`. Note this lives under `resource/printgateway`, NOT `resource/file_storage` — which bucket to use is this service's own concern, the shared block only carries the connection itself (host + credentials). |
+| `PRINT_GATEWAY_S3_REGION` | `resource/printgateway.objectStore.region` | Passed through to the S3 client and used to sign every request. **Strongly recommended, not optional in practice**: leaving it empty costs a live network round trip on first use, and — worse — if that lookup itself fails (e.g. against a non-AWS backend that doesn't answer it), the client silently signs as `us-east-1` instead of erroring, so a bad presigned URL fails on whoever tries to use it, with nothing here to trace it back to. Logged at `LogError` when left empty and S3 is otherwise configured. Same `""`-suppresses-env rule as `resource/file_storage.host`. |
+| `PRINT_GATEWAY_S3_INSECURE` | `resource/printgateway.objectStore.insecure` | `true` disables TLS to the endpoint (plain `http://`) — for a local/dev MinIO only. Default `false`. |
+| `PRINT_GATEWAY_S3_ACCESS_KEY` / `PRINT_GATEWAY_S3_SECRET_KEY` | `resource/file_storage.s3-user` / `resource/file_storage.s3-password` (note: kebab-case JSON keys, and this shared block — not `resource/printgateway.objectStore` — same place `host` lives) — **the one exception to "secrets never go in the file", see "Configuration file" below for the deployment model this is for and the file-permission implications** | Env/file-fallback credentials. Vault is tried first when configured (same Vault-then-env-or-file pattern as the print token — see "Secrets (Vault)" above), at the same path, keys `s3-access-key`/`s3-secret-key`. |
+| `PRINT_GATEWAY_S3_TIMEOUT` | `resource/printgateway.objectStore.timeout` | Bounds a single `s3_key` download. Default `60s`. |
+| `PRINT_GATEWAY_S3_MAX_BYTES` | `resource/printgateway.objectStore.maxBytes` | Bounds a downloaded object's size — checked against the object store's own authoritative size metadata before any byte is copied, unlike `file_url`'s Content-Length (at best a claim until the read catches a lie). Default `64` MiB. |
 
 **`POST /files/presign`** — same auth (`X-Labos-Print-Token`) as `/print`:
 
@@ -337,23 +608,35 @@ stdlib `log` package or the plain `logs.GetConsoleLogger()` this prototype
 started with — see "labOS shared library" below for why. Two things follow
 from that:
 
-- **Log level.** `PRINT_GATEWAY_LOG_LEVEL` (default `info`) sets the
-  minimum logrus level. An invalid value is logged and ignored (falls back
-  to `info`) rather than failing startup — logging misconfiguration alone
-  isn't worth refusing to serve over.
+- **Log level.** `PRINT_GATEWAY_LOG_LEVEL` (default `info`), config file key
+  `resource/printgateway.logLevel`, sets the minimum logrus level. An
+  invalid value is logged and ignored (falls back to `info`) rather than
+  failing startup — logging misconfiguration alone isn't worth refusing to
+  serve over. Unlike every other file-sourced string in this document, an
+  explicit `""` for `resource/printgateway.logLevel` is a **startup
+  error**, not a suppression — `""` means something for
+  `resource/file_storage.host`, `resource/printgateway.objectStore.bucket`/
+  `region`, and `resource/log`'s host/port (see below and "S3/MinIO object
+  storage" above), but a blank log level is meaningless to
+  `logger.SetLogLevel`.
 - **Shipping to logstash.** Optional and non-fatal: if nothing resolves, the
   server just stays on console-only logging. The address (`host:port`)
   resolves the same way the print token does — Vault first if configured,
-  then env — and every failure along the way is logged once so the
-  degradation is visible:
+  then env, then the config file's `resource/log` block (its `host`/`port`
+  are separate JSON string fields, combined into one `"host:port"` value;
+  both resolving to `""` suppresses the env value, same suppression
+  principle as `resource/file_storage.host`) — and every failure along the
+  way is logged once so the degradation is visible:
 
   | Source | Where |
   | :--- | :--- |
   | Vault | `<LABOS_ENV>/config/print_gateway`, key `log-server` (same path as the print token, different key) |
   | Env fallback | `LOG_SERVER`, e.g. `LOG_SERVER=logstash.internal:514` |
+  | Config file | `resource/log`, e.g. `"resource/log": {"host": "logstash.internal", "port": "514"}` |
 
-  The startup log names which source won (`vault` or `env`), mirroring the
-  print token's own `vault`/`env` source log line.
+  The startup log names which source won (`vault` or `env`) — **not yet
+  updated to say `file`** when the config file is what actually supplied
+  the value; see "Configuration file" below for that known gap.
 
 **Known limitations, accepted for this prototype:**
 
@@ -383,27 +666,39 @@ from that:
 
 The server no longer runs with `net/http`'s zero-value timeouts — unset,
 a slow or silent client could hold a connection open forever. Each value
-below has a default and an env var to override it without a rebuild. The
-process refuses to start, naming the offending variable, on an override
-that is unparsable, non-positive, or inconsistent with the others — rather
-than silently keeping the default:
+below has a default, an env var, and (see "Configuration file" below) a
+config-file JSON key that overrides the env var, which in turn overrides
+the default. The process refuses to start, naming the offending variable
+or JSON key, on any override — from either source — that is unparsable,
+non-positive, or inconsistent with the others, rather than silently keeping
+the default:
 
-| Setting | Default | Env var | Accepted value |
-| :--- | :--- | :--- | :--- |
-| Read header timeout | 10s | `PRINT_GATEWAY_READ_HEADER_TIMEOUT` | Go duration, positive, `<=` read timeout |
-| Read timeout | 5m | `PRINT_GATEWAY_READ_TIMEOUT` | Go duration, positive |
-| Write timeout | 8m | `PRINT_GATEWAY_WRITE_TIMEOUT` | Go duration, positive, **`>` read timeout + max(fetch timeout, S3 timeout) + submit timeout** |
-| Idle timeout | 60s | `PRINT_GATEWAY_IDLE_TIMEOUT` | Go duration, positive |
-| Max header bytes | 64 KiB | `PRINT_GATEWAY_MAX_HEADER_BYTES` | plain integer **number of bytes** (`65536`, not `64KiB`) |
-| Shutdown grace period | 2m | `PRINT_GATEWAY_SHUTDOWN_GRACE` | Go duration, positive, **`>` max(fetch timeout, S3 timeout) + submit timeout** |
-| Submit (`lp`) timeout | 30s | `PRINT_GATEWAY_SUBMIT_TIMEOUT` | Go duration, positive |
-| Fetch (`file_url`) timeout | 60s | `PRINT_GATEWAY_FETCH_TIMEOUT` | Go duration, positive |
-| Fetch (`file_url`) max size | 64 MiB | `PRINT_GATEWAY_FETCH_MAX_BYTES` | plain integer **number of bytes** |
-| S3 (`s3_key`) timeout | 60s | `PRINT_GATEWAY_S3_TIMEOUT` | Go duration, positive |
-| S3 (`s3_key`) max size | 64 MiB | `PRINT_GATEWAY_S3_MAX_BYTES` | plain integer **number of bytes** |
-| Presign expiry (default and cap) | 15m | `PRINT_GATEWAY_PRESIGN_TTL` | Go duration, positive |
-| Max upload (`multipart/form-data`) body | 64 MiB | `PRINT_GATEWAY_MAX_UPLOAD_BYTES` | plain integer **number of bytes** |
-| Max JSON body (`application/json`, incl. `/files/presign`) | 8 KiB | `PRINT_GATEWAY_MAX_JSON_BYTES` | plain integer **number of bytes** |
+| Setting | Default | Env var | Config file key | Accepted value |
+| :--- | :--- | :--- | :--- | :--- |
+| Read header timeout | 10s | `PRINT_GATEWAY_READ_HEADER_TIMEOUT` | `resource/printgateway.timeouts.readHeader` | Go duration, positive, `<=` read timeout |
+| Read timeout | 5m | `PRINT_GATEWAY_READ_TIMEOUT` | `resource/printgateway.timeouts.read` | Go duration, positive |
+| Write timeout | 8m | `PRINT_GATEWAY_WRITE_TIMEOUT` | `resource/printgateway.timeouts.write` | Go duration, positive, **`>` read timeout + max(fetch timeout, S3 timeout) + submit timeout** |
+| Idle timeout | 60s | `PRINT_GATEWAY_IDLE_TIMEOUT` | `resource/printgateway.timeouts.idle` | Go duration, positive |
+| Max header bytes | 64 KiB | `PRINT_GATEWAY_MAX_HEADER_BYTES` | `resource/printgateway.limits.maxHeaderBytes` | plain integer **number of bytes** (`65536`, not `64KiB`) |
+| Shutdown grace period | 2m | `PRINT_GATEWAY_SHUTDOWN_GRACE` | `resource/printgateway.timeouts.shutdownGrace` | Go duration, positive, **`>` max(fetch timeout, S3 timeout) + submit timeout** |
+| Submit (`lp`) timeout | 30s | `PRINT_GATEWAY_SUBMIT_TIMEOUT` | `resource/printgateway.timeouts.submit` | Go duration, positive |
+| Fetch (`file_url`) timeout | 60s | `PRINT_GATEWAY_FETCH_TIMEOUT` | `resource/printgateway.fetch.timeout` | Go duration, positive |
+| Fetch (`file_url`) max size | 64 MiB | `PRINT_GATEWAY_FETCH_MAX_BYTES` | `resource/printgateway.fetch.maxBytes` | plain integer **number of bytes** |
+| S3 (`s3_key`) timeout | 60s | `PRINT_GATEWAY_S3_TIMEOUT` | `resource/printgateway.objectStore.timeout` | Go duration, positive |
+| S3 (`s3_key`) max size | 64 MiB | `PRINT_GATEWAY_S3_MAX_BYTES` | `resource/printgateway.objectStore.maxBytes` | plain integer **number of bytes** |
+| Presign expiry (default and cap) | 15m | `PRINT_GATEWAY_PRESIGN_TTL` | `resource/printgateway.objectStore.presignTtl` | Go duration, positive |
+| Max upload (`multipart/form-data`) body | 64 MiB | `PRINT_GATEWAY_MAX_UPLOAD_BYTES` | `resource/printgateway.limits.maxUploadBytes` | plain integer **number of bytes** |
+| Max JSON body (`application/json`, incl. `/files/presign`) | 8 KiB | `PRINT_GATEWAY_MAX_JSON_BYTES` | `resource/printgateway.limits.maxJsonBytes` | plain integer **number of bytes** |
+
+**One surprising interaction:** the env var behind a setting is still
+validated even when the config file supersedes it — a malformed
+`PRINT_GATEWAY_WRITE_TIMEOUT` still fails startup even if
+`resource/printgateway.timeouts.write` in the file is perfectly valid and would have won anyway.
+This is deliberate (see `mergeFileConfig`'s doc comment in
+`internal/config/config.go`), not an oversight: it means a stale or
+fat-fingered env var left behind after migrating a setting into the file is
+caught immediately instead of resurfacing silently the day the file is
+removed.
 
 Zero and negative durations are rejected on purpose: `net/http` guards every
 timeout with `if d > 0`, so `0` or `-5s` does not mean "very short", it means
@@ -566,8 +861,6 @@ works, not to be run in production:
   logstash shipping is configured, do reach the log text as a queryable
   `job_id` field (see "Correlation ID" and "Logging" above) — that's a log
   line, not an audit record.
-- **No status endpoint** (section 5) — the HTTP response is the only
-  feedback you get.
 - **No concurrency limit on `/print`.** An authenticated caller can trigger
   unlimited concurrent `file_url` fetches (or `s3_key` downloads) —
   `file_url` is usable as a reflector against a third party, and either path
@@ -575,12 +868,24 @@ works, not to be run in production:
   rejects it.
 - **No content validation of a fetched or uploaded document.** No intake
   option checks `Content-Type`, a PDF magic number, or a minimum size — a
-  200 response with an empty or non-PDF body is spooled and handed to `lp`
-  as a success.
+  non-PDF body is spooled and handed to `lp` as a success (`GW-MP-10`/
+  `GW-S3-10` in `tests/TEST-PLAN.md` assert exactly that 200). A *zero-byte*
+  body is the one case that does not get through: nothing here rejects it
+  either, but `lp` itself then fails with "No file in print request", which
+  surfaces as the generic 500 (`GW-MP-11`/`GW-S3-11`). The gap is real; its
+  blast radius is one case smaller than it looks.
 - **No per-caller bucket restriction.** `s3_key` and `/files/presign` always
   operate against the one bucket configured at startup — there is no
   allowlist or per-request bucket override, so every authenticated caller
   can read/write anywhere in that bucket.
+- **No hot-reload of the config file** (see "Configuration file" below) — a
+  change to `printservice.config.json` (or whatever `PRINT_GATEWAY_CONFIG`
+  names) takes effect only on the next restart, same as every env var.
+- **No JSON Schema validation of the config file.** Strict decoding rejects
+  an unknown field and a wrong JSON type, but field-name matching stays
+  case-insensitive (`"MaxUploadBytes"` is accepted, not just `"maxUploadBytes"`)
+  and a duplicate group key merges rather than erroring — see "Configuration
+  file" below.
 
 Treat this as the "does the plumbing work at all" step, not a deployable
 service.

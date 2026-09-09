@@ -19,10 +19,8 @@ import (
 	"printgateway/internal/printgw"
 )
 
-// TestMain builds the fakelp helper (testdata/fakelp) once for the whole
-// package run and puts it on PATH under the literal name lp/lp.exe, since
-// exec.CommandContext(ctx, "lp", ...) resolves that name via PATH lookup —
-// there is no seam inside LPSubmitter itself to inject a different command.
+// TestMain builds the fakelp helper and puts it on PATH as lp/lp.exe, since
+// LPSubmitter has no seam to inject a different command name.
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "cups-fakelp-*")
 	if err != nil {
@@ -59,13 +57,8 @@ func writeSpoolFile(t *testing.T, content []byte) string {
 	return path
 }
 
-// TestSubmitSuccessHoldsInvariants exercises the "ok" fakelp mode, which
-// dumps argv, env, and a stdin hash back to the caller — one live process
-// round trip pins three separate invariants that were previously only
-// checked by hand (A4's smoke tests): no spool path in argv (the whole
-// point of moving the document to stdin), only PATH/HOME reach the child
-// (the F1 credential-leak fix — VAULT_TOKEN/SECRET_STORE_PASSWORD must not
-// be inheritable), and the exact spooled bytes are what the child receives.
+// TestSubmitSuccessHoldsInvariants checks argv has no spool path, only
+// PATH/HOME reach the child, and the exact spooled bytes arrive on stdin.
 func TestSubmitSuccessHoldsInvariants(t *testing.T) {
 	t.Setenv("PRINTGATEWAY_TEST_CANARY", "leak-me-if-you-can")
 
@@ -100,13 +93,8 @@ func TestSubmitSuccessHoldsInvariants(t *testing.T) {
 		t.Errorf("argv = %q, want %q — a leaked spool path or extra flag would show up here", got["ARGV"], want)
 	}
 
-	// LPSubmitter.Submit sets cmd.Env to exactly PATH+HOME (the F1
-	// credential-leak fix — VAULT_TOKEN/SECRET_STORE_PASSWORD must not be
-	// inheritable). On Windows, go's os/exec itself unconditionally appends
-	// SYSTEMROOT if missing (os/exec.addCriticalEnv) — undocumented by this
-	// package, not a leak (SYSTEMROOT carries no secret), and outside
-	// Submit's control, so it's allowed here without loosening the check for
-	// anything else, in particular the canary below.
+	// os/exec on Windows always appends SYSTEMROOT itself (addCriticalEnv);
+	// that's not a secret leak, so allow it here without loosening the check.
 	allowed := map[string]bool{"PATH": true, "HOME": true}
 	if runtime.GOOS == "windows" {
 		allowed["SYSTEMROOT"] = true
@@ -117,7 +105,7 @@ func TestSubmitSuccessHoldsInvariants(t *testing.T) {
 		key = strings.ToUpper(key)
 		if !allowed[key] {
 			t.Errorf("unexpected env var reached the child: %q — Submit must scrub the process "+
-				"environment, including VAULT_TOKEN/SECRET_STORE_PASSWORD since F1", e)
+				"environment, including VAULT_TOKEN/SECRET_STORE_PASSWORD", e)
 		}
 		seen[key] = true
 	}
@@ -133,6 +121,51 @@ func TestSubmitSuccessHoldsInvariants(t *testing.T) {
 	sum := sha256.Sum256(content)
 	if wantSum := hex.EncodeToString(sum[:]); got["STDIN_SHA256"] != wantSum {
 		t.Errorf("stdin sha256 = %s, want %s — child did not receive the exact spooled bytes", got["STDIN_SHA256"], wantSum)
+	}
+}
+
+// TestSubmitCopiesFlag checks Copies 0/1 omit -n and only >1 appends it.
+func TestSubmitCopiesFlag(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		copies   int
+		wantArgv string
+	}{
+		{name: "zero (unset) omits -n", copies: 0, wantArgv: "-d|ok|-t|t"},
+		{name: "one omits -n", copies: 1, wantArgv: "-d|ok|-t|t"},
+		{name: "two appends -n 2", copies: 2, wantArgv: "-d|ok|-t|t|-n|2"},
+		{name: "five appends -n 5", copies: 5, wantArgv: "-d|ok|-t|t|-n|5"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			path := writeSpoolFile(t, []byte("doc"))
+			sub := NewLPSubmitter()
+			result, err := sub.Submit(context.Background(), printgw.SubmitJob{
+				Printer: "ok",
+				Path:    path,
+				Title:   "t",
+				Copies:  tc.copies,
+			})
+			if err != nil {
+				t.Fatalf("Submit returned error: %v", err)
+			}
+
+			var argv string
+			for _, line := range strings.Split(strings.TrimRight(result.Output, "\n"), "\n") {
+				if v, ok := strings.CutPrefix(line, "ARGV:"); ok {
+					argv = v
+					break
+				}
+			}
+			if argv != tc.wantArgv {
+				t.Errorf("argv = %q, want %q", argv, tc.wantArgv)
+			}
+		})
 	}
 }
 
@@ -181,19 +214,13 @@ func TestSubmitLPFailure(t *testing.T) {
 	if httpErr.Internal == nil || !strings.Contains(httpErr.Internal.Error(), `printer="fail"`) {
 		t.Errorf("Internal = %v, want it to name the printer for diagnosis", httpErr.Internal)
 	}
-	// lp's own stderr is the real CUPS error (e.g. client-error-not-found) an
-	// operator needs to diagnose a failure — pin that it survives into
-	// Internal's output=%s field, not just that Submit used CombinedOutput.
 	if httpErr.Internal == nil || !strings.Contains(httpErr.Internal.Error(), "unable to print (simulated)") {
 		t.Errorf("Internal = %v, want it to contain lp's stderr text", httpErr.Internal)
 	}
 }
 
-// TestSubmitTimeoutKillsTheChild covers P0-1's headline claim: a wedged lp
-// process no longer hangs the handler. fakelp's "hang" mode never exits on
-// its own, so returning at all — and returning close to the deadline, not
-// after it — is only possible if exec.CommandContext actually killed the
-// child.
+// TestSubmitTimeoutKillsTheChild checks a wedged lp process (fakelp's "hang"
+// mode never exits on its own) doesn't hang the handler past ctx's deadline.
 func TestSubmitTimeoutKillsTheChild(t *testing.T) {
 	t.Parallel()
 
@@ -231,22 +258,9 @@ func TestSubmitTimeoutKillsTheChild(t *testing.T) {
 			ctx, cancel := tc.makeCtx()
 			defer cancel()
 
-			// Submit runs in a goroutine so a genuine P0-1 regression (the
-			// child not actually getting killed) fails HERE, with this
-			// message, in 2s — instead of wedging until go test's own
-			// 10-minute default timeout panics, which would skip TestMain's
-			// cleanup and leave the fakelp "hang" child (a 24h time.Sleep)
-			// orphaned on the machine holding its temp dir open.
-			//
-			// "returned within the bound" is a genuine proof the child died,
-			// not just that Submit unblocked: CombinedOutput gives cmd a
-			// non-*os.File stdout/stderr, so os/exec allocates an os.Pipe
-			// plus copying goroutines, and Wait (WaitDelay unset, i.e. no
-			// limit of its own) cannot return until those pipes hit EOF —
-			// which requires every write end, all held only by the child, to
-			// be closed. That proof breaks silently if Stdout/Stderr are ever
-			// changed to *os.File or a WaitDelay is added — see lp.go before
-			// doing either.
+			// Run in a goroutine with an explicit bound rather than inline,
+			// so a regression fails this test in 2s instead of wedging to
+			// go test's own default timeout and orphaning the hung child.
 			type result struct {
 				err error
 			}
@@ -261,9 +275,7 @@ func TestSubmitTimeoutKillsTheChild(t *testing.T) {
 			case r := <-done:
 				err = r.err
 			case <-time.After(2 * time.Second):
-				// Measured spread is ~0.3s across repeated runs against the
-				// 300ms deadline used above, so 2s leaves ample margin.
-				t.Fatalf("Submit did not return within 2s of a 300ms deadline — the wedged child was not killed (P0-1)")
+				t.Fatalf("Submit did not return within 2s of a 300ms deadline — the wedged child was not killed")
 			}
 
 			var httpErr *apperr.HTTPError

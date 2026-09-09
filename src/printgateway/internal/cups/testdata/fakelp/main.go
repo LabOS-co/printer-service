@@ -1,15 +1,7 @@
-// Command fakelp stands in for the real `lp` binary in cups package tests —
-// there is no CUPS install on the Windows dev box or in CI. It is invoked
-// exactly the way cups.LPSubmitter invokes the real lp: `lp -d <mode> -t
-// <title>`, document on stdin, nothing else in argv or env to steer it with
-// (LPSubmitter.Submit deliberately zeroes the child's environment down to
-// PATH+HOME — see lp.go — so behavior selection has to ride the one channel
-// production code doesn't strip: the -d value).
-//
-// This file lives under testdata/ so `go build ./...` in the real module
-// never touches it; the test package builds it on demand via `go build
-// ./testdata/fakelp`. Stdlib only, no module dependencies, so that build
-// needs no network access.
+// Command fakelp stands in for the real `lp` binary in cups package tests,
+// since there is no CUPS install on the Windows dev box or in CI. Mode is
+// selected via the -d value (the only channel LPSubmitter doesn't strip from
+// the child's env/argv).
 package main
 
 import (
@@ -43,15 +35,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, "fakelp: unable to print (simulated)")
 		os.Exit(1)
 	case "hang":
-		// Simulates a wedged CUPS queue: never exits on its own. The test
-		// relies on exec.CommandContext killing this process when ctx
-		// expires — that's the P0-1 property under test.
-		//
-		// Not `select {}`: with a single goroutine that blocks forever
-		// rather than sleeps, so the Go runtime's deadlock detector treats
-		// it as "all goroutines are asleep" and crashes the process
-		// immediately instead of actually hanging. time.Sleep parks the
-		// goroutine without tripping that detector.
+		// Simulates a wedged CUPS queue. time.Sleep, not select{}: an
+		// empty select trips Go's deadlock detector and exits immediately.
 		time.Sleep(24 * time.Hour)
 	default:
 		fmt.Fprintf(os.Stderr, "fakelp: unknown mode %q\n", mode)
@@ -59,11 +44,8 @@ func main() {
 	}
 }
 
-// runOK dumps everything a test needs to verify Submit's invariants in one
-// invocation: the exact argv the child saw (proves no spool path leaked into
-// it), every env var the child saw (proves Submit's PATH/HOME-only
-// allowlist actually reached the child), and a hash of the bytes read from
-// stdin (proves the spooled file was piped whole, not just opened).
+// runOK reports the argv, env, and a hash of stdin it received, so a test
+// can verify what Submit actually passed to the child.
 func runOK() {
 	body, err := io.ReadAll(os.Stdin)
 	if err != nil {

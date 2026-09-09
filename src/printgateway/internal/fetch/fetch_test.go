@@ -21,61 +21,23 @@ import (
 )
 
 // These tests drive the real SafeFetcher over httptest, so the transport,
-// the redirect policy and the dial Control are all the production ones.
-// httptest.Server always binds loopback on an ephemeral port, so every case
-// that needs to reach it passes allowPrivateTargets=true — the escape hatch
-// designed in for exactly this. The cases that must prove a target is
-// REFUSED deliberately do not use a server at all: newDialControl rejects
-// before connect(2), so a bare address is both faithful and free of any real
-// network traffic.
-
-// One block in Fetch is deliberately left uncovered, recorded here so a
-// later reader does not conclude it is dead code and delete it:
+// redirect policy, and dial Control are all the production ones.
+// allowPrivateTargets=true is the escape hatch for reaching the loopback
+// httptest server; cases proving a target is REFUSED use no server at all,
+// since newDialControl rejects before connect(2).
 //
-//   - GotConn's own ParseAddrPort error return. Unreachable portably: a TCP
-//     RemoteAddr() always parses as ip:port, so provoking this needs a
-//     non-IP net.Addr (a net.Pipe or unix-socket conn), which this
-//     production transport never produces.
-//
-// The rest of the post-connect "belt and suspenders" layer needs NO
-// production seam to reach, even though its three branches only fire
-// depending on which side of a specific race against ctx cancellation
-// http.Client.Do lands on: TestFetchPostConnectRecheckCatchesAMisWiredControl,
-// TestFetchSucceedsAgainstAPublicPeerWithPrivateTargetsBlocked, and
-// TestFetchPostConnectRecheckCatchesACompletedResponseFromABlockedPeer below
-// drive all three directly, by substituting f.client.Transport from inside
-// this package. An earlier version of this comment claimed an injectable
-// Control would be needed and left the layer untested — that claim was
-// wrong, and dangerous: a mutant making GotConn reject every peer (a 100%
-// outage of file_url in production) shipped green under it, because no test
-// ever ran Fetch to a successful download with allowPrivate=false. A LATER
-// version of this same comment then claimed the success-path
-// blocked.IsValid() arm specifically could not be provoked deterministically
-// — also wrong: a fake http.RoundTripper that fires GotConn and then returns
-// a completed response regardless of ctx (exactly the real net/http race
-// fetch.go's own comment describes) reaches it every time. Two wrong
-// "unreachable" claims in a row on the same paragraph is itself the lesson:
-// verify by trying, not by re-reading the reasoning that produced the last
-// claim.
-//
-// The http.NewRequestWithContext error branch is separately unreachable:
-// verified by probe that for every input url.Parse accepts, u.String()
-// round-trips and NewRequest succeeds; the method is a constant. Unreachable
-// for any URL that has already cleared validateURL.
+// Two branches in Fetch are deliberately left uncovered:
+//   - GotConn's ParseAddrPort error return: unreachable with a real TCP
+//     RemoteAddr(), which always parses as ip:port.
+//   - http.NewRequestWithContext's error branch: unreachable for any URL
+//     that already cleared validateURL.
 const testMaxBytes = 100
 
 // requireHTTPError asserts err carries the expected status, a non-empty
-// Public (or error_handler would return a blank message to the caller), and
-// a non-nil Internal (every construction site in this package sets one; a
-// nil here would mean a failure with no diagnosable detail in the log).
-//
-// It deliberately does NOT assert Public != Internal.Error() as a blanket
-// rule: several call sites (a bad scheme, a disallowed port) set Public to
-// exactly the internal message on purpose, because that detail is itself
-// safe to disclose. The places where leaking internal detail would matter
-// (the allowlist rejection, an upstream URL, an upstream status code) assert
-// that distinction individually — see
-// TestFetchDoesNotLeakTheRejectedHostToTheCaller and its neighbors.
+// Public, and a non-nil Internal. It does not assert Public != Internal: a
+// few call sites deliberately expose the same detail in both; the places
+// where that distinction matters assert it individually (e.g.
+// TestFetchDoesNotLeakTheRejectedHostToTheCaller).
 func requireHTTPError(t *testing.T, err error, wantStatus int) *apperr.HTTPError {
 	t.Helper()
 	if err == nil {
@@ -130,9 +92,8 @@ func TestFetchCopiesTheBody(t *testing.T) {
 	}
 }
 
-// TestFetchAcceptsABodyExactlyAtTheLimit is the other half of the oversize
-// cases: without it, a limit off by one in the wrong direction (rejecting at
-// exactly maxBytes) would go unnoticed.
+// TestFetchAcceptsABodyExactlyAtTheLimit pins against an off-by-one that
+// would reject a body of exactly maxBytes.
 func TestFetchAcceptsABodyExactlyAtTheLimit(t *testing.T) {
 	t.Parallel()
 
@@ -158,9 +119,6 @@ func TestFetchRejectsAnOversizeContentLength(t *testing.T) {
 
 	body := strings.Repeat("a", testMaxBytes*2)
 	srv, f := newTestServer(t, testMaxBytes, func(w http.ResponseWriter, r *http.Request) {
-		// Set it explicitly rather than relying on Go's automatic sizing, so
-		// the case keeps testing the Content-Length path even if the body
-		// size or the server's buffering behavior changes.
 		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 		io.WriteString(w, body)
 	})
@@ -179,16 +137,14 @@ func TestFetchRejectsAnOversizeContentLength(t *testing.T) {
 	}
 }
 
-// TestFetchRejectsAnOversizeChunkedBody is the case that matters more: a
-// chunked response declares no length, so the header pre-check cannot fire
-// and only the LimitReader stops it. A body that lies about its size takes
-// this same path.
+// TestFetchRejectsAnOversizeChunkedBody covers a chunked response, which
+// declares no length, so only the LimitReader (not the header pre-check)
+// stops it.
 func TestFetchRejectsAnOversizeChunkedBody(t *testing.T) {
 	t.Parallel()
 
 	srv, f := newTestServer(t, testMaxBytes, func(w http.ResponseWriter, r *http.Request) {
-		// Flushing before the response is complete forces chunked encoding,
-		// which is what leaves ContentLength at -1 on the client side.
+		// Flushing before the response completes forces chunked encoding.
 		io.WriteString(w, strings.Repeat("a", testMaxBytes))
 		w.(http.Flusher).Flush()
 		io.WriteString(w, "over the limit")
@@ -200,19 +156,14 @@ func TestFetchRejectsAnOversizeChunkedBody(t *testing.T) {
 	if !strings.Contains(fmt.Sprint(httpErr.Internal), "body exceeded") {
 		t.Errorf("Internal = %v, want the copy-limit message, not the content-length one", httpErr.Internal)
 	}
-	// The overshoot is bounded to one byte past the limit by LimitReader —
-	// an unbounded read is the resource-exhaustion half of P0-4.
+	// LimitReader bounds the overshoot to one byte past the limit.
 	if int64(dst.Len()) > testMaxBytes+1 {
 		t.Errorf("dst got %d bytes, want at most %d", dst.Len(), testMaxBytes+1)
 	}
 }
 
-// TestFetchWithAHugeMaxBytesStillCopies is the regression guard for the
-// overflow found in A5's review: maxBytes near math.MaxInt64 wrapped
-// maxBytes+1 negative, and io.LimitReader treats N<=0 as "already at the
-// limit" — an immediate EOF that reads as a genuine zero-byte success, so a
-// blank page printed and was reported as submitted. That is P0-3's failure
-// class, reached through a config value rather than a disk error.
+// TestFetchWithAHugeMaxBytesStillCopies is the regression guard for
+// maxBytes near math.MaxInt64 overflowing maxBytes+1 negative.
 func TestFetchWithAHugeMaxBytesStillCopies(t *testing.T) {
 	t.Parallel()
 
@@ -271,10 +222,9 @@ func TestFetchRejectsANonOKStatus(t *testing.T) {
 	}
 }
 
-// TestFetchRefusesRedirects pins the no-redirect rule. Following even one
-// redirect would let a caller name an allowed public host and be handed
-// straight to a private one, bypassing every pre-flight check — the dial
-// Control would still fire, but the host allowlist would not.
+// TestFetchRefusesRedirects pins the no-redirect rule: following one would
+// let an allowed public host redirect to a private one, bypassing the host
+// allowlist (though not the dial Control).
 func TestFetchRefusesRedirects(t *testing.T) {
 	t.Parallel()
 
@@ -312,36 +262,27 @@ func TestFetchRefusesRedirects(t *testing.T) {
 	}
 }
 
-// TestFetchHonorsTheContextDeadline is the P0-1-shaped case for the fetch
-// side: without it a wedged upstream parks the request goroutine for as long
-// as it likes. printgw.Service.fetch is what applies config.FetchTimeout to
-// this ctx in production.
+// TestFetchHonorsTheContextDeadline pins that a wedged upstream cannot park
+// the request goroutine forever.
 func TestFetchHonorsTheContextDeadline(t *testing.T) {
 	t.Parallel()
 
 	srv, f := newTestServer(t, testMaxBytes, func(w http.ResponseWriter, r *http.Request) {
-		// Park until the client goes away rather than sleeping a fixed
-		// duration: httptest.Server.Close waits for outstanding handlers, so
-		// a sleeping handler would hold up the whole test binary.
+		// Park until the client disconnects, not a fixed sleep: Close waits
+		// for outstanding handlers and would hold up the whole test binary.
 		<-r.Context().Done()
 	})
 
 	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()
 
-	// Run Fetch off the test goroutine and race it against a bound, rather
-	// than calling it inline and checking elapsed afterward: if ctx
-	// propagation ever regresses, Fetch blocks on <-r.Context().Done()
-	// forever (the handler only unblocks when the client goes away), and an
-	// inline call would hang the whole test binary to its default 30s/10m
-	// timeout instead of failing this one test with a clear message.
+	// Run off the test goroutine with an explicit bound: if ctx propagation
+	// regresses, Fetch blocks forever and an inline call would hang the
+	// whole test binary instead of failing just this test.
 	//
-	// requireHTTPError (and any other t.Fatal*) is deliberately NOT called
-	// from the goroutine below: Fatal's runtime.Goexit unwinds only the
-	// calling goroutine, not the test, so a failure there would silently
-	// leak this goroutine rather than fail the test. The raw error and
-	// elapsed time are sent back and asserted from the test goroutine
-	// instead.
+	// t.Fatal must not be called from the goroutine below (Goexit only
+	// unwinds that goroutine, not the test) — results are sent back and
+	// asserted from the test goroutine instead.
 	type result struct {
 		err     error
 		elapsed time.Duration
@@ -360,8 +301,6 @@ func TestFetchHonorsTheContextDeadline(t *testing.T) {
 		if !errors.Is(httpErr.Internal, context.DeadlineExceeded) {
 			t.Errorf("Internal = %v, want it to wrap context.DeadlineExceeded", httpErr.Internal)
 		}
-		// Generous slack: this asserts "bounded by the deadline", not the
-		// scheduler's precision.
 		if r.elapsed > 5*time.Second {
 			t.Errorf("Fetch took %v, want it to return at the deadline", r.elapsed)
 		}
@@ -394,25 +333,20 @@ func TestFetchReportsACancelledContext(t *testing.T) {
 	}
 }
 
-// TestFetchReportsATruncatedBody covers the copy-error branch: the response
-// started fine and failed partway through. It must be an error, not a short
-// success, or a truncated document reaches lp and prints (P0-3 again).
+// TestFetchReportsATruncatedBody covers a response that starts fine and
+// fails partway through: it must be an error, not a short success.
 func TestFetchReportsATruncatedBody(t *testing.T) {
 	t.Parallel()
 
 	srv, f := newTestServer(t, testMaxBytes, func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, "the first half")
 		w.(http.Flusher).Flush()
-		// ErrAbortHandler drops the connection mid-body without the server
-		// printing a stack trace.
-		panic(http.ErrAbortHandler)
+		panic(http.ErrAbortHandler) // drops the connection without a stack trace
 	})
 
 	var dst bytes.Buffer
 	n, err := f.Fetch(t.Context(), srv.URL+"/doc.pdf", &dst)
 	httpErr := requireHTTPError(t, err, http.StatusBadGateway)
-	// The partial count is returned deliberately — the caller (printgw)
-	// discards the spool file on error, and the count is diagnostic.
 	if n != int64(dst.Len()) {
 		t.Errorf("n = %d but dst holds %d bytes; the count must describe what was written", n, dst.Len())
 	}
@@ -421,9 +355,8 @@ func TestFetchReportsATruncatedBody(t *testing.T) {
 	}
 }
 
-// TestFetchRejectsBadURLs covers the pre-flight URL policy reached through
-// Fetch. No server and no dial: every one of these is refused before a
-// connection is attempted, which is the property worth pinning.
+// TestFetchRejectsBadURLs covers the pre-flight URL policy: no server and no
+// dial, since every case is refused before a connection is attempted.
 func TestFetchRejectsBadURLs(t *testing.T) {
 	t.Parallel()
 
@@ -479,10 +412,8 @@ func TestFetchRejectsBadURLs(t *testing.T) {
 	}
 }
 
-// TestFetchDoesNotLeakTheRejectedHostToTheCaller: the allowlist rejection is
-// the one refusal whose Public string is deliberately vaguer than its
-// Internal one — naming the allowlist's contents back to an unauthenticated
-// caller would turn the error into a probe for what the gateway can reach.
+// TestFetchDoesNotLeakTheRejectedHostToTheCaller: naming the allowlist back
+// to an unauthenticated caller would turn the error into a network probe.
 func TestFetchDoesNotLeakTheRejectedHostToTheCaller(t *testing.T) {
 	t.Parallel()
 
@@ -500,11 +431,9 @@ func TestFetchDoesNotLeakTheRejectedHostToTheCaller(t *testing.T) {
 }
 
 // TestFetchBlocksPrivateTargetsAtTheDial is the end-to-end proof that
-// newDialControl is actually wired into the transport, not merely correct in
-// isolation (guard_test.go covers it in isolation). Each address is on an
-// allowed port, so the pre-flight checks all pass and the ONLY thing that can
-// refuse it is Control — which fires before connect(2), so nothing is dialed
-// even though no server is listening.
+// newDialControl is actually wired into the transport (guard_test.go covers
+// it in isolation). Each address is on an allowed port, so only Control can
+// refuse it, before connect(2) — no server needs to be listening.
 func TestFetchBlocksPrivateTargetsAtTheDial(t *testing.T) {
 	t.Parallel()
 
@@ -514,23 +443,15 @@ func TestFetchBlocksPrivateTargetsAtTheDial(t *testing.T) {
 	}{
 		{name: "loopback", rawURL: "http://127.0.0.1/doc.pdf"},
 		{
+			// The other rows are IP literals; this one resolves via the OS
+			// hosts file, proving Control runs on the resolved address.
 			name: "a hostname that resolves to loopback", rawURL: "http://localhost/doc.pdf",
-			// The rows around this one are all IP literals, which never
-			// exercise DNS resolution — validateURL's own hostname check and
-			// Control's post-resolution check could trade places without any
-			// of them noticing. "localhost" resolves via the OS hosts file
-			// (hermetic, no real network) and proves Control is actually
-			// invoked with the resolved address, not the literal string.
 		},
 		{name: "cloud metadata", rawURL: "http://169.254.169.254/latest/meta-data/"},
 		{name: "RFC1918", rawURL: "https://10.1.2.3/doc.pdf"},
 		{name: "IPv6 loopback", rawURL: "http://[::1]/doc.pdf"},
 		{name: "IPv4-compatible IPv6 loopback", rawURL: "http://[::127.0.0.1]/doc.pdf"},
-		{
-			name: "a zoned IPv6 loopback", rawURL: "http://[::127.0.0.1%25eth0]/doc.pdf",
-			// The 08778a0 regression, end to end: %25 is the percent-encoded
-			// zone separator a caller would actually put in a JSON file_url.
-		},
+		{name: "a zoned IPv6 loopback (%25 is the percent-encoded zone separator)", rawURL: "http://[::127.0.0.1%25eth0]/doc.pdf"},
 	}
 
 	for _, tt := range tests {
@@ -556,29 +477,14 @@ func TestFetchBlocksPrivateTargetsAtTheDial(t *testing.T) {
 }
 
 // TestFetchPostConnectRecheckCatchesAMisWiredControl provokes the
-// ERROR-path arm of the belt-and-suspenders layer: a connection reached a
-// peer that isBlockedAddr rejects, because Control did not stop it, and
-// cancel() (called from GotConn) wins its race with http.Client.Do, so Do
-// returns a non-nil error. That is exactly the "Control mis-wired in some
-// future refactor" scenario the layer exists to survive, and it needs no
-// production seam — this test lives in package fetch, so it can swap the
-// transport on the fetcher's own client, which is precisely what a
-// mis-wiring looks like from the trace's viewpoint.
-//
-// Its sibling, TestFetchPostConnectRecheckCatchesACompletedResponseFromABlockedPeer
-// below, provokes the other arm: the SUCCESS path, where Do wins that race
-// instead. The two are asserted on their branch-specific message tails
-// (rather than the "post-connect check blocked" prefix they share) precisely
-// so that a mutant which disables cancel() — shifting this test's real
-// control flow from the error arm onto the success arm while it keeps
-// passing on the shared prefix alone — is caught here rather than silently
-// changing which branch this test exercises.
-//
-// The URL names a public IP literal so validateURL, the port check and the
-// host allowlist all pass with allowPrivate=false (which is what lets the
-// GotConn body run at all), while the substituted DialContext actually
-// connects to the loopback httptest server regardless of the address given —
-// nothing here performs a real DNS lookup or dials off-box.
+// ERROR-path arm of the belt-and-suspenders layer, simulating "Control
+// mis-wired in a future refactor" by swapping the transport to one with no
+// Control at all: GotConn flags the blocked peer and cancel() wins its race
+// with http.Client.Do, so Do returns an error. Its sibling,
+// TestFetchPostConnectRecheckCatchesACompletedResponseFromABlockedPeer,
+// provokes the SUCCESS-path arm instead. The two assert on their
+// branch-specific message tails (not just the shared "post-connect check
+// blocked" prefix) so a mutant that disables cancel() is still caught.
 func TestFetchPostConnectRecheckCatchesAMisWiredControl(t *testing.T) {
 	t.Parallel()
 
@@ -614,14 +520,10 @@ func TestFetchPostConnectRecheckCatchesAMisWiredControl(t *testing.T) {
 	}
 }
 
-// blockedPeerRoundTripper simulates the real net/http race fetch.go's own
-// comment describes: net/http's transport prefers a completed round trip
-// over honoring ctx.Done(), so cancel() winning the GotConn race does not
-// guarantee Do returns an error. It fires GotConn (so isBlockedAddr sees the
-// configured, blocked address and calls cancel(), exactly like production),
-// then unconditionally returns a normal 200 response — deliberately never
-// checking req.Context() — so the success-path blocked.IsValid() recheck in
-// fetch.go is the ONLY thing standing between this response and the caller.
+// blockedPeerRoundTripper simulates net/http returning a completed response
+// even though GotConn already flagged the peer and called cancel() — the
+// success-path race fetch.go's own comment describes — by never checking
+// req.Context() before responding.
 type blockedPeerRoundTripper struct {
 	blockedAddr net.Addr
 	body        string
@@ -644,8 +546,7 @@ func (rt blockedPeerRoundTripper) RoundTrip(req *http.Request) (*http.Response, 
 	}, nil
 }
 
-// blockedPeerConn supplies only the RemoteAddr GotConn reads; nothing else
-// on net.Conn is ever called by fetch.go, so the rest is left nil deliberately.
+// blockedPeerConn supplies only the RemoteAddr GotConn reads.
 type blockedPeerConn struct {
 	net.Conn
 	addr net.Addr
@@ -654,13 +555,8 @@ type blockedPeerConn struct {
 func (c blockedPeerConn) RemoteAddr() net.Addr { return c.addr }
 
 // TestFetchPostConnectRecheckCatchesACompletedResponseFromABlockedPeer
-// provokes the SUCCESS-path arm of the belt-and-suspenders layer (fetch.go's
-// blocked.IsValid() check after Do returns (resp, nil)) — the sibling of
-// TestFetchPostConnectRecheckCatchesAMisWiredControl above, and the one
-// branch an earlier version of this file's package comment incorrectly
-// claimed could not be provoked deterministically. blockedPeerRoundTripper
-// makes the race fetch.go's comment describes non-optional: GotConn always
-// fires and Do always "wins" it by returning a completed response anyway.
+// provokes the SUCCESS-path arm of the belt-and-suspenders layer, the
+// sibling of TestFetchPostConnectRecheckCatchesAMisWiredControl above.
 func TestFetchPostConnectRecheckCatchesACompletedResponseFromABlockedPeer(t *testing.T) {
 	t.Parallel()
 
@@ -679,7 +575,7 @@ func TestFetchPostConnectRecheckCatchesACompletedResponseFromABlockedPeer(t *tes
 		t.Errorf("Public = %q, want %q", httpErr.Public, errBlockedTarget.Error())
 	}
 	if !strings.Contains(fmt.Sprint(httpErr.Internal), "(dial control did not)") {
-		t.Errorf("Internal = %v, want the success-path recheck's own tail — this arm must be the one that refused, not the error-path arm", httpErr.Internal)
+		t.Errorf("Internal = %v, want the success-path recheck's own tail", httpErr.Internal)
 	}
 	if dst.String() != "" {
 		t.Errorf("dst = %q, want nothing spooled from a blocked peer even though the transport completed the response", dst.String())
@@ -687,12 +583,8 @@ func TestFetchPostConnectRecheckCatchesACompletedResponseFromABlockedPeer(t *tes
 }
 
 // publicPeerConn reports a public RemoteAddr for a connection that is really
-// loopback, so a test can drive Fetch's PRODUCTION configuration
-// (allowPrivate=false) all the way to a successful download. Without it, no
-// test in this package ever runs the GotConn body to completion, and a
-// post-connect layer that rejected every peer — breaking every fetch in
-// production — would pass the entire suite while looking exhaustively
-// tested.
+// loopback, letting a test drive Fetch's production configuration
+// (allowPrivate=false) to a successful download.
 type publicPeerConn struct{ net.Conn }
 
 func (publicPeerConn) RemoteAddr() net.Addr {
@@ -730,9 +622,8 @@ func TestFetchSucceedsAgainstAPublicPeerWithPrivateTargetsBlocked(t *testing.T) 
 	}
 }
 
-// TestFetchAllowsAHostOnTheAllowlist is the positive half of the allowlist:
-// without it, an allowlist that rejects everything would pass every other
-// allowlist case in this file.
+// TestFetchAllowsAHostOnTheAllowlist is the positive half of the allowlist,
+// catching an allowlist that rejects everything.
 func TestFetchAllowsAHostOnTheAllowlist(t *testing.T) {
 	t.Parallel()
 
@@ -762,12 +653,8 @@ func mustHostname(t *testing.T, rawURL string) string {
 	return u.Hostname()
 }
 
-// TestNewSafeFetcherDisablesKeepAlives pins a property no black-box case can
-// observe: connection reuse is keyed on scheme+host:port, so a reused
-// connection can only reach a peer Control already approved — but a fresh
-// dial per request means a fresh Control check per request, which is the
-// defense-in-depth the comment in NewSafeFetcher claims. Asserting it here
-// keeps that claim from quietly becoming false.
+// TestNewSafeFetcherDisablesKeepAlives pins the defense-in-depth claimed in
+// NewSafeFetcher: a fresh dial per request means a fresh Control check.
 func TestNewSafeFetcherDisablesKeepAlives(t *testing.T) {
 	t.Parallel()
 
@@ -782,14 +669,9 @@ func TestNewSafeFetcherDisablesKeepAlives(t *testing.T) {
 	if transport.DialContext == nil {
 		t.Error("DialContext is nil: the guarded dialer is not wired in at all")
 	}
-	// HTTP/2 must stay off by every path Go 1.25 offers to turn it on:
-	// Fetch's `blocked` variable is read and written with no lock, which is
-	// safe only because GotConn fires synchronously on the calling
-	// goroutine. http2's transport invokes trace callbacks from its own
-	// goroutine, which would make that a real race. ForceAttemptHTTP2 is the
-	// pre-1.24 switch; Transport.Protocols (added in 1.24) and a manually
-	// registered TLSNextProto["h2"] both also enable it and would leave this
-	// property silently false if only ForceAttemptHTTP2 were checked.
+	// HTTP/2 must stay off by every path that could enable it (Fetch's
+	// `blocked` is read/written without a lock, safe only under HTTP/1's
+	// synchronous GotConn); check all three switches, not just the pre-1.24 one.
 	if transport.ForceAttemptHTTP2 {
 		t.Error("ForceAttemptHTTP2 = true; see the data-race note on `blocked` in Fetch")
 	}

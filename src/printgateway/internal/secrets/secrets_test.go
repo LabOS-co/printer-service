@@ -15,11 +15,8 @@ import (
 
 // --- fakes -------------------------------------------------------------
 
-// fakeSecretStoreClient implements secret_store.SecretStoreClient. Every
-// resolver in this package only ever calls GetSecretValue, so every other
-// method panics if invoked — a call there would mean this package started
-// depending on a capability none of ResolveToken/ResolveLogServer/
-// ResolveS3Credentials actually use.
+// fakeSecretStoreClient implements secret_store.SecretStoreClient. Every other
+// method panics if invoked, since this package only ever calls GetSecretValue.
 type fakeSecretStoreClient struct {
 	values map[string]map[string]any // path -> raw GetSecretValue result
 	errs   map[string]error          // path -> error instead of a value
@@ -69,16 +66,14 @@ func (f *fakeSecretStoreClient) RenewDatabaseCredentialsLease(string, int) (*sec
 
 var _ secret_store.SecretStoreClient = (*fakeSecretStoreClient)(nil)
 
-// kv2 wraps fields the way this package's own VaultClient.GetSecretValue
-// returns them (see secret_store's unwrapFields doc comment) — nested one
+// kv2 wraps fields the way VaultClient.GetSecretValue returns them: nested one
 // level under "data", un-unwrapped.
 func kv2(fields map[string]any) map[string]any {
 	return map[string]any{"data": fields}
 }
 
-// stubVaultClient swaps the package-level vaultClient var for the duration
-// of the calling test. Package-level, so callers must NOT run in parallel
-// with each other or with anything else that touches vaultClient.
+// stubVaultClient swaps the package-level vaultClient var for the duration of the
+// calling test. Callers must not run in parallel with anything else touching it.
 func stubVaultClient(t *testing.T, client secret_store.SecretStoreClient, err error) {
 	t.Helper()
 	orig := vaultClient
@@ -88,9 +83,8 @@ func stubVaultClient(t *testing.T, client secret_store.SecretStoreClient, err er
 	t.Cleanup(func() { vaultClient = orig })
 }
 
-// capturingLogger records which level each call landed at, so a test can
-// pin the LogInfo-vs-LogError distinction the production code's own
-// comments describe (e.g. "a missing optional key is not an error").
+// capturingLogger records which level each call landed at, so a test can pin the
+// LogInfo-vs-LogError distinction.
 type capturingLogger struct {
 	logs.LoggerMock
 	infos  []string
@@ -107,11 +101,8 @@ func (c *capturingLogger) LogError(msg string, _ *logs.LogMetaData) error {
 	return nil
 }
 
-// assertNoSecretLogged is the check the plan's own test spec for this
-// package names explicitly: no secret value may ever reach a log line,
-// success or failure. Call it at the end of any test that has a real secret
-// value in play, passing every such value (blank ones are ignored so a
-// zero-value case doesn't trivially pass by matching every line).
+// assertNoSecretLogged fails if any given secret value appears in a log line.
+// Blank values are ignored so a zero-value case doesn't trivially pass.
 func assertNoSecretLogged(t *testing.T, log *capturingLogger, secrets ...string) {
 	t.Helper()
 	lines := make([]string, 0, len(log.infos)+len(log.errors))
@@ -211,14 +202,10 @@ func TestDefaultVaultClientRejectsAnUndecryptablePassword(t *testing.T) {
 func TestDefaultVaultClientTokenConstructionNeedsNoNetwork(t *testing.T) {
 	// Not parallel: t.Setenv (below) forbids it.
 
-	// secret_store.Vault -> vault.NewClient -> vault.DefaultConfig reads
-	// every VAULT_* env var via ReadEnvironment before this function ever
-	// sees cfg — a developer machine or CI runner with e.g. VAULT_CACERT
-	// pointed at a nonexistent file fails client construction for reasons
-	// unrelated to this code (verified live: VAULT_CACERT=/no/such/file
-	// makes this test fail with "Error loading CA File"). Pin a clean
-	// environment explicitly rather than relying on whatever happens to be
-	// ambient.
+	// vault.NewClient reads every VAULT_* env var via ReadEnvironment before this
+	// function sees cfg (e.g. a stray VAULT_CACERT pointed at a nonexistent file
+	// fails construction for reasons unrelated to this code — verified live). Pin a
+	// clean environment explicitly.
 	for _, k := range []string{
 		"VAULT_ADDR", "VAULT_AGENT_ADDR", "VAULT_CACERT", "VAULT_CACERT_BYTES", "VAULT_CAPATH",
 		"VAULT_CLIENT_CERT", "VAULT_CLIENT_KEY", "VAULT_CLIENT_TIMEOUT", "VAULT_SRV_LOOKUP",
@@ -229,10 +216,9 @@ func TestDefaultVaultClientTokenConstructionNeedsNoNetwork(t *testing.T) {
 		t.Setenv(k, "")
 	}
 
-	// A token-based client is validated and returned locally by
-	// secret_store.Vault — no login round trip, unlike the userpass case
-	// below — so this must succeed even though vault.example.com resolves
-	// to nothing reachable here.
+	// A token-based client is validated and returned locally, with no login round
+	// trip (unlike the userpass case below), so this succeeds against an
+	// unreachable address.
 	client, err := defaultVaultClient(config.Config{
 		SecretStoreURL: "https://vault.example.com",
 		VaultToken:     "s.faketoken",
@@ -253,10 +239,8 @@ func TestDefaultVaultClientUserpassFailsWithoutAReachableServer(t *testing.T) {
 		t.Fatalf("test setup: encryption.Encrypt failed: %v", err)
 	}
 
-	// Unlike the token case, a userpass login performs a real login write —
-	// port 1 on loopback refuses instantly rather than hanging on DNS, so
-	// this stays fast while still exercising defaultVaultClient's real
-	// network-failure path.
+	// Port 1 on loopback refuses instantly rather than hanging on DNS, keeping
+	// this fast while still exercising the real network-failure path.
 	_, err = defaultVaultClient(config.Config{
 		SecretStoreURL:      "http://127.0.0.1:1",
 		SecretStoreUsername: "svc",
@@ -310,9 +294,7 @@ func TestResolveTokenNoVaultConfigured(t *testing.T) {
 }
 
 func TestResolveTokenFallsBackWhenVaultClientConstructionFails(t *testing.T) {
-	// Not parallel: exercises the real defaultVaultClient (no seam), but
-	// serializing everything that touches Vault-configured cfg keeps the
-	// file's concurrency story simple to reason about.
+	// Not parallel: exercises the real defaultVaultClient (no seam).
 
 	cfg := config.Config{
 		SecretStoreURL:      "https://vault.example.com",
@@ -331,11 +313,9 @@ func TestResolveTokenFallsBackWhenVaultClientConstructionFails(t *testing.T) {
 	assertNoSecretLogged(t, log, "fallback-tok", cfg.SecretStorePassword)
 }
 
+// TestResolveTokenErrorsWhenVaultFailsAndEnvIsEmpty covers fallbackToken's own
+// TrimSpace check, distinct from ResolveToken's no-Vault-configured emptiness check.
 func TestResolveTokenErrorsWhenVaultFailsAndEnvIsEmpty(t *testing.T) {
-	// fallbackToken's own TrimSpace check (secrets.go), distinct from
-	// ResolveToken's no-Vault-configured emptiness check already covered by
-	// TestResolveTokenNoVaultConfigured's "env token whitespace-only" case —
-	// dropping this one specifically survived until this case existed.
 	cases := []struct {
 		name      string
 		authToken string
@@ -362,17 +342,14 @@ func TestResolveTokenErrorsWhenVaultFailsAndEnvIsEmpty(t *testing.T) {
 	}
 }
 
+// TestResolveTokenVaultSuccess uses the literal path/key, not the
+// printTokenPath/printTokenKey constants, so a rename or typo there fails this
+// test instead of agreeing with itself.
 func TestResolveTokenVaultSuccess(t *testing.T) {
-	// Literal path/key, not the printTokenPath/printTokenKey constants: those
-	// values are a cross-service contract with the labOS side's
-	// gSecretManager (see secrets.go's doc comment on them), so a rename or
-	// typo there must fail this test instead of silently agreeing with
-	// itself.
 	fake := &fakeSecretStoreClient{
 		values: map[string]map[string]any{
-			// Padded, so this also pins the trim-on-return fix: an untrimmed
-			// "  vault-tok  " (e.g. a trailing newline from a `vault kv put`
-			// heredoc) must not reach requireToken's comparison verbatim.
+			// Padded to also pin trim-on-return: an untrimmed value must not reach
+			// the comparison verbatim.
 			"staging/config/print_gateway": kv2(map[string]any{"auth-token": "  vault-tok  "}),
 		},
 	}
@@ -412,8 +389,7 @@ func TestResolveTokenVaultReadFailsFallsBackToEnv(t *testing.T) {
 }
 
 func TestResolveTokenBlankVaultValueFallsBackToEnv(t *testing.T) {
-	// A present-but-blank value is a successful GetSecretString call, not an
-	// error — the trap ResolveToken's own emptiness check exists to catch.
+	// A present-but-blank value is a successful GetSecretString call, not an error.
 	fake := &fakeSecretStoreClient{
 		values: map[string]map[string]any{
 			"config/print_gateway": kv2(map[string]any{"auth-token": "   "}),
@@ -461,8 +437,9 @@ func TestResolveLogServerNoVaultConfigured(t *testing.T) {
 	}
 }
 
+// TestResolveLogServerVaultSuccess uses the literal path/key (see
+// TestResolveTokenVaultSuccess).
 func TestResolveLogServerVaultSuccess(t *testing.T) {
-	// Literal path/key (see the equivalent comment on TestResolveTokenVaultSuccess).
 	fake := &fakeSecretStoreClient{
 		values: map[string]map[string]any{
 			"staging/config/print_gateway": kv2(map[string]any{"log-server": "logstash:5000"}),
@@ -470,9 +447,7 @@ func TestResolveLogServerVaultSuccess(t *testing.T) {
 	}
 	stubVaultClient(t, fake, nil)
 
-	// LabosEnv set (pins vaultPath's prefix — dropping it left this green
-	// before) and LogServer set to a value that must lose (pins that Vault
-	// is actually preferred over env, not just present when env is absent).
+	// LogServer is set to a value that must lose, pinning Vault-over-env precedence.
 	cfg := config.Config{SecretStoreURL: "https://vault.example.com", LabosEnv: "staging", LogServer: "ignored-env:9999"}
 	host, port, source := ResolveLogServer(cfg, logs.LoggerMock{}, nil)
 	if host != "logstash" || port != 5000 || source != "vault" {
@@ -498,14 +473,10 @@ func TestResolveLogServerVaultMalformedFallsBackToEnv(t *testing.T) {
 	}
 }
 
+// TestResolveLogServerMissingVaultKeyLogsInfoNotError pins both the log level and
+// that this is a real fallback to env, asserting each of the three return values
+// rather than discarding them.
 func TestResolveLogServerMissingVaultKeyLogsInfoNotError(t *testing.T) {
-	// The doc comment on ResolveLogServer is explicit: an absent optional
-	// key is the overwhelmingly common case and must not read as an ERROR
-	// on every startup. Pin the level AND that this is a real fallback to
-	// env (not just a discarded return) — the reviewer found a mutation
-	// that dropped ResolveLogServer's own env fallback on this exact path
-	// undetected, because the previous version of this test discarded all
-	// three return values.
 	fake := &fakeSecretStoreClient{} // no configured value or error: a definitive miss
 	stubVaultClient(t, fake, nil)
 
@@ -568,8 +539,117 @@ func TestResolveS3CredentialsNoVaultConfigured(t *testing.T) {
 	}
 }
 
+// TestResolveS3CredentialsSourceLabelsAFileSuppliedCredential proves the source
+// label says "file" when the config file supplied the credential. Built through
+// config.Load, since a hand-built config.Config{} literal can't populate the
+// unexported sources map.
+func TestResolveS3CredentialsSourceLabelsAFileSuppliedCredential(t *testing.T) {
+	t.Parallel()
+
+	const path = "/etc/printgateway-secrets-test.json"
+	getenv := func(k string) string {
+		if k == config.AuthTokenEnv {
+			return "t"
+		}
+		if k == config.ConfigPathEnv {
+			return path
+		}
+		return ""
+	}
+	readFile := func(p string) ([]byte, error) {
+		if p == path {
+			return []byte(`{"resource/file_storage": {"s3-user": "file-ak", "s3-password": "file-sk"}}`), nil
+		}
+		return nil, fmt.Errorf("no such file %s", p)
+	}
+	cfg, err := config.Load([]string{"printgateway"}, getenv, readFile)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	ak, sk, source := ResolveS3Credentials(cfg, logs.LoggerMock{}, nil)
+	if ak != "file-ak" || sk != "file-sk" || source != "file" {
+		t.Errorf("ResolveS3Credentials() = (%q, %q, %q), want (\"file-ak\", \"file-sk\", \"file\")", ak, sk, source)
+	}
+}
+
+// TestResolveS3CredentialsSourceLabelsAMixedFileAndEnvCredential proves the
+// source label distinguishes "both from the file" from "one from each".
+func TestResolveS3CredentialsSourceLabelsAMixedFileAndEnvCredential(t *testing.T) {
+	t.Parallel()
+
+	const path = "/etc/printgateway-secrets-mixed-test.json"
+	getenv := func(k string) string {
+		switch k {
+		case config.AuthTokenEnv:
+			return "t"
+		case config.ConfigPathEnv:
+			return path
+		case config.S3SecretKeyEnv:
+			return "env-sk"
+		}
+		return ""
+	}
+	readFile := func(p string) ([]byte, error) {
+		if p == path {
+			// Only the access key comes from the file; the secret key is left to env.
+			return []byte(`{"resource/file_storage": {"s3-user": "file-ak"}}`), nil
+		}
+		return nil, fmt.Errorf("no such file %s", p)
+	}
+	cfg, err := config.Load([]string{"printgateway"}, getenv, readFile)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	ak, sk, source := ResolveS3Credentials(cfg, logs.LoggerMock{}, nil)
+	if ak != "file-ak" || sk != "env-sk" || source != "file+env" {
+		t.Errorf("ResolveS3Credentials() = (%q, %q, %q), want (\"file-ak\", \"env-sk\", \"file+env\")", ak, sk, source)
+	}
+}
+
+// TestResolveS3CredentialsFileSuppressionFailsClosed: blanking
+// resource/file_storage.s3-user in the config file must actually stop a stale
+// env-sourced access key from authenticating, asserted through the real
+// ResolveS3Credentials rather than just the merged Config field.
+func TestResolveS3CredentialsFileSuppressionFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	const path = "/etc/printgateway-secrets-suppress-test.json"
+	getenv := func(k string) string {
+		switch k {
+		case config.AuthTokenEnv:
+			return "t"
+		case config.ConfigPathEnv:
+			return path
+		case config.S3AccessKeyEnv:
+			return "stale-env-access-key"
+		case config.S3SecretKeyEnv:
+			return "stale-env-secret-key"
+		}
+		return ""
+	}
+	readFile := func(p string) ([]byte, error) {
+		if p == path {
+			return []byte(`{"resource/file_storage": {"s3-user": ""}}`), nil
+		}
+		return nil, fmt.Errorf("no such file %s", p)
+	}
+	cfg, err := config.Load([]string{"printgateway"}, getenv, readFile)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	ak, sk, source := ResolveS3Credentials(cfg, logs.LoggerMock{}, nil)
+	if ak != "" || sk != "" || source != "" {
+		t.Errorf("ResolveS3Credentials() = (%q, %q, %q), want (\"\", \"\", \"\") — the blanked access key must fail closed, not fall through to the stale env secret key",
+			ak, sk, source)
+	}
+}
+
+// TestResolveS3CredentialsVaultSuccess uses the literal path/key (see
+// TestResolveTokenVaultSuccess).
 func TestResolveS3CredentialsVaultSuccess(t *testing.T) {
-	// Literal path/key (see the equivalent comment on TestResolveTokenVaultSuccess).
 	fake := &fakeSecretStoreClient{
 		values: map[string]map[string]any{
 			"staging/config/print_gateway": kv2(map[string]any{"s3-access-key": "  vault-ak  ", "s3-secret-key": "vault-sk"}),
@@ -577,9 +657,7 @@ func TestResolveS3CredentialsVaultSuccess(t *testing.T) {
 	}
 	stubVaultClient(t, fake, nil)
 
-	// LabosEnv set (pins vaultPath's prefix) and both env fields set to
-	// values that must lose (pins Vault-over-env precedence, not just
-	// Vault-when-env-is-absent).
+	// Both env fields set to values that must lose, pinning Vault-over-env precedence.
 	cfg := config.Config{SecretStoreURL: "https://vault.example.com", LabosEnv: "staging", S3AccessKey: "ignored-env-ak", S3SecretKey: "ignored-env-sk"}
 	log := &capturingLogger{}
 	ak, sk, source := ResolveS3Credentials(cfg, log, nil)
@@ -609,12 +687,9 @@ func TestResolveS3CredentialsVaultPartialFailureFallsBackToEnv(t *testing.T) {
 			}},
 		},
 		{
-			// s3AccessKeyPath and s3SecretKeyPath are the same Vault path
-			// (see secrets.go) — both fields are read from one fetched map,
-			// so the only way for exactly one of ak/sk to fail is a
-			// key-level miss within an otherwise-successful path read, not a
-			// path-level transport error. This is that case: the field map
-			// has the access key but not the secret key.
+			// s3AccessKeyPath/s3SecretKeyPath are the same Vault path, so the only
+			// way for exactly one of ak/sk to fail is a key-level miss, not a
+			// path-level transport error.
 			"secret key missing from an otherwise-successful path read",
 			&fakeSecretStoreClient{
 				values: map[string]map[string]any{"config/print_gateway": kv2(map[string]any{"s3-access-key": "vault-ak"})},

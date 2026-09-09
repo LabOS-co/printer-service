@@ -2,108 +2,68 @@
 package config
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"math"
+	"net"
+	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
 
 const (
-	// DefaultAddr is used when no address is given on the command line.
-	// Loopback-only: the server is reachable only from the machine it runs
-	// on unless an address is passed deliberately.
+	// DefaultAddr is used when no address is given on the command line. Loopback-only by default.
 	DefaultAddr = "127.0.0.1:8090"
 
-	// AuthTokenEnv is the environment variable carrying the shared secret
-	// compared against the X-Labos-Print-Token header on every request.
+	AddrSourceDefault = "default"
+	AddrSourceArgv    = "argv"
+	// AddrSourceFile: Addr has no env var, so a config file is the only way to set it under systemd.
+	AddrSourceFile = "file"
+
+	// AuthTokenEnv carries the shared secret compared against the X-Labos-Print-Token header.
 	AuthTokenEnv = "PRINT_GATEWAY_TOKEN"
 
 	// ServiceName identifies this service in logs.LogMetaData.
 	ServiceName = "printgateway"
+
+	// ConfigPathEnv names the optional JSON config file. Discovery is explicit-only: no default
+	// path, no probing.
+	ConfigPathEnv = "PRINT_GATEWAY_CONFIG"
 )
 
-// Server timeouts and limits (P0-6). A zero-value *http.Server has none of
-// these, which is what let a slow or silent client hold a connection open
-// forever with nothing to notice or reclaim it. Each has an env var so an
-// operator can tune it without a rebuild; a malformed, non-positive, or
-// mutually inconsistent value is a startup error rather than a
-// silently-ignored override (see Load and validate).
+// Server timeouts and limits, each with an env var for tuning without a rebuild. A malformed,
+// non-positive, or mutually inconsistent value is a startup error (see Load and validate).
 const (
 	DefaultReadHeaderTimeout = 10 * time.Second
-	DefaultReadTimeout       = 5 * time.Minute // uploads are large; the one value where too tight breaks real clients
+	DefaultReadTimeout       = 5 * time.Minute
 
-	// DefaultWriteTimeout must dominate DefaultReadTimeout, and by enough to
-	// cover the work the handler does after the body is in.
-	//
-	// net/http does NOT start the write deadline when the response starts. In
-	// conn.readRequest (net/http/server.go, Go 1.25) the deadline is armed in
-	// a defer that fires as soon as the *headers* are parsed:
-	//
-	//	if d := c.server.WriteTimeout; d > 0 {
-	//		defer func() { c.rwc.SetWriteDeadline(time.Now().Add(d)) }()
-	//	}
-	//
-	// so WriteTimeout is the budget for reading the body, spooling it to
-	// disk, downloading file_url/s3_key, running lp, AND writing the
-	// response — not just the last of those. At the 1m this originally
-	// shipped with, any request slower than a minute was read successfully
-	// and submitted to CUPS, and then failed on the response write: the
-	// caller saw a reset connection, retried, and the document printed
-	// twice.
-	//
-	// validate enforces WriteTimeout > ReadTimeout + max(FetchTimeout,
-	// S3Timeout) + SubmitTimeout — the full chain a JSON/file_url/s3_key
-	// request can spend before the response is written — not just
-	// WriteTimeout > ReadTimeout; 6m stopped covering that once
-	// FetchTimeout/SubmitTimeout became real (5m + 60s + 30s = 6.5m), which
-	// is exactly the duplicate-print failure mode described above, just
-	// with the fetch/s3+submit time standing in for "any request slower
-	// than a minute". max, not sum, of FetchTimeout/S3Timeout: a single
-	// request only ever exercises one of file_url/s3_key, so charging both
-	// would tighten this budget for every deployment the moment S3Timeout
-	// existed, whether or not object storage is even configured.
+	// DefaultWriteTimeout must exceed ReadTimeout+max(FetchTimeout,S3Timeout)+SubmitTimeout: net/http
+	// arms the write deadline at header-parse time, so it has to cover the whole request, not just
+	// the response write — too low and a slow request is read, printed, and only then fails on the
+	// write, so the caller retries and the document prints twice.
 	DefaultWriteTimeout = 8 * time.Minute
 
 	DefaultIdleTimeout    = 60 * time.Second
 	DefaultMaxHeaderBytes = 64 << 10 // 64 KiB
 
-	// DefaultMaxUploadBytes bounds a multipart/form-data request body — the
-	// maxBytes middleware wraps r.Body in http.MaxBytesReader with this limit
-	// before requireToken or handleMultipart ever runs, so an oversized
-	// upload is rejected while still being read, not after it has already
-	// been spooled. This is the hard cap only — see
-	// DefaultMultipartMemoryBytes for why ParseMultipartForm's own parameter
-	// is deliberately a different, non-configurable value rather than this
-	// one.
+	// DefaultMaxUploadBytes bounds a multipart/form-data body via http.MaxBytesReader.
 	DefaultMaxUploadBytes int64 = 64 << 20 // 64 MiB
 	MaxUploadBytesEnv           = "PRINT_GATEWAY_MAX_UPLOAD_BYTES"
 
-	// DefaultMultipartMemoryBytes is ParseMultipartForm's in-memory
-	// threshold (handleMultipart), deliberately NOT DefaultMaxUploadBytes.
-	// That parameter is not a cap: mime/multipart's own doc says it "stores
-	// up to maxMemory bytes […] in memory, with the remainder stored on
-	// disk" — passing MaxUploadBytes would mean raising
-	// PRINT_GATEWAY_MAX_UPLOAD_BYTES (the entire point of that env var)
-	// raises resident memory per concurrent upload by the same amount, with
-	// no concurrency limit on /print to bound the total (see README's
-	// "deliberately not here yet" list). Verified live: a 3 MiB part is
-	// disk-backed with a 1 MiB threshold and fully RAM-resident at 64/512
-	// MiB. Not configurable on purpose — this is an internal memory/disk
-	// tradeoff, not a policy an operator needs a lever for.
+	// DefaultMultipartMemoryBytes is ParseMultipartForm's in-memory threshold — deliberately not
+	// configurable or tied to MaxUploadBytes; see mime/multipart's own memory/disk tradeoff.
 	DefaultMultipartMemoryBytes int64 = 1 << 20 // 1 MiB
 
-	// DefaultMaxJSONBytes bounds every non-multipart request body (the JSON
-	// print-by-reference intake and /files/presign) the same way — both are
-	// small, structured payloads with no legitimate reason to be large, so
-	// the limit is far tighter than the upload one.
+	// DefaultMaxJSONBytes bounds every non-multipart request body (JSON print-by-reference, /files/presign).
 	DefaultMaxJSONBytes int64 = 8 << 10 // 8 KiB
 	MaxJSONBytesEnv           = "PRINT_GATEWAY_MAX_JSON_BYTES"
 
-	// DefaultShutdownGrace must exceed max(FetchTimeout,S3Timeout)+SubmitTimeout
-	// (validate's other budget check) — 60s+30s at these defaults, so 2m
-	// leaves comfortable headroom. validate takes the max of Fetch/S3 rather
-	// than their sum specifically so adding S3Timeout didn't need to raise
-	// this default (see validate's comment).
+	// DefaultShutdownGrace must exceed max(FetchTimeout,S3Timeout)+SubmitTimeout (see validate).
 	DefaultShutdownGrace = 2 * time.Minute
 
 	ReadHeaderTimeoutEnv = "PRINT_GATEWAY_READ_HEADER_TIMEOUT"
@@ -114,126 +74,79 @@ const (
 	ShutdownGraceEnv     = "PRINT_GATEWAY_SHUTDOWN_GRACE"
 )
 
-// DefaultSubmitTimeout bounds how long a single `lp` invocation may run
-// (P0-1). Without it, a wedged CUPS queue hangs the handler goroutine
-// forever: defer cleanup() never runs, leaking the goroutine, the lp
-// process, the spooled temp file, and the client connection, permanently,
-// per request. printgw.Service applies this as a context.WithTimeout around
-// the Submit call, and cups.LPSubmitter's exec.CommandContext is what turns
-// that expiry into the child process actually being killed.
+// DefaultSubmitTimeout bounds a single `lp` invocation; without it a wedged CUPS queue hangs the
+// handler goroutine (and its temp file, process, and client connection) forever.
 const DefaultSubmitTimeout = 30 * time.Second
 
 const SubmitTimeoutEnv = "PRINT_GATEWAY_SUBMIT_TIMEOUT"
 
-// Fetch (file_url download) settings — SSRF defense, HLD §11.3 (P0-4).
-// FetchTimeout is now wired to real cancellation (printgw.Service.fetch), so
-// the ShutdownGrace-vs-budget assertion deferred since DefaultSubmitTimeout
-// was added is enforced in validate below.
+// Fetch (file_url download) settings — SSRF defense.
 const (
 	DefaultFetchTimeout = 60 * time.Second
 	FetchTimeoutEnv     = "PRINT_GATEWAY_FETCH_TIMEOUT"
 
-	// DefaultFetchMaxBytes bounds a downloaded file_url response, independent
-	// of any general request-body limit: this is disk written from a
-	// caller-influenced remote host, before printgw's own logic ever sees it.
+	// DefaultFetchMaxBytes bounds a downloaded file_url response, independent of any request-body limit.
 	DefaultFetchMaxBytes int64 = 64 << 20 // 64 MiB
 	FetchMaxBytesEnv           = "PRINT_GATEWAY_FETCH_MAX_BYTES"
 
-	// AllowPrivateTargetsEnv lifts the loopback/private/link-local block on
-	// file_url. false in any deployment reachable by an untrusted caller;
-	// exists at all only because fetch's own tests need to dial
-	// httptest.Server. Not a strategy interface — a bool the project's own
-	// "design patterns are earned" rule says is the right amount of
-	// abstraction for one production value and one test value.
+	// AllowPrivateTargetsEnv lifts the loopback/private/link-local block on file_url; must stay
+	// false in any deployment reachable by an untrusted caller.
 	AllowPrivateTargetsEnv = "PRINT_GATEWAY_ALLOW_PRIVATE_TARGETS"
 
-	// FetchAllowedHostsEnv is the optional host-suffix allowlist — HLD
-	// §11.3's "pre-approved sources". Empty (the default) means any public
-	// host is fetchable; the loopback/private/link-local block above still
-	// applies regardless. Comma-separated, e.g. "s3.example.com,cdn.example.com".
+	// FetchAllowedHostsEnv is the optional comma-separated host-suffix allowlist; empty allows any
+	// public host (the private-target block above still applies regardless).
 	FetchAllowedHostsEnv = "PRINT_GATEWAY_FETCH_ALLOWED_HOSTS"
 )
 
-// S3/MinIO object storage settings, all optional: S3Endpoint == "" means
-// object storage is not configured at all, and objstore is never
-// constructed (main.go). Unlike the print token, this is never a startup
-// failure — multipart upload remains the primary intake path per the HLD's
-// own constraint (not every Windows caller has an S3 SDK), so a missing or
-// broken S3 config just means the s3_key intake and /files/presign answer
-// 503, not that the service refuses to start.
+// S3/MinIO object storage settings, all optional: an empty S3Endpoint means object storage isn't
+// configured, and a missing or broken config degrades the s3_key/presign paths to 503 rather than
+// failing startup, since multipart upload remains the primary intake path.
 const (
 	S3EndpointEnv = "PRINT_GATEWAY_S3_ENDPOINT"
 	S3BucketEnv   = "PRINT_GATEWAY_S3_BUCKET"
 	S3RegionEnv   = "PRINT_GATEWAY_S3_REGION"
 
-	// S3InsecureEnv disables TLS to the S3/MinIO endpoint — see
-	// cloud_storage.CloudStorageSettings.Insecure. false (secure) unless a
-	// caller opts in, matching that package's own default.
 	S3InsecureEnv = "PRINT_GATEWAY_S3_INSECURE"
 
-	// S3AccessKeyEnv/S3SecretKeyEnv are the env-fallback credential source —
-	// secrets.ResolveS3Credentials prefers Vault first, the same
-	// Vault-then-env pattern as ResolveToken/ResolveLogServer.
+	// S3AccessKeyEnv/S3SecretKeyEnv are the env/file-fallback credentials; secrets.ResolveS3Credentials prefers Vault first.
 	S3AccessKeyEnv = "PRINT_GATEWAY_S3_ACCESS_KEY"
 	S3SecretKeyEnv = "PRINT_GATEWAY_S3_SECRET_KEY"
 
 	DefaultS3Timeout = 60 * time.Second
 	S3TimeoutEnv     = "PRINT_GATEWAY_S3_TIMEOUT"
 
-	// DefaultS3MaxBytes bounds an s3_key download the same way
-	// DefaultFetchMaxBytes bounds a file_url download (P0-4's sibling risk:
-	// an authenticated caller naming a huge key would otherwise spool an
-	// unbounded amount of disk).
+	// DefaultS3MaxBytes bounds an s3_key download the same way DefaultFetchMaxBytes bounds a file_url download.
 	DefaultS3MaxBytes int64 = 64 << 20 // 64 MiB
 	S3MaxBytesEnv           = "PRINT_GATEWAY_S3_MAX_BYTES"
 
-	// DefaultPresignTTL is both the default and the cap for a
-	// /files/presign expiry: a caller-requested ttl longer than this is
-	// silently clamped down to it, never rejected outright — a client
-	// asking for "as long as possible" is not a caller error.
+	// DefaultPresignTTL is both the default and the cap: a caller-requested ttl longer than this is clamped, not rejected.
 	DefaultPresignTTL = 15 * time.Minute
 	PresignTTLEnv     = "PRINT_GATEWAY_PRESIGN_TTL"
 )
 
-// Vault/secret_store connection details, all optional. An empty
-// SecretStoreURL means Vault is not configured at all — secrets.ResolveToken
-// then resolves purely from the environment, unchanged from before Vault
-// support existed. Naming follows the team's existing convention (see
-// go-packages/settings) so a Nomad job spec needs no new vocabulary.
+// Vault/secret_store connection details, all optional; an empty SecretStoreURL means Vault isn't
+// configured and secrets resolve purely from the environment.
 const (
-	// VaultAddrEnv is Nomad's own injected address variable, read as the
-	// base value. SecretStoreURLEnv overrides it when set — matching
-	// go-packages/settings.go's getSecretStoreSettings precedence exactly,
-	// so a standard Nomad job spec (which sets VAULT_ADDR and nothing else)
-	// engages Vault here the same way it does for every other labOS Go
-	// service, instead of silently looking "unconfigured".
+	// VaultAddrEnv is Nomad's injected address variable; SecretStoreURLEnv overrides it when set,
+	// matching go-packages/settings' own precedence.
 	VaultAddrEnv      = "VAULT_ADDR"
 	SecretStoreURLEnv = "SECRET_STORE_URL"
 
 	VaultTokenEnv          = "VAULT_TOKEN"
 	SecretStoreUsernameEnv = "SECRET_STORE_USERNAME"
-	// SecretStorePasswordEnv, like go-packages/settings, is expected to hold
-	// an encryption.Encrypt-ed value, not plaintext — secrets.ResolveToken
-	// decrypts it before use.
+	// SecretStorePasswordEnv holds an encryption.Encrypt-ed value, not plaintext.
 	SecretStorePasswordEnv = "SECRET_STORE_PASSWORD"
 
-	// LabosEnvEnv names the path prefix under the Vault mount, e.g.
-	// "production" turns the print token's path into
-	// "production/config/print_gateway". Empty means no prefix.
+	// LabosEnvEnv names the path prefix under the Vault mount (e.g. "production"); empty means no prefix.
 	LabosEnvEnv = "LABOS_ENV"
 )
 
 const (
-	// LogServerEnv is the env-fallback address (host:port) for shipping logs
-	// to logstash — secrets.ResolveLogServer prefers Vault, matching
-	// ResolveToken's pattern, but logstash is optional: an empty result from
-	// both sources just means console-only logging, not a startup failure.
+	// LogServerEnv is the env fallback "host:port" for shipping logs to logstash; empty means console-only.
 	LogServerEnv = "LOG_SERVER"
 
-	// LogLevelEnv selects the logrus level name (e.g. "debug", "info",
-	// "warn", "error"). Not validated here — that would pull logrus into a
-	// package that is otherwise stdlib-only; logger.SetLogLevel in main.go
-	// is where an invalid value is caught and logged.
+	// LogLevelEnv selects the logrus level name; not validated here to keep this package stdlib-only
+	// — main.go's logger.SetLogLevel catches an invalid value.
 	LogLevelEnv     = "PRINT_GATEWAY_LOG_LEVEL"
 	DefaultLogLevel = "info"
 )
@@ -242,16 +155,10 @@ const (
 type Config struct {
 	Addr string
 
-	// AuthToken starts as whatever PRINT_GATEWAY_TOKEN holds (possibly
-	// empty). main.go overwrites it with secrets.ResolveToken's result before
-	// constructing the server — see that function for the Vault-then-env
-	// precedence and its deliberate fall-back-on-any-error policy.
+	// AuthToken starts as PRINT_GATEWAY_TOKEN; main.go overwrites it with secrets.ResolveToken's result.
 	AuthToken string
 
-	// Vault/secret_store connection details. SecretStoreURL == "" means
-	// Vault is not configured; the other three fields are then meaningless.
-	// Populated from VAULT_ADDR, overridden by SECRET_STORE_URL if set (see
-	// VaultAddrEnv).
+	// Vault/secret_store connection details; SecretStoreURL == "" means the other three are unused.
 	SecretStoreURL      string
 	VaultToken          string
 	SecretStoreUsername string
@@ -264,32 +171,27 @@ type Config struct {
 	IdleTimeout       time.Duration
 	MaxHeaderBytes    int
 
-	// MaxUploadBytes/MaxJSONBytes bound an inbound request body by
-	// Content-Type (see the maxBytes middleware in internal/httpapi).
+	// MaxUploadBytes/MaxJSONBytes bound an inbound request body by Content-Type (see the maxBytes middleware).
 	MaxUploadBytes int64
 	MaxJSONBytes   int64
 
-	// ShutdownGrace bounds how long Shutdown waits for in-flight requests
-	// to finish before main forces an exit.
+	// ShutdownGrace bounds how long Shutdown waits for in-flight requests before main forces an exit.
 	ShutdownGrace time.Duration
 
-	// SubmitTimeout bounds a single lp invocation (P0-1).
+	// SubmitTimeout bounds a single lp invocation.
 	SubmitTimeout time.Duration
 
-	// FetchTimeout bounds a single file_url download (P0-4).
+	// FetchTimeout bounds a single file_url download.
 	FetchTimeout time.Duration
 	// FetchMaxBytes bounds a downloaded file_url response's size.
 	FetchMaxBytes int64
-	// AllowPrivateTargets lifts the loopback/private/link-local block on
-	// file_url. Must stay false in any deployment reachable by an untrusted
-	// caller — see AllowPrivateTargetsEnv.
+	// AllowPrivateTargets lifts the loopback/private/link-local block on file_url; must stay false
+	// in any deployment reachable by an untrusted caller.
 	AllowPrivateTargets bool
-	// FetchAllowedHosts is the optional host-suffix allowlist; empty means
-	// any public host is fetchable. See FetchAllowedHostsEnv.
+	// FetchAllowedHosts is the optional host-suffix allowlist; empty means any public host is fetchable.
 	FetchAllowedHosts []string
 
-	// S3Endpoint == "" means object storage is not configured; see the const
-	// block above for why that is never a startup failure.
+	// S3Endpoint == "" means object storage isn't configured.
 	S3Endpoint string
 	S3Bucket   string
 	S3Region   string
@@ -297,33 +199,406 @@ type Config struct {
 	S3Timeout  time.Duration
 	S3MaxBytes int64
 
-	// S3AccessKey/S3SecretKey are the raw env-fallback values (see
-	// S3AccessKeyEnv/S3SecretKeyEnv) — secrets.ResolveS3Credentials prefers
-	// a Vault-resolved pair when Vault is configured, the same pattern as
-	// AuthToken/LogServer above.
+	// S3AccessKey/S3SecretKey are the raw env-or-file-fallback values; secrets.ResolveS3Credentials
+	// prefers a Vault-resolved pair when Vault is configured.
 	S3AccessKey string
 	S3SecretKey string
 
 	// PresignTTL is both the default and the cap for /files/presign.
 	PresignTTL time.Duration
 
-	// LogServer is the raw, unparsed "host:port" env fallback for logstash
-	// shipping (see LogServerEnv). secrets.ResolveLogServer parses it and
-	// prefers a Vault-resolved value when Vault is configured.
+	// LogServer is the raw, unparsed "host:port" env fallback for logstash shipping.
 	LogServer string
 
 	// LogLevel names the logrus level main.go asks the logger for.
 	LogLevel string
+
+	// sources records, per env-var name, where that setting actually came from — populated only
+	// when a config file supplies it. Unexported and write-once: Config is copied by value into
+	// several packages that would otherwise alias the same map through an exported field.
+	sources map[string]string
+
+	// AddrSource labels how Addr was determined ("default", "argv", or "file").
+	AddrSource string
+
+	// ConfigFilePath is the path a config file was actually read from, or "" if none was.
+	ConfigFilePath string
 }
 
-// Load builds Config from argv (an address override, matching the original
-// main()'s os.Args[1] convention) and the environment. It fails on a
-// present-but-malformed override rather than silently keeping the default,
-// naming the offending variable.
-func Load(args []string, getenv func(string) string) (Config, error) {
+// Source returns the label describing how the setting named by the given env var was supplied,
+// falling back to the bare env var name when no config file set it.
+func (c Config) Source(name string) string {
+	// An empty stored label is treated the same as absent, so it can never render as a blank name.
+	if v := c.sources[name]; v != "" {
+		return v
+	}
+	return name
+}
+
+// FileSourcedKeys returns the env-var names of every setting a config file supplied, sorted for a
+// stable startup log line. Returns nil when no file was read.
+func (c Config) FileSourcedKeys() []string {
+	if len(c.sources) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(c.sources))
+	for k := range c.sources {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// fileConfig mirrors the JSON config document (printservice.config.json), following the labOS-wide
+// "resource/*" convention other services already use. Every scalar is a pointer so nil
+// unambiguously means "not present in the file" (a JSON null decodes the same as an absent key).
+//
+// Two fields deviate from that rule, each documented on the field itself: Fetch.AllowedHosts (an
+// empty JSON array must mean "explicitly no allowlist", which a plain []string can't distinguish
+// from "not mentioned"), and the Limits fields, which stay *int64 so an oversized value fails with
+// this package's own wording rather than a generic encoding/json overflow message.
+type fileConfig struct {
+	Log          fileLog          `json:"resource/log"`
+	FileStorage  fileFileStorage  `json:"resource/file_storage"`
+	Printgateway filePrintgateway `json:"resource/printgateway"`
+}
+
+// fileLog is the shared logstash-shipping destination, hence its own top-level "resource/log"
+// block rather than living under "resource/printgateway". Host and Port are separate fields
+// (matching the reference convention) where Config.LogServer is a single "host:port" string —
+// mergeFileConfig combines them.
+type fileLog struct {
+	Host *string `json:"host"`
+	Port *string `json:"port"`
+}
+
+// fileFileStorage is the shared S3/MinIO connection — host and credentials only. Which
+// bucket/region to use is this service's own concern and lives under "resource/printgateway.objectStore" instead.
+type fileFileStorage struct {
+	// Host: an explicit "" is meaningful (disables object storage from the file) and suppresses PRINT_GATEWAY_S3_ENDPOINT.
+	Host *string `json:"host"`
+	// S3User/S3Password: unlike every other secret this package knows about, these two ARE valid in
+	// the file — for a deployment model where the file itself is rendered from Vault at process
+	// start. Precedence is unaffected: secrets.ResolveS3Credentials still tries Vault first.
+	S3User     *string `json:"s3-user"`
+	S3Password *string `json:"s3-password"`
+}
+
+// filePrintgateway is everything specific to running this service, the "resource/printgateway"
+// counterpart to the reference convention's "resource/controlplane".
+type filePrintgateway struct {
+	// Addr has no env var at all (see AddrSourceFile), so it is resolved separately from the
+	// file/env/default table below.
+	Addr *string `json:"addr"`
+	// LogLevel: unlike every other file-sourced string, an explicit "" here is a startup error, not
+	// a suppression — see mergeFileConfig.
+	LogLevel    *string         `json:"logLevel"`
+	Timeouts    fileTimeouts    `json:"timeouts"`
+	Limits      fileLimits      `json:"limits"`
+	Fetch       fileFetch       `json:"fetch"`
+	ObjectStore fileObjectStore `json:"objectStore"`
+}
+
+type fileTimeouts struct {
+	ReadHeader    *string `json:"readHeader"`
+	Read          *string `json:"read"`
+	Write         *string `json:"write"`
+	Idle          *string `json:"idle"`
+	ShutdownGrace *string `json:"shutdownGrace"`
+	Submit        *string `json:"submit"`
+}
+
+type fileLimits struct {
+	MaxHeaderBytes *int64 `json:"maxHeaderBytes"`
+	MaxUploadBytes *int64 `json:"maxUploadBytes"`
+	MaxJSONBytes   *int64 `json:"maxJsonBytes"`
+}
+
+type fileFetch struct {
+	Timeout  *string `json:"timeout"`
+	MaxBytes *int64  `json:"maxBytes"`
+	// AllowedHosts: nil means not mentioned (env, if any, still applies); a non-nil pointer to an
+	// empty slice means the file explicitly says "no allowlist", suppressing FetchAllowedHostsEnv.
+	AllowedHosts *[]string `json:"allowedHosts"`
+}
+
+// fileObjectStore is this service's own use of the shared S3 resource — which bucket/region, and
+// every printgateway-specific S3 setting. Endpoint and credentials live in fileFileStorage instead.
+type fileObjectStore struct {
+	// Bucket/Region: an explicit "" is meaningful (a deliberately empty region, or clearing a
+	// bucket override) and suppresses the corresponding env var.
+	Bucket     *string `json:"bucket"`
+	Region     *string `json:"region"`
+	Insecure   *bool   `json:"insecure"`
+	Timeout    *string `json:"timeout"`
+	MaxBytes   *int64  `json:"maxBytes"`
+	PresignTTL *string `json:"presignTtl"`
+}
+
+// decodeFileConfig decodes exactly one JSON object from data into a fileConfig, rejecting an
+// unknown field and any trailing content.
+//
+// Field-name matching stays case-insensitive under DisallowUnknownFields, and a duplicate *group*
+// key (e.g. two "timeouts" objects) merges into one struct rather than either being discarded —
+// only a duplicate *leaf* key is ordinary last-wins encoding/json behavior.
+func decodeFileConfig(data []byte) (fileConfig, error) {
+	// Checked explicitly so an empty/whitespace-only file (e.g. an unmounted bind mount) gets a
+	// diagnosable message instead of a bare "EOF" from the decoder.
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 {
+		return fileConfig{}, errors.New("file is empty")
+	}
+	// A top-level `null` would otherwise decode to a zero-value fileConfig exactly like `{}` does.
+	if string(trimmed) == "null" {
+		return fileConfig{}, errors.New("file is a JSON null, not an object")
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	var fc fileConfig
+	if err := dec.Decode(&fc); err != nil {
+		var typeErr *json.UnmarshalTypeError
+		if errors.As(err, &typeErr) {
+			// jsonNoun keeps the message in the JSON vocabulary the operator typed, never a Go type name.
+			if typeErr.Field == "" {
+				return fileConfig{}, fmt.Errorf("must be a JSON object, got %s", typeErr.Value)
+			}
+			return fileConfig{}, fmt.Errorf("field %q must be %s, got %s", typeErr.Field, jsonNoun(typeErr.Type), typeErr.Value)
+		}
+		return fileConfig{}, err
+	}
+	// A second concatenated JSON value would otherwise be silently discarded.
+	var extra json.RawMessage
+	switch err := dec.Decode(&extra); {
+	case errors.Is(err, io.EOF):
+		return fc, nil
+	case err == nil:
+		return fileConfig{}, errors.New("must contain exactly one JSON value")
+	default:
+		return fileConfig{}, err
+	}
+}
+
+// jsonNoun names an UnmarshalTypeError's expected Go type in the JSON vocabulary of the config
+// document, never a Go type name.
+func jsonNoun(t reflect.Type) string {
+	for t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	switch t.Kind() {
+	case reflect.Struct:
+		return "an object"
+	case reflect.Slice:
+		return "an array"
+	case reflect.Bool:
+		return "a boolean"
+	case reflect.String:
+		return "a string"
+	default:
+		return "an integer"
+	}
+}
+
+// fileBytesInt validates and narrows a file-sourced byte-size value (JSON has no distinct integer
+// widths, so every Limits field decodes as int64) into MaxHeaderBytes's plain int.
+func fileBytesInt(n int64, src string) (int, error) {
+	// Must be checked before the int64->int narrowing, or an oversized value silently wraps.
+	if n > math.MaxInt {
+		return 0, fmt.Errorf("%s: invalid byte size %d, want a positive integer number of bytes", src, n)
+	}
+	return validateBytesInt(int(n), src)
+}
+
+// loadConfigFile reads and decodes the file named by ConfigPathEnv. A missing, unreadable, or
+// malformed file are all treated as the same startup error, naming both ConfigPathEnv and the path given.
+func loadConfigFile(path string, readFile func(string) ([]byte, error)) (fileConfig, error) {
+	data, err := readFile(path)
+	if err != nil {
+		return fileConfig{}, fmt.Errorf("%s: cannot read %q: %w", ConfigPathEnv, path, err)
+	}
+	fc, err := decodeFileConfig(data)
+	if err != nil {
+		return fileConfig{}, fmt.Errorf("%s: %s: %w", ConfigPathEnv, path, err)
+	}
+	return fc, nil
+}
+
+// mergeFileConfig overlays fc onto cfg (which already holds the env/default resolution) and
+// returns the sources map recording, per env-var name, the "<path>:<jsonPath>" label of every
+// setting the file actually supplied. File beats env unconditionally for every setting it names —
+// precedence is file -> env -> default. The one exception is Addr: argv already outranks env
+// today and must go on outranking the file too (argv -> file -> default), hence addrSource being
+// a pointer.
+//
+// Every env override is validated by Load before this function runs, so a malformed env var is
+// still a startup error even for a setting the file goes on to supersede.
+func mergeFileConfig(cfg *Config, fc fileConfig, path string, addrSource *string) (map[string]string, error) {
+	label := func(jsonPath string) string { return path + ":" + jsonPath }
+	sources := make(map[string]string)
+	pg := fc.Printgateway
+
+	if pg.Addr != nil && *addrSource != AddrSourceArgv {
+		// Validated here even though argv's own address never has been: under systemd this is the
+		// only way to set the listen address, so failing fast on a typo beats failing after
+		// "listening on <typo>" has already been logged.
+		if _, _, err := net.SplitHostPort(*pg.Addr); err != nil {
+			return nil, fmt.Errorf("%s: invalid address %q: %w", label("resource/printgateway.addr"), *pg.Addr, err)
+		}
+		cfg.Addr = *pg.Addr
+		*addrSource = AddrSourceFile
+	}
+
+	if pg.LogLevel != nil {
+		// Unlike every other file-sourced string below, "" is an error here, not a suppression: it
+		// is meaningless to logger.SetLogLevel.
+		if *pg.LogLevel == "" {
+			return nil, fmt.Errorf("%s: must not be empty", label("resource/printgateway.logLevel"))
+		}
+		cfg.LogLevel = *pg.LogLevel
+		sources[LogLevelEnv] = label("resource/printgateway.logLevel")
+	}
+
+	durationRows := []struct {
+		env      string
+		jsonPath string
+		raw      *string
+		dst      *time.Duration
+	}{
+		{ReadHeaderTimeoutEnv, "resource/printgateway.timeouts.readHeader", pg.Timeouts.ReadHeader, &cfg.ReadHeaderTimeout},
+		{ReadTimeoutEnv, "resource/printgateway.timeouts.read", pg.Timeouts.Read, &cfg.ReadTimeout},
+		{WriteTimeoutEnv, "resource/printgateway.timeouts.write", pg.Timeouts.Write, &cfg.WriteTimeout},
+		{IdleTimeoutEnv, "resource/printgateway.timeouts.idle", pg.Timeouts.Idle, &cfg.IdleTimeout},
+		{ShutdownGraceEnv, "resource/printgateway.timeouts.shutdownGrace", pg.Timeouts.ShutdownGrace, &cfg.ShutdownGrace},
+		{SubmitTimeoutEnv, "resource/printgateway.timeouts.submit", pg.Timeouts.Submit, &cfg.SubmitTimeout},
+		{FetchTimeoutEnv, "resource/printgateway.fetch.timeout", pg.Fetch.Timeout, &cfg.FetchTimeout},
+		{S3TimeoutEnv, "resource/printgateway.objectStore.timeout", pg.ObjectStore.Timeout, &cfg.S3Timeout},
+		{PresignTTLEnv, "resource/printgateway.objectStore.presignTtl", pg.ObjectStore.PresignTTL, &cfg.PresignTTL},
+	}
+	for _, r := range durationRows {
+		if r.raw == nil {
+			continue
+		}
+		d, err := parseDuration(*r.raw, label(r.jsonPath))
+		if err != nil {
+			return nil, err
+		}
+		*r.dst = d
+		sources[r.env] = label(r.jsonPath)
+	}
+
+	bytes64Rows := []struct {
+		env      string
+		jsonPath string
+		raw      *int64
+		dst      *int64
+	}{
+		{MaxUploadBytesEnv, "resource/printgateway.limits.maxUploadBytes", pg.Limits.MaxUploadBytes, &cfg.MaxUploadBytes},
+		{MaxJSONBytesEnv, "resource/printgateway.limits.maxJsonBytes", pg.Limits.MaxJSONBytes, &cfg.MaxJSONBytes},
+		{FetchMaxBytesEnv, "resource/printgateway.fetch.maxBytes", pg.Fetch.MaxBytes, &cfg.FetchMaxBytes},
+		{S3MaxBytesEnv, "resource/printgateway.objectStore.maxBytes", pg.ObjectStore.MaxBytes, &cfg.S3MaxBytes},
+	}
+	for _, r := range bytes64Rows {
+		if r.raw == nil {
+			continue
+		}
+		n, err := validateBytes64(*r.raw, label(r.jsonPath))
+		if err != nil {
+			return nil, err
+		}
+		*r.dst = n
+		sources[r.env] = label(r.jsonPath)
+	}
+
+	if pg.Limits.MaxHeaderBytes != nil {
+		n, err := fileBytesInt(*pg.Limits.MaxHeaderBytes, label("resource/printgateway.limits.maxHeaderBytes"))
+		if err != nil {
+			return nil, err
+		}
+		cfg.MaxHeaderBytes = n
+		sources[MaxHeaderBytesEnv] = label("resource/printgateway.limits.maxHeaderBytes")
+	}
+
+	if pg.ObjectStore.Insecure != nil {
+		cfg.S3Insecure = *pg.ObjectStore.Insecure
+		sources[S3InsecureEnv] = label("resource/printgateway.objectStore.insecure")
+	}
+
+	stringRows := []struct {
+		env      string
+		jsonPath string
+		raw      *string
+		dst      *string
+	}{
+		{S3BucketEnv, "resource/printgateway.objectStore.bucket", pg.ObjectStore.Bucket, &cfg.S3Bucket},
+		{S3RegionEnv, "resource/printgateway.objectStore.region", pg.ObjectStore.Region, &cfg.S3Region},
+	}
+	for _, r := range stringRows {
+		if r.raw == nil {
+			continue
+		}
+		*r.dst = *r.raw // "" is a meaningful, deliberate value for both
+		sources[r.env] = label(r.jsonPath)
+	}
+
+	// resource/file_storage: the shared S3 connection (endpoint + creds), cross-cutting
+	// infrastructure rather than this service's own setting.
+	if fc.FileStorage.Host != nil {
+		cfg.S3Endpoint = *fc.FileStorage.Host // "" suppresses PRINT_GATEWAY_S3_ENDPOINT
+		sources[S3EndpointEnv] = label("resource/file_storage.host")
+	}
+	if fc.FileStorage.S3User != nil {
+		cfg.S3AccessKey = *fc.FileStorage.S3User
+		sources[S3AccessKeyEnv] = label("resource/file_storage.s3-user")
+	}
+	if fc.FileStorage.S3Password != nil {
+		cfg.S3SecretKey = *fc.FileStorage.S3Password
+		sources[S3SecretKeyEnv] = label("resource/file_storage.s3-password")
+	}
+
+	// resource/log splits into host/port fields where Config.LogServer is a single "host:port"
+	// string, so it's combined here rather than through the generic stringRows table above.
+	// LogServerEnv is suppressed only when BOTH sides resolve empty.
+	if fc.Log.Host != nil || fc.Log.Port != nil {
+		var host, port string
+		if fc.Log.Host != nil {
+			host = *fc.Log.Host
+		}
+		if fc.Log.Port != nil {
+			port = *fc.Log.Port
+		}
+		if host == "" && port == "" {
+			cfg.LogServer = ""
+		} else {
+			cfg.LogServer = host + ":" + port
+		}
+		sources[LogServerEnv] = label("resource/log")
+	}
+
+	if fc.Printgateway.Fetch.AllowedHosts != nil {
+		hosts, err := normalizeHostList(*fc.Printgateway.Fetch.AllowedHosts, label("resource/printgateway.fetch.allowedHosts"))
+		if err != nil {
+			return nil, err
+		}
+		// nil when the file's array is empty: a deliberate "no allowlist" that suppresses FetchAllowedHostsEnv.
+		cfg.FetchAllowedHosts = hosts
+		sources[FetchAllowedHostsEnv] = label("resource/printgateway.fetch.allowedHosts")
+	}
+
+	// allowPrivateTargets deliberately has no row and no field anywhere in fileConfig: putting it
+	// in the file would be a total SSRF bypass, so DisallowUnknownFields turns any attempt into a
+	// startup error instead of a working feature.
+
+	return sources, nil
+}
+
+// Load builds Config from argv (an address override), the environment, and — when ConfigPathEnv
+// names one — a JSON config file that wins over the environment (never over argv's address). It
+// fails on a present-but-malformed override from either source, naming the offending variable or JSON path.
+func Load(args []string, getenv func(string) string, readFile func(string) ([]byte, error)) (Config, error) {
 	addr := DefaultAddr
+	addrSource := AddrSourceDefault
 	if len(args) > 1 {
 		addr = args[1]
+		addrSource = AddrSourceArgv
 	}
 
 	secretStoreURL := getenv(VaultAddrEnv)
@@ -331,10 +606,7 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 		secretStoreURL = v
 	}
 
-	logLevel := getenv(LogLevelEnv)
-	if logLevel == "" {
-		logLevel = DefaultLogLevel
-	}
+	logLevel := overrideString(getenv, LogLevelEnv, DefaultLogLevel)
 
 	fetchAllowedHosts, err := splitHostList(getenv(FetchAllowedHostsEnv))
 	if err != nil {
@@ -379,10 +651,8 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 		LogLevel:  logLevel,
 	}
 
-	// Table rather than one if-block per value: the repeated form made the
-	// env-var/field pairing a copy-paste field, where writing ReadTimeoutEnv
-	// into &cfg.WriteTimeout would compile, vet clean, and be invisible in
-	// review. Here each pairing appears exactly once, on one line.
+	// A table, not one if-block per value, so each env-var/field pairing appears exactly once —
+	// the repeated form let a copy-pasted line target the wrong field silently.
 	for _, d := range []struct {
 		name string
 		dst  *time.Duration
@@ -446,6 +716,23 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 	}
 	cfg.S3MaxBytes = s3MaxBytes
 
+	// Config file layer: read after every env/default value above is resolved, so mergeFileConfig
+	// only has to overlay what the file actually names.
+	cfg.AddrSource = addrSource
+	if path := getenv(ConfigPathEnv); path != "" {
+		fc, err := loadConfigFile(path, readFile)
+		if err != nil {
+			return Config{}, err
+		}
+		sources, err := mergeFileConfig(&cfg, fc, path, &addrSource)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.AddrSource = addrSource
+		cfg.ConfigFilePath = path
+		cfg.sources = sources
+	}
+
 	if err := validate(cfg); err != nil {
 		return Config{}, err
 	}
@@ -453,49 +740,31 @@ func Load(args []string, getenv func(string) string) (Config, error) {
 	return cfg, nil
 }
 
-// validate enforces the relationships *between* values. Each one is
-// individually plausible and only the combination is wrong, which is
-// exactly the class of mistake nothing downstream reports: net/http simply
-// applies whichever deadline expires first, leaving an operator to work out
-// from a reset connection why a request that was clearly inside the read
-// budget died anyway.
+// validate enforces the relationships between values that are each individually plausible and
+// only wrong in combination — a class of mistake net/http never reports, since it just applies
+// whichever deadline expires first.
 func validate(cfg Config) error {
-	// A header deadline that outlives the whole-request deadline can never
-	// be the one that fires, so setting it is a no-op the operator will
-	// believe took effect.
+	// A header deadline that outlives the read deadline can never be the one that fires.
 	if cfg.ReadHeaderTimeout > cfg.ReadTimeout {
 		return fmt.Errorf("%s (%s) must not exceed %s (%s)",
-			ReadHeaderTimeoutEnv, cfg.ReadHeaderTimeout, ReadTimeoutEnv, cfg.ReadTimeout)
+			cfg.Source(ReadHeaderTimeoutEnv), cfg.ReadHeaderTimeout, cfg.Source(ReadTimeoutEnv), cfg.ReadTimeout)
 	}
 
-	// See DefaultWriteTimeout: the write deadline is armed at header-parse
-	// time, so it has to cover the body read, any file_url/s3_key download,
-	// and lp submission, not just the response write. If it does not, a
-	// slow request is accepted, fetched, and printed, and then fails on the
-	// response write — the caller sees failure for a job that succeeded,
-	// and retries it, printing the document twice. A single request only
-	// ever exercises ONE of file_url/s3_key (print_handler.go rejects a
-	// request naming both), so the budget takes their max, not their sum:
-	// summing would charge every deployment for S3Timeout even when
-	// PRINT_GATEWAY_S3_ENDPOINT is unset (S3Timeout still has a default),
-	// which could turn a WriteTimeout/ShutdownGrace pinned before object
-	// storage existed into a startup failure on upgrade alone — the
-	// opposite of "S3 is additive and never fatal".
+	// The write deadline is armed at header-parse time, so it must cover the body read, any
+	// file_url/s3_key download, and lp submission, not just the response write, or a slow request
+	// gets printed and then fails on the write, causing a retry and a duplicate print. max, not
+	// sum, of FetchTimeout/S3Timeout: a single request only ever exercises one of them.
 	fetchOrS3 := max(cfg.FetchTimeout, cfg.S3Timeout)
 	if writeBudget := cfg.ReadTimeout + fetchOrS3 + cfg.SubmitTimeout; cfg.WriteTimeout <= writeBudget {
 		return fmt.Errorf("%s (%s) must exceed %s+max(%s,%s)+%s (%s): the write deadline is armed when request headers are parsed, so it must cover reading the body, downloading file_url/s3_key, and running lp, as well as sending the response",
-			WriteTimeoutEnv, cfg.WriteTimeout, ReadTimeoutEnv, FetchTimeoutEnv, S3TimeoutEnv, SubmitTimeoutEnv, writeBudget)
+			cfg.Source(WriteTimeoutEnv), cfg.WriteTimeout, cfg.Source(ReadTimeoutEnv), cfg.Source(FetchTimeoutEnv), cfg.Source(S3TimeoutEnv), cfg.Source(SubmitTimeoutEnv), writeBudget)
 	}
 
-	// Deferred since DefaultSubmitTimeout was added: FetchTimeout is now
-	// wired to real cancellation (printgw.Service.fetch), so a request that
-	// blocks for the full fetch-then-submit budget must still fit inside
-	// the shutdown grace period, or a SIGTERM during that request truncates
-	// the print it exists to let finish. Same max-not-sum reasoning as
-	// writeBudget above applies now that s3_key downloads are real too.
+	// A request already using the full fetch/s3+submit budget must still fit inside the shutdown
+	// grace period, or a SIGTERM during that request truncates the print it exists to let finish.
 	if budget := fetchOrS3 + cfg.SubmitTimeout; cfg.ShutdownGrace <= budget {
 		return fmt.Errorf("%s (%s) must exceed max(%s,%s)+%s (%s): a request already using the full fetch/s3+submit budget must still fit inside the shutdown grace period",
-			ShutdownGraceEnv, cfg.ShutdownGrace, FetchTimeoutEnv, S3TimeoutEnv, SubmitTimeoutEnv, budget)
+			cfg.Source(ShutdownGraceEnv), cfg.ShutdownGrace, cfg.Source(FetchTimeoutEnv), cfg.Source(S3TimeoutEnv), cfg.Source(SubmitTimeoutEnv), budget)
 	}
 
 	return nil
@@ -506,18 +775,20 @@ func overrideDuration(getenv func(string) string, name string, def time.Duration
 	if raw == "" {
 		return def, nil
 	}
+	return parseDuration(raw, name)
+}
+
+// parseDuration is overrideDuration's parse-and-validate half, split out so a config file can
+// share the same validation and error wording. src labels the error.
+func parseDuration(raw, src string) (time.Duration, error) {
 	d, err := time.ParseDuration(raw)
 	if err != nil {
-		return 0, fmt.Errorf("%s: invalid duration %q: %w", name, raw, err)
+		return 0, fmt.Errorf("%s: invalid duration %q: %w", src, raw, err)
 	}
-	// A non-positive duration is not a tuning choice. net/http guards every
-	// timeout with `if d > 0`, so "0" or "-5s" — a plausible typo — does not
-	// mean "very short", it means *no timeout at all*, silently restoring the
-	// exact exposure these values exist to close. Reject it the same way a
-	// non-positive byte size is rejected, rather than inheriting net/http's
-	// semantics as an undocumented escape hatch.
+	// net/http guards every timeout with `if d > 0`, so "0" or a negative value means *no timeout
+	// at all*, not "very short" — reject it rather than silently reopening that exposure.
 	if d <= 0 {
-		return 0, fmt.Errorf("%s: %q must be positive; net/http reads a non-positive timeout as no timeout at all", name, raw)
+		return 0, fmt.Errorf("%s: %q must be positive; net/http reads a non-positive timeout as no timeout at all", src, raw)
 	}
 	return d, nil
 }
@@ -534,8 +805,16 @@ func overrideBytes(getenv func(string) string, name string, def int) (int, error
 	return n, nil
 }
 
-// overrideBytes64 is overrideBytes for a field too large for a plain int on
-// a 32-bit build (FetchMaxBytes) — same validation, same error shape.
+// validateBytesInt is the positivity check overrideBytes applies to its parsed value, exposed
+// standalone for a source (e.g. the config file) with no raw string to re-run through strconv.
+func validateBytesInt(n int, src string) (int, error) {
+	if n <= 0 {
+		return 0, fmt.Errorf("%s: invalid byte size %d, want a positive integer number of bytes", src, n)
+	}
+	return n, nil
+}
+
+// overrideBytes64 is overrideBytes for a field too large for a plain int on a 32-bit build.
 func overrideBytes64(getenv func(string) string, name string, def int64) (int64, error) {
 	raw := getenv(name)
 	if raw == "" {
@@ -544,6 +823,14 @@ func overrideBytes64(getenv func(string) string, name string, def int64) (int64,
 	n, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil || n <= 0 {
 		return 0, fmt.Errorf("%s: invalid byte size %q, want a positive integer number of bytes", name, raw)
+	}
+	return n, nil
+}
+
+// validateBytes64 is validateBytesInt for an already-parsed int64.
+func validateBytes64(n int64, src string) (int64, error) {
+	if n <= 0 {
+		return 0, fmt.Errorf("%s: invalid byte size %d, want a positive integer number of bytes", src, n)
 	}
 	return n, nil
 }
@@ -560,32 +847,39 @@ func overrideBool(getenv func(string) string, name string, def bool) (bool, erro
 	return b, nil
 }
 
-// splitHostList parses the comma-separated FetchAllowedHostsEnv value.
-// Empty entries (from "a,,b" or leading/trailing commas) are dropped rather
-// than rejected — a stray comma should not be a startup failure for a
-// setting whose empty value ("no allowlist") is itself a valid, meaningful
-// choice. A malformed entry, though, fails startup by the same rule every
-// other override in this file follows: fetch.hostAllowed matches on a label
-// boundary (host == suffix, or host ends in "."+suffix), so a
-// scheme/port/userinfo/path fragment left in an entry can never satisfy
-// either arm, and a leading "." turns the second arm into a search for
-// "..example.com", which no hostname contains. It is specifically the
-// label-boundary rule that makes the leading-dot case a problem — under
-// plain suffix matching ".example.com" would match "a.example.com" quite
-// happily. Left unrejected, every file_url fetch would then 403 with no
-// hint why.
+// overrideString reads name from the environment, falling back to def when unset. Only correct
+// where "" is not itself a meaningful configured value — S3Endpoint and S3Region are exceptions
+// and keep bespoke handling instead of routing through this helper.
+func overrideString(getenv func(string) string, name, def string) string {
+	if v := getenv(name); v != "" {
+		return v
+	}
+	return def
+}
+
+// splitHostList parses the comma-separated FetchAllowedHostsEnv value. Empty entries (from "a,,b"
+// or leading/trailing commas) are dropped rather than rejected.
 func splitHostList(raw string) ([]string, error) {
 	if raw == "" {
 		return nil, nil
 	}
+	return normalizeHostList(strings.Split(raw, ","), FetchAllowedHostsEnv)
+}
+
+// normalizeHostList is splitHostList's validate-only half: given already-split entries, it
+// rejects anything that is not a bare hostname. fetch.hostAllowed matches on a label boundary
+// (host == suffix, or host ends in "."+suffix), so a scheme/port/userinfo/path fragment, or a
+// leading/trailing dot, could never match there and must be rejected here instead of silently
+// producing a 403 with no explanation.
+func normalizeHostList(entries []string, src string) ([]string, error) {
 	var hosts []string
-	for _, h := range strings.Split(raw, ",") {
+	for _, h := range entries {
 		h = strings.ToLower(strings.TrimSpace(h))
 		if h == "" {
 			continue
 		}
 		if strings.ContainsAny(h, "/:@") || strings.HasPrefix(h, ".") || strings.HasSuffix(h, ".") {
-			return nil, fmt.Errorf("%s: invalid host entry %q, want a bare hostname (e.g. \"s3.example.com\"), not a URL", FetchAllowedHostsEnv, h)
+			return nil, fmt.Errorf("%s: invalid host entry %q, want a bare hostname (e.g. \"s3.example.com\"), not a URL", src, h)
 		}
 		hosts = append(hosts, h)
 	}

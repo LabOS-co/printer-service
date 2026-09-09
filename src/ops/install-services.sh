@@ -1,21 +1,7 @@
 #!/bin/bash
-# G1: installs the two long-running services this project depends on
-# (printgateway, ippfix) as version-controlled systemd units, so they
-# survive a WSL distro reinstall the way CLAUDE.md's own lesson says any
-# long-running WSL process must (`wsl.exe ... bash -c "... &"` does not
-# keep a background process alive past the invoking command returning, and
-# socket/path-activated units have separately caused real outages here -
-# see CLAUDE.md's "Environment gotchas").
-#
-# Run as root inside the target WSL distro: wsl -d Ubuntu -u root
-# (CLAUDE.md's own memory notes the distro is actually named "Ubuntu", not
-# "Ubuntu-24.04" as the original setup scripts assumed).
-#
-# This script installs units and binaries; it does NOT build the binaries
-# (see CLAUDE.md's "Build and run" section) or generate ippfix's required
-# printer-template.json (see CLAUDE.md's ippfix section) - both are
-# per-deployment steps with their own explicit commands, not safe to run
-# unattended from here.
+# Installs printgateway and ippfix as version-controlled systemd units. Does not build the
+# binaries or generate ippfix's printer-template.json - those are separate, per-deployment steps.
+# Run as root inside the target WSL distro (distro name is "Ubuntu", not "Ubuntu-24.04").
 set -euo pipefail
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -23,8 +9,6 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-# BASE is this script's own directory (src/ops) - see setup-emulators.sh's
-# comment for why that beats a hardcoded absolute path.
 BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOY="$BASE/../printgateway"
 IPPFIX="$BASE/../ippfix"
@@ -51,6 +35,29 @@ install_printgateway() {
   if [ ! -f /etc/printgateway/printgateway.env ]; then
     install -m 600 -o root -g root "$DEPLOY/printgateway.env.example" /etc/printgateway/printgateway.env
     echo "wrote a blank /etc/printgateway/printgateway.env - fill in PRINT_GATEWAY_TOKEN (or Vault vars) before starting the service"
+  fi
+
+  # Config file is optional; PRINT_GATEWAY_CONFIG is left commented out in printgateway.env so
+  # installing the file is never the same as activating it.
+  #
+  # Owned by printgateway:600, not root:600 like printgateway.env above - this file is read
+  # directly by the running Go process (as User=printgateway), so root-owned would be unreadable
+  # to it; treat it like printgateway.env once it carries real credentials (never commit filled-in).
+  #
+  # Prefers the gitignored .local.json (real per-deployment secrets) over the tracked
+  # secret-free .json example; never overwrites an already-installed file, so re-running this
+  # installer can't clobber a live deployment's real credentials with the repo's example.
+  local configfile="$BASE/../../printservice.config.local.json"
+  if [ ! -f "$configfile" ]; then
+    configfile="$BASE/../../printservice.config.json"
+  fi
+  if [ -f /etc/printgateway/printservice.config.json ]; then
+    echo "note: /etc/printgateway/printservice.config.json already exists - left in place (never overwritten by this script; remove it manually first if you want the source file reinstalled)"
+  elif [ -f "$configfile" ]; then
+    install -m 600 -o printgateway -g printgateway "$configfile" /etc/printgateway/printservice.config.json
+    echo "installed /etc/printgateway/printservice.config.json from $(basename "$configfile") (mode 600, owned by printgateway) - set PRINT_GATEWAY_CONFIG=/etc/printgateway/printservice.config.json in printgateway.env to activate it"
+  else
+    echo "note: no printservice.config.json or printservice.config.local.json at the repo root - the service runs on env vars/defaults only (see README's \"Configuration file\" section)"
   fi
 
   install -m 644 "$DEPLOY/printgateway.service" /etc/systemd/system/printgateway.service

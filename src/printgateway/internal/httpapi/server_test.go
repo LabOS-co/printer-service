@@ -14,11 +14,8 @@ import (
 	"printgateway/internal/printgw"
 )
 
-// fullConfig builds a Config the way main.go's real startup path does
-// (config.Load with every default applied), rather than the zero-value-heavy
-// literal newTestAPI uses elsewhere in this package — this test exists
-// specifically to catch a regression to the http.Server zero value (P0-6),
-// so it must exercise the same defaults production actually ships with.
+// fullConfig builds a Config via config.Load with every production default
+// applied, rather than the zero-value-heavy literal newTestAPI uses elsewhere.
 func fullConfig(t *testing.T) config.Config {
 	t.Helper()
 	cfg, err := config.Load([]string{"printgateway"}, func(key string) string {
@@ -26,6 +23,9 @@ func fullConfig(t *testing.T) config.Config {
 			return "test-token"
 		}
 		return ""
+	}, func(path string) ([]byte, error) {
+		t.Fatalf("readFile unexpectedly called with %q", path)
+		return nil, nil
 	})
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
@@ -33,11 +33,8 @@ func fullConfig(t *testing.T) config.Config {
 	return cfg
 }
 
-// TestNewServerSetsEveryTimeoutField is the regression guard named in the
-// plan's own test table: a future refactor that stops threading one of
-// these through from config (reintroducing a slice of the http.Server zero
-// value P0-6 eliminated) fails this immediately instead of only showing up
-// as a slowloris report.
+// TestNewServerSetsEveryTimeoutField guards against a future refactor
+// silently reintroducing an http.Server zero-value timeout.
 func TestNewServerSetsEveryTimeoutField(t *testing.T) {
 	t.Parallel()
 
@@ -46,10 +43,6 @@ func TestNewServerSetsEveryTimeoutField(t *testing.T) {
 	a := New(cfg, &capturingLogger{}, svc, nil)
 	srv := NewServer(a)
 
-	// Compared against cfg's own fields, not just "not the zero value": an
-	// Opus review of this stage found isZero alone would miss a field swap
-	// (e.g. ReadTimeout: a.cfg.IdleTimeout) or a hardcoded literal, since
-	// config.Load's defaults are all distinct, non-zero durations/ints.
 	checks := []struct {
 		name string
 		got  any
@@ -63,7 +56,7 @@ func TestNewServerSetsEveryTimeoutField(t *testing.T) {
 	}
 	for _, c := range checks {
 		if isZero(c.got) {
-			t.Errorf("%s is the zero value; every field here must come from config (P0-6)", c.name)
+			t.Errorf("%s is the zero value; every field here must come from config", c.name)
 		}
 		if c.got != c.want {
 			t.Errorf("%s = %v, want cfg's own %v (a field swap or hardcoded literal)", c.name, c.got, c.want)
@@ -81,10 +74,8 @@ func isZero(v any) bool {
 	return reflect.ValueOf(v).IsZero()
 }
 
-// TestErrorLogWriterForwardsToTheLogger pins that net/http's own error lines
-// (a tripped ReadHeaderTimeout, an internal panic recovered by the stdlib
-// server itself) join the same labOS log stream instead of falling through
-// to net/http's default os.Stderr logger.
+// TestErrorLogWriterForwardsToTheLogger asserts net/http's own error lines
+// reach the labOS log stream instead of the default os.Stderr logger.
 func TestErrorLogWriterForwardsToTheLogger(t *testing.T) {
 	t.Parallel()
 
@@ -112,8 +103,8 @@ func TestErrorLogWriterForwardsToTheLogger(t *testing.T) {
 }
 
 // TestGracefulShutdownLetsAnInFlightRequestFinish drives a real net/http
-// server (not httptest.NewServer, which has no exported Shutdown hook) so
-// Shutdown is exercised against the exact *http.Server NewServer builds.
+// server (httptest.NewServer has no exported Shutdown hook) against the
+// exact *http.Server NewServer builds.
 func TestGracefulShutdownLetsAnInFlightRequestFinish(t *testing.T) {
 	t.Parallel()
 
@@ -164,19 +155,14 @@ func TestGracefulShutdownLetsAnInFlightRequestFinish(t *testing.T) {
 		shutdownDone <- srv.Shutdown(ctx)
 	}()
 
-	// Poll for Shutdown's real, observable effect - it closes the tracked
-	// listener immediately on entry, so a new dial to the same address
-	// starts failing right away - rather than sleeping a fixed guess. An
-	// Opus review of this stage found the previous fixed 50ms sleep would
-	// pass identically whether Shutdown had actually started or not (this
-	// test's pass/fail never depended on it), silently degrading to "an
-	// in-flight request completes" instead of "...completes *across*
-	// Shutdown" under any load that pushed Shutdown's start past 50ms.
+	// Poll until a new dial fails, rather than sleeping a fixed guess:
+	// Shutdown closes the listener immediately on entry, so a failed dial is
+	// proof it has actually begun.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		conn, dialErr := net.DialTimeout("tcp", ln.Addr().String(), 100*time.Millisecond)
 		if dialErr != nil {
-			break // the listener is closed - Shutdown has genuinely begun
+			break
 		}
 		conn.Close()
 		if time.Now().After(deadline) {

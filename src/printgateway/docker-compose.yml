@@ -1,0 +1,47 @@
+# Local/dev convenience: `docker compose up` builds and runs printgateway
+# with the config file already bind-mounted and PRINT_GATEWAY_CONFIG already
+# set, instead of remembering the -v/-e flags from the Dockerfile's own
+# comment every time. Prerequisite: `go mod vendor` must have been run in
+# this directory first (see Dockerfile's header comment) — the build stage
+# needs vendor/ present.
+#
+# network_mode: host, no CUPS_HOST override: this targets Docker Engine
+# running natively INSIDE the same WSL2 distro as CUPS (verified live:
+# `docker info` there reports OperatingSystem "Ubuntu 24.04.1 LTS", not
+# Docker Desktop's own separate "docker-desktop" distro) — so the container
+# shares that distro's network namespace, and the entrypoint's default
+# CUPS_HOST=localhost already reaches the real cupsd with zero extra
+# config. This does NOT apply to Docker Desktop (Windows/Mac): there the
+# engine runs inside its own dedicated "docker-desktop" distro, host
+# networking would land in the wrong namespace, and CUPS_HOST=
+# host.docker.internal + a bridge network + published port are needed
+# instead (see git history for that variant).
+#
+# No `ports:`/`command:` override needed either: host networking means
+# printgateway's own default bind address (127.0.0.1:8090) already listens
+# directly in the WSL distro's network namespace, reachable both from
+# inside that distro and from Windows via WSL2's localhost forwarding —
+# and keeping it loopback-only matches the "closed to everything but the
+# calling system" model described in README's "Listen address" section.
+#
+# printservice.config.local.json (repo root, git-ignored — see .gitignore
+# and README's "Two files, two purposes") is the file actually bind-mounted
+# here, NOT the tracked printservice.config.json: this is where a real S3
+# credential belongs. If that file doesn't exist yet, `docker compose up`
+# fails fast naming the missing source path rather than silently starting
+# without it.
+services:
+  printgateway:
+    build:
+      context: .
+    image: printgateway:latest
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      # Required: no default. Set it in a sibling .env file (see
+      # .env.example) or export it in the shell running `docker compose up`.
+      PRINT_GATEWAY_TOKEN: ${PRINT_GATEWAY_TOKEN:?PRINT_GATEWAY_TOKEN must be set (see .env.example)}
+      PRINT_GATEWAY_CONFIG: /etc/printgateway/printservice.config.json
+      LOG_SERVER: 192.168.254.83:514
+    volumes:
+      - ../../printservice.config.local.json:/etc/printgateway/printservice.config.json:ro

@@ -1,0 +1,29 @@
+{
+  "resource/printgateway": {
+    "addr": "127.0.0.1:8090",
+    "logLevel": "info",
+    "timeouts": {
+      "readHeader": "10s",
+      "read": "5m",
+      "write": "8m",
+      "idle": "60s",
+      "shutdownGrace": "2m",
+      "submit": "30s"
+    },
+    "limits": {
+      "maxHeaderBytes": 65536,
+      "maxUploadBytes": 67108864,
+      "maxJsonBytes": 8192
+    },
+    "fetch": {
+      "timeout": "60s",
+      "maxBytes": 67108864
+    },
+    "objectStore": {
+      "insecure": false,
+      "timeout": "60s",
+      "maxBytes": 67108864,
+      "presignTtl": "15m"
+    }
+  }
+}

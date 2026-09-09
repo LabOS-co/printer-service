@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,47 +14,77 @@ import (
 	"printgateway/internal/config"
 )
 
-// envMap builds a getenv func from a plain map, defaulting to "" for any
-// key not present — the shape every test below needs, since config.Load and
-// the secrets resolvers each read a handful of named variables.
+// envMap builds a getenv func from a plain map, defaulting to "" for any key not present.
 func envMap(vars map[string]string) func(string) string {
 	return func(key string) string {
 		return vars[key]
 	}
 }
 
-// recordingLogger captures every logs.Logger call this file's tests need to
-// assert on — not just LogError/LogInfo. An Opus review of this stage found
-// the first draft only overrode those two, so a test asserting "nothing was
-// logged" could pass while a LogDebug/LogAPIError/LogAPICompletion call went
-// unnoticed. No mutex: every test constructs its own instance, and nothing
-// under test here spawns a goroutine (objstore.New, config.Load, and the
-// secrets resolvers are all synchronous), unlike httpapi's capturingLogger,
-// which is shared across a concurrency test.
+// recordingLogger captures every logs.Logger call, not just LogError/LogInfo, so a test asserting
+// "nothing was logged" can't pass while an unmocked method went unnoticed. Mutex-guarded: run()'s
+// listener goroutine logs concurrently with the test goroutine reading .infos/.errors in several
+// tests below.
 type recordingLogger struct {
 	logs.LoggerMock
+	mu     sync.Mutex
 	errors []string
 	infos  []string
 	other  int // LogDebug/LogAPIError/LogAPICompletion/LogDBQuery call count
 }
 
 func (r *recordingLogger) LogError(msg string, _ *logs.LogMetaData) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.errors = append(r.errors, msg)
 	return nil
 }
 
 func (r *recordingLogger) LogInfo(msg string, _ *logs.LogMetaData) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.infos = append(r.infos, msg)
 	return nil
 }
 
-func (r *recordingLogger) LogDebug(string, *logs.LogMetaData) error    { r.other++; return nil }
-func (r *recordingLogger) LogAPIError(string, *logs.LogMetaData) error { r.other++; return nil }
-func (r *recordingLogger) LogAPICompletion(*logs.LogMetaData) error    { r.other++; return nil }
-func (r *recordingLogger) LogDBQuery(string, *logs.LogMetaData) error  { r.other++; return nil }
+func (r *recordingLogger) LogDebug(string, *logs.LogMetaData) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.other++
+	return nil
+}
+func (r *recordingLogger) LogAPIError(string, *logs.LogMetaData) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.other++
+	return nil
+}
+func (r *recordingLogger) LogAPICompletion(*logs.LogMetaData) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.other++
+	return nil
+}
+func (r *recordingLogger) LogDBQuery(string, *logs.LogMetaData) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.other++
+	return nil
+}
 
 func (r *recordingLogger) totalCalls() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	return len(r.errors) + len(r.infos) + r.other
+}
+
+// noReadFile fails the test if called; every test using it asserts env-only behavior.
+func noReadFile(t *testing.T) func(string) ([]byte, error) {
+	t.Helper()
+	return func(path string) ([]byte, error) {
+		t.Fatalf("readFile unexpectedly called with %q", path)
+		return nil, nil
+	}
 }
 
 func TestRunReturnsErrorOnInvalidConfig(t *testing.T) {
@@ -61,13 +93,10 @@ func TestRunReturnsErrorOnInvalidConfig(t *testing.T) {
 	err := run(context.Background(), func() {}, []string{"printgateway"}, envMap(map[string]string{
 		config.AuthTokenEnv:   "t",
 		config.ReadTimeoutEnv: "not-a-duration",
-	}), &recordingLogger{})
+	}), noReadFile(t), &recordingLogger{})
 	if err == nil {
 		t.Fatal("expected an error for a malformed PRINT_GATEWAY_READ_TIMEOUT, got nil")
 	}
-	// Not just "some error" - an Opus review found this test passed even
-	// when mutated to always fail regardless of which config check tripped,
-	// since it never inspected the error's content.
 	if !strings.Contains(err.Error(), config.ReadTimeoutEnv) {
 		t.Errorf("error = %q, want it to name %s", err.Error(), config.ReadTimeoutEnv)
 	}
@@ -76,18 +105,17 @@ func TestRunReturnsErrorOnInvalidConfig(t *testing.T) {
 func TestRunReturnsErrorWhenNoPrintTokenIsResolvable(t *testing.T) {
 	t.Parallel()
 
-	err := run(context.Background(), func() {}, []string{"printgateway"}, envMap(nil), &recordingLogger{})
+	err := run(context.Background(), func() {}, []string{"printgateway"}, envMap(nil), noReadFile(t), &recordingLogger{})
 	if err == nil {
-		t.Fatal("expected an error when neither Vault nor PRINT_GATEWAY_TOKEN produce a token (F2)")
+		t.Fatal("expected an error when neither Vault nor PRINT_GATEWAY_TOKEN produce a token")
 	}
 	if !strings.Contains(err.Error(), "print token unavailable") {
 		t.Errorf("error = %q, want it to name the print-token failure", err.Error())
 	}
 }
 
-// waitForDial polls addr until a connection succeeds (or the deadline
-// passes), for proving a server has actually started accepting connections
-// without a fixed, guessable sleep.
+// waitForDial polls addr until a connection succeeds, proving a server has started accepting
+// connections without a fixed, guessable sleep.
 func waitForDial(t *testing.T, addr string, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -104,10 +132,8 @@ func waitForDial(t *testing.T, addr string, timeout time.Duration) {
 	}
 }
 
-// freeAddr binds a listener just to learn an unused port, then releases it -
-// the standard "get a free port" trick. A small race remains (another
-// process could grab it before run's own ListenAndServe does), accepted as
-// the same tradeoff every other test in this package already makes.
+// freeAddr binds a listener just to learn an unused port, then releases it. A small race remains
+// (another process could grab it first), accepted the same way every other test here does.
 func freeAddr(t *testing.T) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -119,25 +145,18 @@ func freeAddr(t *testing.T) string {
 	return addr
 }
 
-// TestRunGracefulShutdownReturnsNil drives the shutdown path via a
-// cancellable context rather than a real OS signal (see run's own doc
-// comment for why a test must not register a live SIGINT/SIGTERM handler),
-// and proves three things an Opus review found the first draft's version
-// didn't actually check: the server was really accepting connections before
-// shutdown, stopSignals ran while it still was (not after Shutdown had
-// already torn it down), and the server has genuinely stopped accepting
-// afterward - not just that run() happened to return nil.
+// TestRunGracefulShutdownReturnsNil drives the shutdown path via a cancellable context rather than
+// a real OS signal, and proves the server was accepting connections before shutdown, stopSignals
+// ran while it still was, and the server has genuinely stopped accepting afterward.
 func TestRunGracefulShutdownReturnsNil(t *testing.T) {
 	t.Parallel()
 
 	addr := freeAddr(t)
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// stopSignals dials addr itself: if this succeeds, the listener was
-	// still open at the moment stopSignals ran, proving it fires before
-	// Shutdown closes the listener - exactly the ordering run's doc comment
-	// says matters. A mutant moving the stopSignals() call to after
-	// server.Shutdown(shutdownCtx) makes this dial fail instead.
+	// stopSignals dials addr itself: success proves the listener was still open when it ran,
+	// i.e. before Shutdown closed it. A mutant moving stopSignals() after server.Shutdown makes
+	// this dial fail instead.
 	var stopSignalsDialOK bool
 	stopSignals := func() {
 		conn, err := net.DialTimeout("tcp", addr, time.Second)
@@ -152,7 +171,7 @@ func TestRunGracefulShutdownReturnsNil(t *testing.T) {
 	go func() {
 		runErr <- run(ctx, stopSignals, []string{"printgateway", addr}, envMap(map[string]string{
 			config.AuthTokenEnv: "test-token",
-		}), logger)
+		}), noReadFile(t), logger)
 	}()
 
 	waitForDial(t, addr, 5*time.Second)
@@ -171,16 +190,14 @@ func TestRunGracefulShutdownReturnsNil(t *testing.T) {
 		t.Error("stopSignals ran after the listener had already closed; it must run before Shutdown (a second signal should still be able to force-kill)")
 	}
 
-	// The listener must actually be gone now, not merely "run() returned".
 	if conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond); err == nil {
 		conn.Close()
 		t.Error("still accepting connections after run() returned nil")
 	}
 }
 
-// TestRunReturnsErrorOnListenFailure occupies a real port first so
-// ListenAndServe fails immediately and deterministically, instead of
-// relying on a sleep-and-hope race to catch a startup error.
+// TestRunReturnsErrorOnListenFailure occupies a real port first so ListenAndServe fails
+// immediately and deterministically.
 func TestRunReturnsErrorOnListenFailure(t *testing.T) {
 	t.Parallel()
 
@@ -193,23 +210,17 @@ func TestRunReturnsErrorOnListenFailure(t *testing.T) {
 
 	err = run(context.Background(), func() {}, []string{"printgateway", occupied}, envMap(map[string]string{
 		config.AuthTokenEnv: "test-token",
-	}), &recordingLogger{})
+	}), noReadFile(t), &recordingLogger{})
 	if err == nil {
 		t.Fatalf("expected an error binding an already-occupied address %s, got nil", occupied)
 	}
-	// Not just "some error" - an Opus review found this test passed even
-	// when mutated so every run() call fails for an unrelated reason.
 	if !strings.Contains(err.Error(), occupied) {
 		t.Errorf("error = %q, want it to name the occupied address %s", err.Error(), occupied)
 	}
 }
 
-// TestRunCoversS3AndPrivateTargetsWarningPaths exercises two run()-level
-// lines that newObjectStore's own direct tests below can't reach on their
-// own: the presigner/objectGetter assignment from a non-nil store
-// (main.go, guarded against the typed-nil-in-interface trap - see that
-// comment) and the loud AllowPrivateTargets warning, both only reachable by
-// calling run() itself, not newObjectStore in isolation.
+// TestRunCoversS3AndPrivateTargetsWarningPaths exercises two lines only reachable through run()
+// itself: the presigner/objectGetter assignment from a non-nil store, and the AllowPrivateTargets warning.
 func TestRunCoversS3AndPrivateTargetsWarningPaths(t *testing.T) {
 	t.Parallel()
 
@@ -227,7 +238,7 @@ func TestRunCoversS3AndPrivateTargetsWarningPaths(t *testing.T) {
 			config.S3SecretKeyEnv:         "secret-key",
 			config.S3RegionEnv:            "us-east-1",
 			config.AllowPrivateTargetsEnv: "true",
-		}), logger)
+		}), noReadFile(t), logger)
 	}()
 
 	waitForDial(t, addr, 5*time.Second)
@@ -266,7 +277,7 @@ func TestNewObjectStoreUnconfiguredIsSilentlyNil(t *testing.T) {
 	t.Parallel()
 
 	logger := &recordingLogger{}
-	cfg, err := config.Load([]string{"printgateway"}, envMap(map[string]string{config.AuthTokenEnv: "t"}))
+	cfg, err := config.Load([]string{"printgateway"}, envMap(map[string]string{config.AuthTokenEnv: "t"}), noReadFile(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +299,7 @@ func TestNewObjectStoreHalfConfiguredIsNilAndLogged(t *testing.T) {
 		config.AuthTokenEnv:  "t",
 		config.S3EndpointEnv: "http://localhost:9000",
 		// S3BucketEnv deliberately left unset.
-	}))
+	}), noReadFile(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -311,7 +322,7 @@ func TestNewObjectStoreMissingCredentialsIsNilAndLogged(t *testing.T) {
 		config.S3EndpointEnv: "http://localhost:9000",
 		config.S3BucketEnv:   "docs",
 		// No Vault, no S3AccessKeyEnv/S3SecretKeyEnv.
-	}))
+	}), noReadFile(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,14 +347,12 @@ func TestNewObjectStoreFullyConfiguredSucceeds(t *testing.T) {
 		config.S3AccessKeyEnv: "access-key",
 		config.S3SecretKeyEnv: "secret-key",
 		config.S3RegionEnv:    "us-east-1",
-	}))
+	}), noReadFile(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// cloud_storage.NewS3 builds a minio.Client lazily — no network I/O at
-	// construction, so this succeeds without a live MinIO endpoint (the same
-	// property objstore's own stage-4 tests already rely on).
+	// cloud_storage.NewS3 builds a minio.Client lazily, so this succeeds without a live MinIO endpoint.
 	store := newObjectStore(cfg, logger, &logs.LogMetaData{})
 	if store == nil {
 		t.Fatalf("expected a non-nil store for a fully-configured S3 setup; errors=%v", logger.errors)
@@ -357,9 +366,6 @@ func TestNewObjectStoreFullyConfiguredSucceeds(t *testing.T) {
 	if !found {
 		t.Errorf("expected a LogInfo announcing object storage is enabled, got %v", logger.infos)
 	}
-	// A fully-valid config must not ALSO emit the empty-region warning - an
-	// Opus review found mutating the `cfg.S3Region == ""` guard to always-true
-	// survived undetected, since nothing here checked for its absence.
 	if len(logger.errors) != 0 {
 		t.Errorf("expected no LogError calls for a fully-configured S3 setup, got %v", logger.errors)
 	}
@@ -376,7 +382,7 @@ func TestNewObjectStoreEmptyRegionWarnsButStillSucceeds(t *testing.T) {
 		config.S3AccessKeyEnv: "access-key",
 		config.S3SecretKeyEnv: "secret-key",
 		// S3RegionEnv deliberately left unset.
-	}))
+	}), noReadFile(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -393,5 +399,177 @@ func TestNewObjectStoreEmptyRegionWarnsButStillSucceeds(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected a LogError warning about the empty region, got %v", logger.errors)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Config-file layer (Stage 3)
+// ---------------------------------------------------------------------------
+
+// mapReadFile is a readFile stand-in backed by a map of path -> raw content.
+func mapReadFile(m map[string]string) func(string) ([]byte, error) {
+	return func(path string) ([]byte, error) {
+		if raw, ok := m[path]; ok {
+			return []byte(raw), nil
+		}
+		return nil, fmt.Errorf("no such file: %q", path)
+	}
+}
+
+func TestRunReturnsErrorOnMissingConfigFile(t *testing.T) {
+	t.Parallel()
+
+	const missing = "/etc/printgateway/does-not-exist.json"
+	err := run(context.Background(), func() {}, []string{"printgateway"}, envMap(map[string]string{
+		config.AuthTokenEnv:  "t",
+		config.ConfigPathEnv: missing,
+	}), mapReadFile(nil), &recordingLogger{})
+
+	if err == nil {
+		t.Fatal("expected an error for a named-but-missing config file, got nil")
+	}
+	if !strings.Contains(err.Error(), config.ConfigPathEnv) || !strings.Contains(err.Error(), missing) {
+		t.Errorf("error = %q, want it to name both %s and %s", err.Error(), config.ConfigPathEnv, missing)
+	}
+}
+
+// TestRunStartsFromAConfigFile proves the config file reaches the live listener, not just the
+// returned Config, by supplying the address via service.addr (the only way to set Addr under systemd).
+func TestRunStartsFromAConfigFile(t *testing.T) {
+	t.Parallel()
+
+	addr := freeAddr(t)
+	const configPath = "/etc/printgateway/run-addr-test.json"
+	fileBody := fmt.Sprintf(`{"resource/printgateway": {"addr": %q}}`, addr)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	logger := &recordingLogger{}
+
+	runErr := make(chan error, 1)
+	go func() {
+		// No positional address in args: service.addr is the only thing naming a listen address here.
+		runErr <- run(ctx, func() {}, []string{"printgateway"}, envMap(map[string]string{
+			config.AuthTokenEnv:  "test-token",
+			config.ConfigPathEnv: configPath,
+		}), mapReadFile(map[string]string{configPath: fileBody}), logger)
+	}()
+
+	waitForDial(t, addr, 5*time.Second)
+	cancel()
+
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("run returned an error: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("run did not return after ctx was cancelled")
+	}
+}
+
+// TestRunLogsFileSourcedSettingsWithTheirFileOrigin asserts the LogInfo/LogError lines name the
+// file path and key for a file-sourced setting, while a setting NOT sourced from the file in the
+// same run still logs its bare env-var name.
+func TestRunLogsFileSourcedSettingsWithTheirFileOrigin(t *testing.T) {
+	t.Parallel()
+
+	addr := freeAddr(t)
+	const configPath = "/etc/printgateway/run-source-test.json"
+	// timeouts.write=9m still comfortably clears validate's write budget at the other defaults, so
+	// this is purely about provenance, not about tripping validate.
+	fileBody := `{"resource/printgateway": {"timeouts": {"write": "9m"}}}`
+
+	ctx, cancel := context.WithCancel(context.Background())
+	logger := &recordingLogger{}
+
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- run(ctx, func() {}, []string{"printgateway", addr}, envMap(map[string]string{
+			config.AuthTokenEnv:  "test-token",
+			config.ConfigPathEnv: configPath,
+		}), mapReadFile(map[string]string{configPath: fileBody}), logger)
+	}()
+
+	waitForDial(t, addr, 5*time.Second)
+	cancel()
+
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("run returned an error: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("run did not return after ctx was cancelled")
+	}
+
+	foundFileOrigin := false
+	for _, msg := range logger.errors {
+		if strings.Contains(msg, configPath) && strings.Contains(msg, config.WriteTimeoutEnv) {
+			foundFileOrigin = true
+		}
+	}
+	if !foundFileOrigin {
+		t.Errorf("expected a LogError naming both %s and %s, got errors=%v", configPath, config.WriteTimeoutEnv, logger.errors)
+	}
+
+	// FetchAllowedHostsEnv was supplied by neither the file nor the environment, so its startup
+	// line must still read the bare env var name even with the file layer active in this run.
+	foundBareNeedle := false
+	for _, msg := range logger.infos {
+		if strings.Contains(msg, config.FetchAllowedHostsEnv) && strings.Contains(msg, "file_url may target any public host") {
+			foundBareNeedle = true
+		}
+	}
+	if !foundBareNeedle {
+		t.Errorf("expected a LogInfo naming the bare %s (not file-sourced), got infos=%v", config.FetchAllowedHostsEnv, logger.infos)
+	}
+}
+
+// TestRunAllowPrivateTargetsStaysEnvOnly proves that even with a config file active in the same
+// run, AllowPrivateTargetsEnv's warning still names the bare env var, since it has no field
+// anywhere in fileConfig's type tree and so can never be file-labeled.
+func TestRunAllowPrivateTargetsStaysEnvOnly(t *testing.T) {
+	t.Parallel()
+
+	addr := freeAddr(t)
+	const configPath = "/etc/printgateway/run-private-targets-test.json"
+	// A harmless, unrelated file-sourced key: proves the file layer is genuinely active in this run.
+	fileBody := `{"resource/printgateway": {"timeouts": {"idle": "70s"}}}`
+
+	ctx, cancel := context.WithCancel(context.Background())
+	logger := &recordingLogger{}
+
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- run(ctx, func() {}, []string{"printgateway", addr}, envMap(map[string]string{
+			config.AuthTokenEnv:           "test-token",
+			config.ConfigPathEnv:          configPath,
+			config.AllowPrivateTargetsEnv: "true",
+		}), mapReadFile(map[string]string{configPath: fileBody}), logger)
+	}()
+
+	waitForDial(t, addr, 5*time.Second)
+	cancel()
+
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("run returned an error: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("run did not return after ctx was cancelled")
+	}
+
+	foundBareWarning := false
+	for _, msg := range logger.errors {
+		if strings.Contains(msg, config.AllowPrivateTargetsEnv) {
+			if strings.Contains(msg, configPath) {
+				t.Errorf("AllowPrivateTargets warning %q names the config file path; it must never be file-labeled", msg)
+			}
+			foundBareWarning = true
+		}
+	}
+	if !foundBareWarning {
+		t.Errorf("expected a LogError naming the bare %s, got errors=%v", config.AllowPrivateTargetsEnv, logger.errors)
 	}
 }

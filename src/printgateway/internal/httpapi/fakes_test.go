@@ -16,10 +16,7 @@ import (
 )
 
 // capturingLogger records every call this package's tests need to assert
-// on. Guarded by a mutex — unlike the single-request fakes below, this one
-// is shared across the 50-concurrent middleware test, and logs.LoggerMock's
-// embedded no-op methods cover everything else the logs.Logger interface
-// requires.
+// on. Mutex-guarded since it's shared across the concurrent middleware test.
 type capturingLogger struct {
 	logs.LoggerMock
 
@@ -50,16 +47,11 @@ func (c *capturingLogger) LogAPICompletion(md *logs.LogMetaData) error {
 	return nil
 }
 
-// snapshotCompletions/snapshotErrors/snapshotInfos are the only race-safe
-// way to read these slices from a test. An HTTP round trip establishes no
-// happens-before edge the race detector recognizes between "the client
-// received a response" and "the server-side goroutine finished its
-// deferred bookkeeping" — verified live: a test reading c.completions
-// directly right after http.Get returns raced against accessLog's own
-// deferred append, most visibly on the panic-after-write path (the
-// connection closes as soon as net/http reacts to http.ErrAbortHandler,
-// which can happen before this goroutine's own defers finish). Locking
-// through the same mutex the writers use is the fix, not a longer sleep.
+// snapshotCompletions/snapshotErrors/snapshotInfos are the race-safe way to
+// read these slices from a test: an HTTP round trip completing gives no
+// happens-before guarantee that the server-side goroutine's deferred
+// bookkeeping has finished, so reads must go through the same mutex as the
+// writers.
 func (c *capturingLogger) snapshotCompletions() []*logs.LogMetaData {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -85,13 +77,7 @@ func (c *capturingLogger) snapshotInfos() []string {
 }
 
 // waitForCompletions polls logger until it has recorded at least want
-// completions, or gives up after two seconds. A snapshot alone proves
-// nothing about whether the server-side goroutine has *finished* logging
-// yet — most visible on a request whose connection is aborted, where the
-// client can observe the drop before the server-side goroutine's own
-// defers run. Polling a short, bounded amount rather than sleeping a fixed
-// duration keeps the common case (already done by the time this is called)
-// fast while still tolerating the rare slow case.
+// completions, or gives up after two seconds.
 func waitForCompletions(t *testing.T, logger *capturingLogger, want int) []*logs.LogMetaData {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -116,29 +102,16 @@ func waitForErrors(t *testing.T, logger *capturingLogger, want int) []string {
 	}
 }
 
-// fakeSubmitter stands in for cups.LPSubmitter. Guarded by a mutex for the
-// same reason as capturingLogger: the concurrency test drives many
-// goroutines through the same *API, and every request shares one Service,
-// hence one Submitter. result/err are read under the same lock as jobs is
-// written — an Opus review of this stage found the original version read
-// them unlocked, which happened to be safe only because every test sets
-// them once at construction and never mutates them mid-run; guarding all
-// three uniformly removes that as an assumption a future test could
-// silently violate.
+// fakeSubmitter stands in for cups.LPSubmitter. Mutex-guarded since the
+// concurrency test drives many goroutines through one shared Service/Submitter.
 type fakeSubmitter struct {
 	mu     sync.Mutex
 	result printgw.SubmitResult
 	err    error
 	jobs   []printgw.SubmitJob
 
-	// spooledBodies holds, per call and in order, the actual bytes at
-	// job.Path read DURING Submit — printgw.Service's own `defer cleanup()`
-	// deletes the spool file the instant Submit returns, so this is the
-	// only point at which a test can observe what was actually spooled,
-	// not just which Printer/Title Submit was called with. An Opus review
-	// of this stage found that no test in this package ever read jobs at
-	// all, so a mutant that spooled a completely different printer, file,
-	// or body passed the whole suite.
+	// spooledBodies captures the bytes at job.Path read DURING Submit, since
+	// printgw.Service deletes the spool file as soon as Submit returns.
 	spooledBodies [][]byte
 }
 
@@ -151,8 +124,7 @@ func (f *fakeSubmitter) Submit(ctx context.Context, job printgw.SubmitJob) (prin
 	return f.result, f.err
 }
 
-// jobs returns a copy of every job Submit has recorded so far, safe to read
-// from a test goroutine that isn't the one driving requests.
+// snapshotJobs returns a copy of every job Submit has recorded so far.
 func (f *fakeSubmitter) snapshotJobs() []printgw.SubmitJob {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -169,11 +141,8 @@ func (f *fakeSubmitter) snapshotSpooledBodies() [][]byte {
 	return out
 }
 
-// fakeFetcher stands in for fetch.SafeFetcher. rawURL is recorded (not just
-// used) so a test can assert the handler passed through the URL it actually
-// received, rather than merely that *some* fetch happened — an Opus review
-// of this stage found the original version discarded rawURL entirely, which
-// let a mutant that fetched a hardcoded wrong URL pass the whole suite.
+// fakeFetcher stands in for fetch.SafeFetcher, recording rawURL so a test
+// can assert the handler passed through the URL it actually received.
 type fakeFetcher struct {
 	body   []byte
 	err    error
@@ -189,13 +158,9 @@ func (f *fakeFetcher) Fetch(ctx context.Context, rawURL string, dst io.Writer) (
 	return n, err
 }
 
-// fakeObjectStore stands in for objstore.MinIO. err, when set, should
-// normally already be an *apperr.HTTPError (matching ports.go's documented
-// contract — Get wraps a missing key as {Status: 404}) since that is what a
-// real ObjectStore implementation does; tests exercising Service's own
-// re-wrap of an unclassified error use a plain error instead. key is
-// recorded for the same reason fakeFetcher now records rawURL — see that
-// type's comment.
+// fakeObjectStore stands in for objstore.MinIO. err should normally already
+// be an *apperr.HTTPError per ports.go's contract; a plain error is used
+// only to exercise Service's own re-wrap of an unclassified error.
 type fakeObjectStore struct {
 	body []byte
 	size int64
@@ -212,13 +177,9 @@ func (f *fakeObjectStore) Get(ctx context.Context, key string) (io.ReadCloser, i
 }
 
 // fakePresigner stands in for objstore.MinIO's presign methods, behind
-// httpapi's own narrow Presigner interface. getURL/putURL are deliberately
-// distinct (not one shared url field) so a test can tell GET and PUT apart
-// by which one comes back, and every call is recorded — an Opus review of
-// this stage found the original one-url, no-recording version let three
-// separate mutants (GET/PUT dispatch swapped, the wrong key passed through,
-// the wrong ttl passed through) all pass the whole suite, since nothing
-// ever observed which method/key/ttl the handler actually sent.
+// httpapi's own narrow Presigner interface. getURL/putURL are kept separate
+// so a test can tell GET and PUT results apart, and every call is recorded
+// so a test can assert which method/key/ttl was actually sent.
 type fakePresigner struct {
 	mu     sync.Mutex
 	getURL string
@@ -255,9 +216,8 @@ func (f *fakePresigner) snapshotCalls() []presignCall {
 	return out
 }
 
-// testAPIOpts configures newTestAPI. Every field has a zero-value-friendly
-// default applied by newTestAPI itself, so a test only sets what it cares
-// about.
+// testAPIOpts configures newTestAPI; every field defaults sensibly in
+// newTestAPI itself, so a test only sets what it cares about.
 type testAPIOpts struct {
 	submitter   printgw.Submitter
 	fetcher     printgw.Fetcher
@@ -271,11 +231,8 @@ type testAPIOpts struct {
 	timeouts   printgw.Timeouts
 }
 
-// newTestAPI builds a real *API over real printgw.Service, wired to fakes
-// at the lowest layer (Submitter/Fetcher/ObjectStore/Presigner) — "full
-// stack over the real chain with fakes", per the plan's own description of
-// this stage. A submitter defaulting to one that always succeeds means a
-// test only supplies the fakes it actually cares about varying.
+// newTestAPI builds a real *API over a real printgw.Service, wired to fakes
+// at the lowest layer (Submitter/Fetcher/ObjectStore/Presigner).
 func newTestAPI(opts testAPIOpts) (*API, *capturingLogger) {
 	if opts.authToken == "" {
 		opts.authToken = "test-token"

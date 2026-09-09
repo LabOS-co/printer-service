@@ -1,17 +1,11 @@
 // Initial prototype Print Gateway.
 //
-// Accepts a print request over HTTP: multipart/form-data (file attached),
-// or application/json with either {"printer","file_url"} (server downloads
-// the file itself) or {"printer","s3_key"} (server downloads it from the
-// configured S3/MinIO bucket instead). Either way, once the file is on
-// local disk it's handed
-// to CUPS via `lp -d <printer> <path>` — this server does not talk IPP
-// itself and does not know about PPDs/media/resolution; CUPS's own queue
-// configuration (already set up, static PPD, ippfix if that printer needs
-// it) handles all of that. See internal/httpapi for the request contract.
+// Accepts a print request over HTTP — multipart/form-data, or JSON naming a file_url or s3_key —
+// and hands the resulting local file to CUPS via `lp -d <printer> <path>`; CUPS's own queue
+// configuration handles PPD/media/resolution. See internal/httpapi for the request contract.
 //
-// This file is wiring only: build the dependencies, start the server, and
-// wait for either it to fail or a shutdown signal to arrive.
+// This file is wiring only: build the dependencies, start the server, and wait for either it to
+// fail or a shutdown signal to arrive.
 package main
 
 import (
@@ -39,84 +33,56 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Constructed WITHOUT a Host: GetLoggerWithSettings' own internal
-	// setLogstashLogger call swallows a dial failure and reports success
-	// regardless (logs@v1.5.2/logs.go), so giving it nothing to dial and
-	// calling logger.SetLogstashLogger ourselves inside run — whose error we
-	// DO check — is what lets a broken logstash address actually be noticed.
-	// FormatJSON is what makes LogMetaData's fields (job_id, status,
-	// duration, ...) queryable once they reach logstash; console output
-	// stays human-readable regardless (createLogstashLogger always sets
-	// ConsoleFormatter for it) but now goes to stderr — logrus.New()'s
-	// default — rather than the old GetConsoleLogger()'s stdout. A wrapper
-	// that only captured stdout needs updating.
-	//
-	// The discarded error is safe today: GetLoggerWithSettings has no
-	// failure path of its own (it does no I/O; that's exactly why run drives
-	// SetLogstashLogger separately), so it always returns nil.
+	// Constructed WITHOUT a Host: GetLoggerWithSettings' own logstash setup silently swallows a
+	// dial failure, so run() calls SetLogstashLogger itself instead, where the error IS checked.
+	// The discarded error here is safe: GetLoggerWithSettings does no I/O and always returns nil.
 	logger, _ := logs.GetLoggerWithSettings(logs.LogsSettings{Format: logs.FormatJSON}, config.ServiceName)
 
-	if err := run(ctx, stop, os.Args, os.Getenv, logger); err != nil {
+	if err := run(ctx, stop, os.Args, os.Getenv, os.ReadFile, logger); err != nil {
 		os.Exit(1)
 	}
 }
 
-// run holds every step of startup, request serving, and shutdown that main()
-// used to do inline, returning an error instead of calling os.Exit directly
-// at each failure site. main() is now a thin os.Exit wrapper around this —
-// the standard Go testable-main pattern, adopted specifically because
-// os.Exit/signal handling/a blocking ListenAndServe made the previous shape
-// untestable (approved as part of A8 stage 1's scope, landed here in stage 7
-// once every other package had its own test coverage to build on).
+// run holds every step of startup, request serving, and shutdown; main() is a thin os.Exit
+// wrapper around it (the standard Go testable-main pattern).
 //
-// Two deliberate additions beyond the standard three-parameter
-// (ctx, args, getenv) shape, both fixed after an Opus review found the
-// first draft's justification for stopSignals didn't hold up:
-//
-//   - logger is injected rather than constructed inside run. A test needs
-//     to assert which log line fired (which source resolved a secret, which
-//     warning survived a log level, whether a completion line fired at all)
-//     without driving the real logs.GetLoggerWithSettings — that concrete
-//     logger's logstashLogger increments an unsynchronized package-global
-//     sequence number on every call (logs@v1.5.2/logstash_logger.go), so
-//     four parallel tests each logging through it is a real, reviewer-
-//     confirmed data race, the same reason every other package in this
-//     module takes a logs.Logger parameter instead of constructing one.
-//   - stopSignals is passed separately from ctx so the shutdown branch can
-//     call it partway through (restoring default signal disposition before
-//     Shutdown, not only in main's deferred call, so a second signal
-//     force-kills instead of being silently absorbed by an already-fired
-//     context) while a test still drives that branch with a plain
-//     context.WithCancel rather than a real OS signal. A 3-parameter
-//     version (deriving signal.NotifyContext from a passed-in parent
-//     context inside run itself) is possible and was prototyped during
-//     review — it is not the reason this parameter exists. The real reason:
-//     that version registers a live SIGINT/SIGTERM handler in the test
-//     process on every call, which four parallel tests would install and
-//     tear down concurrently, leaving the test binary briefly
-//     un-interruptible by Ctrl-C. Keeping signal registration in main,
-//     entirely outside what any test constructs, avoids that.
-func run(ctx context.Context, stopSignals func(), args []string, getenv func(string) string, logger logs.Logger) error {
+// logger is injected rather than constructed inside run because the real logstashLogger
+// increments an unsynchronized package-global counter, which parallel tests would race on.
+// stopSignals is passed separately from ctx so the shutdown branch can restore default signal
+// disposition before Shutdown (letting a second signal force-kill) while a test drives that
+// branch with a plain context.WithCancel instead of a real OS signal — deriving the context
+// from signal.NotifyContext inside run itself would register a live signal handler per test.
+func run(ctx context.Context, stopSignals func(), args []string, getenv func(string) string, readFile func(string) ([]byte, error), logger logs.Logger) error {
 	startupMeta := &logs.LogMetaData{Service: config.ServiceName}
 
-	cfg, err := config.Load(args, getenv)
+	cfg, err := config.Load(args, getenv, readFile)
 	if err != nil {
 		logger.LogError(fmt.Sprintf("invalid configuration: %v", err), startupMeta)
 		return err
 	}
 
-	// Set before anything else logs, so PRINT_GATEWAY_LOG_LEVEL actually
-	// governs every startup line that follows it — not just request
-	// handling.
+	// Set before anything else logs, so PRINT_GATEWAY_LOG_LEVEL governs every startup line that follows.
 	if err := logger.SetLogLevel(cfg.LogLevel); err != nil {
-		logger.LogError(fmt.Sprintf("%s: invalid level %q, defaulting to info: %v", config.LogLevelEnv, cfg.LogLevel, err), startupMeta)
+		logger.LogError(fmt.Sprintf("%s: invalid level %q, defaulting to info: %v", cfg.Source(config.LogLevelEnv), cfg.LogLevel, err), startupMeta)
 	}
 
-	// SetLogstashLogger opens a UDP socket the logs.Logger interface has no
-	// way to close; harmless under main (the process holds it until exit)
-	// but worth naming here since run is now callable repeatedly in one
-	// process — a future test that sets LOG_SERVER would leak one socket per
-	// call unless the injected logger owns its own lifecycle.
+	// LogError, not LogInfo: the config-file/env precedence is inverted relative to every ops
+	// reflex, so an operator needs this line to survive a warn/error log level. Addr has no env
+	// var, so its file-sourced key is prepended explicitly since FileSourcedKeys() can't carry it.
+	if cfg.ConfigFilePath != "" {
+		keys := cfg.FileSourcedKeys()
+		if cfg.AddrSource == config.AddrSourceFile {
+			keys = append([]string{"resource/printgateway.addr"}, keys...)
+		}
+		supplied := "(no settings)"
+		if len(keys) > 0 {
+			supplied = strings.Join(keys, ", ")
+		}
+		logger.LogError(fmt.Sprintf("config file %s supplied: %s", cfg.ConfigFilePath, supplied), startupMeta)
+	}
+
+	// SetLogstashLogger opens a UDP socket logs.Logger has no way to close; harmless under main,
+	// but a repeated call to run() (as in a test) would leak one socket per call.
 	if host, port, source := secrets.ResolveLogServer(cfg, logger, startupMeta); host != "" {
 		if err := logger.SetLogstashLogger(host, port); err != nil {
 			logger.LogError(fmt.Sprintf("logstash dial to %s:%d (%s) failed: %v; continuing with console-only logging",
@@ -128,49 +94,30 @@ func run(ctx context.Context, stopSignals func(), args []string, getenv func(str
 
 	token, tokenSource, err := secrets.ResolveToken(cfg, logger, startupMeta)
 	if err != nil {
-		// F2: a service that cannot resolve a print token cannot serve any
-		// request. Previously this logged and continued, so a misconfigured
-		// deploy printed "listening" and looked healthy while requireToken
-		// answered 503 to everything forever. Fail fast instead.
-		//
-		// Distinct prefix from config.Load's "invalid configuration" above:
-		// this can be a live outage (Vault unreachable, env also unset), not
-		// only a misconfigured value, and an operator grepping for
-		// "invalid configuration" during an outage should not be misdirected
-		// at env/flag parsing.
+		// Fail fast: a service that can't resolve a print token would otherwise log "listening"
+		// and look healthy while requireToken answers 503 to everything forever. Distinct message
+		// prefix from config.Load's "invalid configuration" above, since this can be a live outage
+		// (Vault unreachable) rather than a bad value.
 		logger.LogError(fmt.Sprintf("cannot start: %v", err), startupMeta)
 		return err
 	}
 	cfg.AuthToken = token
 	logger.LogInfo(fmt.Sprintf("print token resolved from %s", tokenSource), startupMeta)
 
-	// SSRF defense (HLD §11.3, P0-4): logged at startup, not just enforced
-	// silently, because both are exactly the kind of misconfiguration that
-	// should be loud rather than discovered later from an incident.
-	//
-	// AllowPrivateTargets=true is a total bypass of every target check
-	// (address, port, and the post-connect recheck alike), so this one uses
-	// LogError rather than LogInfo: PRINT_GATEWAY_LOG_LEVEL=warn/error is a
-	// plausible production setting, and this line must survive it or the
-	// "logged loudly" guarantee the README makes is false.
+	// LogError, not LogInfo: AllowPrivateTargets=true is a total SSRF-check bypass and must
+	// survive a warn/error PRINT_GATEWAY_LOG_LEVEL.
 	if cfg.AllowPrivateTargets {
 		logger.LogError(fmt.Sprintf("%s=true: file_url target checks (address AND port) are disabled — do not set this in a deployment reachable by an untrusted caller",
 			config.AllowPrivateTargetsEnv), startupMeta)
 	}
 	if len(cfg.FetchAllowedHosts) == 0 {
-		logger.LogInfo(fmt.Sprintf("%s not set: file_url may target any public host", config.FetchAllowedHostsEnv), startupMeta)
+		logger.LogInfo(fmt.Sprintf("%s not set: file_url may target any public host", cfg.Source(config.FetchAllowedHostsEnv)), startupMeta)
 	} else {
 		logger.LogInfo(fmt.Sprintf("file_url restricted to hosts: %s", strings.Join(cfg.FetchAllowedHosts, ", ")), startupMeta)
 	}
 
-	// store is a concrete, nilable *objstore.MinIO rather than an interface,
-	// specifically so it can be assigned into two DIFFERENT narrow interface
-	// variables below (printgw.ObjectStore for Service, httpapi.Presigner
-	// for API — see those types' doc comments for why they're split) without
-	// either one ever being the classic non-nil-interface-wrapping-a-nil-
-	// pointer trap: each var below is only assigned when store is actually
-	// non-nil, so an unconfigured S3 leaves both as a genuine nil interface,
-	// not a typed one.
+	// store stays a concrete, nilable *objstore.MinIO so assigning it into the two interface vars
+	// below is only done when non-nil — avoiding the non-nil-interface-wrapping-a-nil-pointer trap.
 	store := newObjectStore(cfg, logger, startupMeta)
 	var objectGetter printgw.ObjectStore
 	var presigner httpapi.Presigner
@@ -187,7 +134,7 @@ func run(ctx context.Context, stopSignals func(), args []string, getenv func(str
 
 	serveErr := make(chan error, 1)
 	go func() {
-		logger.LogInfo(fmt.Sprintf("print gateway (prototype) listening on %s", cfg.Addr), startupMeta)
+		logger.LogInfo(fmt.Sprintf("print gateway (prototype) listening on %s (addr source: %s)", cfg.Addr, cfg.AddrSource), startupMeta)
 		serveErr <- server.ListenAndServe()
 	}()
 
@@ -214,47 +161,32 @@ func run(ctx context.Context, stopSignals func(), args []string, getenv func(str
 	}
 }
 
-// newObjectStore builds the S3/MinIO-backed ObjectStore (Workstream E),
-// returning nil whenever object storage isn't usable — never an error,
-// since S3 is additive: the HLD's own constraint is that multipart upload
-// must remain the primary intake path (not every Windows caller has an S3
-// SDK), so a missing or broken S3 config just means objectStore stays nil
-// and the s3_key/ /files/presign paths answer 503, not that the whole
-// service refuses to start. This is why the endpoint/bucket pairing check
-// lives here rather than in config.validate: validate can only express
-// "refuse to start," and a half-configured S3 setup should degrade the
-// same way a bad credential or an unreachable endpoint already does below,
-// not take multipart/file_url down with it.
+// newObjectStore builds the S3/MinIO-backed ObjectStore, returning nil whenever object storage
+// isn't usable — never an error, since multipart upload remains the primary intake path and a
+// missing or broken S3 config should just leave the s3_key/presign paths answering 503.
 func newObjectStore(cfg config.Config, logger logs.Logger, meta *logs.LogMetaData) *objstore.MinIO {
 	switch {
 	case cfg.S3Endpoint == "" && cfg.S3Bucket == "":
 		return nil // object storage deliberately not configured; nothing to log
 	case cfg.S3Endpoint == "" || cfg.S3Bucket == "":
-		// LogError, not LogInfo: half a configuration is a mistake someone
-		// meant to be a feature, and it must survive a warn/error
-		// PRINT_GATEWAY_LOG_LEVEL the same way the AllowPrivateTargets and
-		// empty-Region warnings below do.
 		logger.LogError(fmt.Sprintf("%s and %s must both be set (%s=%q, %s=%q); object storage disabled",
-			config.S3EndpointEnv, config.S3BucketEnv,
-			config.S3EndpointEnv, cfg.S3Endpoint, config.S3BucketEnv, cfg.S3Bucket), meta)
+			cfg.Source(config.S3EndpointEnv), cfg.Source(config.S3BucketEnv),
+			cfg.Source(config.S3EndpointEnv), cfg.S3Endpoint, cfg.Source(config.S3BucketEnv), cfg.S3Bucket), meta)
 		return nil
 	}
 
 	accessKey, secretKey, source := secrets.ResolveS3Credentials(cfg, logger, meta)
 	if accessKey == "" || secretKey == "" {
 		logger.LogError(fmt.Sprintf("%s is set but no S3 credentials resolved from vault or %s/%s; object storage disabled",
-			config.S3EndpointEnv, config.S3AccessKeyEnv, config.S3SecretKeyEnv), meta)
+			cfg.Source(config.S3EndpointEnv), cfg.Source(config.S3AccessKeyEnv), cfg.Source(config.S3SecretKeyEnv)), meta)
 		return nil
 	}
 
 	if cfg.S3Region == "" {
-		// LogError, not LogInfo: an empty Region is silently wrong, not just
-		// slow — see cloud_storage.CloudStorageStreamingClient's
-		// PresignGetURL doc comment (a failed bucket-location lookup on a
-		// non-AWS backend signs as "us-east-1" instead of erroring), so this
-		// must survive a warn/error PRINT_GATEWAY_LOG_LEVEL.
+		// A failed bucket-location lookup on a non-AWS backend silently signs as "us-east-1"
+		// instead of erroring (see CloudStorageStreamingClient.PresignGetURL), so this is LogError.
 		logger.LogError(fmt.Sprintf("%s is set but %s is empty: presigned URLs may be silently signed for the wrong region against a non-AWS endpoint",
-			config.S3EndpointEnv, config.S3RegionEnv), meta)
+			cfg.Source(config.S3EndpointEnv), cfg.Source(config.S3RegionEnv)), meta)
 	}
 
 	store, err := objstore.New(cfg.S3Endpoint, cfg.S3Bucket, accessKey, secretKey, cfg.S3Region, cfg.S3Insecure, logger, meta)

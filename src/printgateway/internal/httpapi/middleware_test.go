@@ -14,17 +14,10 @@ import (
 
 // --- requestContext / correlation id --------------------------------------
 
-// TestSanitizeRequestIDByteClasses unit-tests sanitizeRequestID directly for
-// the byte classes its own doc comment names. A real end-to-end HTTP
-// request can't carry most of these: a literal LF/CR can't appear in an
-// HTTP header value at all without breaking request framing (there is no
-// wire-level way to send one — net/http's client validates and refuses,
-// and there is no way around that short of a raw socket producing a
-// response no HTTP parser would accept either), so the only way to test the
-// byte-wise rejection logic itself is to call the function directly. The
-// end-to-end replace-and-log behavior for bytes a real client CAN send
-// (over-128-bytes, a single invalid-UTF-8 byte) is covered separately below
-// by TestRequestContextReplacesAMalformedID.
+// TestSanitizeRequestIDByteClasses unit-tests sanitizeRequestID directly,
+// since a real HTTP client can't put most of these byte classes (LF/CR) on
+// the wire at all; see TestRequestContextReplacesAMalformedID for the
+// end-to-end cases a client actually can send.
 func TestSanitizeRequestIDByteClasses(t *testing.T) {
 	t.Parallel()
 
@@ -78,20 +71,16 @@ func TestRequestContextHonorsAndEchoesAWellFormedID(t *testing.T) {
 }
 
 // TestRequestContextReplacesAMalformedID covers the malformed-id cases a
-// real HTTP client can actually send on the wire (net/http's own client
-// validates header values for CR/LF before sending, so those bytes can't
-// reach this end-to-end path — see TestSanitizeRequestIDByteClasses for
-// that part of the contract instead).
+// real HTTP client can actually send on the wire (net/http's client itself
+// rejects CR/LF in a header value).
 func TestRequestContextReplacesAMalformedID(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
 		name string
 		id   string
-		// wantTruncatedFrom, when non-zero, is the byte length
-		// logSafeRequestID's log line must cite for this id - and the full
-		// id must NOT appear in the log verbatim. Zero means "too short to
-		// trigger logSafeRequestID's own truncation, don't check."
+		// wantTruncatedFrom, when non-zero, is the byte length the log line
+		// must cite; the full id must not appear verbatim. Zero: don't check.
 		wantTruncatedFrom int
 	}{
 		{"over 128 bytes", strings.Repeat("x", 500), 500},
@@ -134,12 +123,6 @@ func TestRequestContextReplacesAMalformedID(t *testing.T) {
 				t.Errorf("no log line recorded the rejected id; infos=%v", infos)
 			}
 
-			// An Opus review of this stage found the truncation branch
-			// (logSafeRequestID, over maxLogged bytes) was covered by this
-			// same 500-byte case but never actually asserted: mutating
-			// `if len(raw) > maxLogged` to `if false` still passed every
-			// existing check here, since "rejected caller-supplied" appears
-			// on both the truncated and untruncated message shapes.
 			if tt.wantTruncatedFrom > 0 {
 				wantSubstr := fmt.Sprintf("truncated from %d bytes", tt.wantTruncatedFrom)
 				truncated := false
@@ -159,19 +142,14 @@ func TestRequestContextReplacesAMalformedID(t *testing.T) {
 	}
 }
 
-// TestFiftyConcurrentRequestsEachGetOwnJobID is the permanent guard on the
-// P0-5 globals fix: each of 50 concurrent requests supplies its own
-// well-formed id and must get exactly that id back, with exactly one
-// completion log recorded per id and no cross-contamination between
-// goroutines. A reintroduced shared *logs.LogMetaData would fail this
-// deterministically (ids would visibly swap between concurrent requests)
-// even without -race; run with -race (WSL — see the plan's own
-// environment-limits note) to also confirm no data race in getting there.
+// TestFiftyConcurrentRequestsEachGetOwnJobID guards against reintroducing a
+// shared, mutable *logs.LogMetaData: each of 50 concurrent requests must get
+// back exactly its own id, with no cross-contamination. Run with -race too.
 func TestFiftyConcurrentRequestsEachGetOwnJobID(t *testing.T) {
 	a, logger := newTestAPI(testAPIOpts{})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/echo", func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(time.Millisecond) // widen the window a shared-state race would need to hit
+		time.Sleep(time.Millisecond)
 		w.WriteHeader(http.StatusOK)
 	})
 	srv := httptest.NewServer(a.handlerChain(mux))
@@ -199,12 +177,6 @@ func TestFiftyConcurrentRequestsEachGetOwnJobID(t *testing.T) {
 	}
 	wg.Wait()
 
-	// wg.Wait() only synchronizes with each CLIENT goroutine's Done() call —
-	// it proves nothing about whether the SERVER-side goroutine that handles
-	// each request (a completely different goroutine, on httptest.Server's
-	// side) has finished its own deferred accessLog bookkeeping by the time
-	// the client sees the response. waitForCompletions polls through the
-	// logger's own mutex instead of assuming that's already true.
 	completions := waitForCompletions(t, logger, n)
 	if len(completions) != n {
 		t.Fatalf("LogAPICompletion called %d times, want %d", len(completions), n)
@@ -254,18 +226,11 @@ func TestAccessLogRecordsExactlyOnceWithFields(t *testing.T) {
 	if md.Status != "418" {
 		t.Errorf("Status = %q, want 418", md.Status)
 	}
-	// A window, not just >0: an Opus review of this stage found >0 alone
-	// doesn't pin the unit (ms) - mutating Duration's Milliseconds() call to
-	// Microseconds() (middleware.go) still passes ">0", so a 15ms request
-	// could report 15000 unnoticed. 15ms..5s comfortably covers the sleep
-	// without being sensitive to ordinary scheduling jitter.
+	// A window, not just >0, so a units mistake (ms vs us) doesn't slip
+	// through unnoticed.
 	if md.Duration < 15 || md.Duration >= 5000 {
 		t.Errorf("Duration = %d ms, want in [15, 5000) (handler slept 15ms)", md.Duration)
 	}
-	// logs v1.5.2's formatters render the completion message from
-	// ServiceDuration, not Duration (verified live against a real logstash
-	// listener) — both must be set the same way or the message text reads
-	// "Duration: 0 ms" regardless of the correct structured field.
 	if md.ServiceDuration != md.Duration {
 		t.Errorf("ServiceDuration = %d, want equal to Duration (%d)", md.ServiceDuration, md.Duration)
 	}
@@ -296,20 +261,16 @@ func TestAccessLogRecordsA401WithDuration(t *testing.T) {
 	}
 }
 
-// TestAccessLogDefaultsStatusTo200WhenHandlerNeverCallsWriteHeader pins
-// statusRecorder's documented default: net/http itself sends 200 when a
-// handler writes a body without ever calling WriteHeader, so a recorder
-// that never observed a call must report the same thing net/http actually
-// sends - not, say, its zero value. An Opus review of this stage found no
-// test in this package exercised this path (every other test's handler
-// either panics or calls WriteHeader explicitly).
+// TestAccessLogDefaultsStatusTo200WhenHandlerNeverCallsWriteHeader asserts
+// statusRecorder reports 200 (net/http's own default) when a handler writes
+// a body without ever calling WriteHeader.
 func TestAccessLogDefaultsStatusTo200WhenHandlerNeverCallsWriteHeader(t *testing.T) {
 	t.Parallel()
 
 	a, logger := newTestAPI(testAPIOpts{})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/implicit", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("ok")) // no WriteHeader call
+		w.Write([]byte("ok"))
 	})
 	srv := httptest.NewServer(a.handlerChain(mux))
 	defer srv.Close()
@@ -373,13 +334,10 @@ func TestMaxBytesEnforcesLimitByContentType(t *testing.T) {
 	}
 }
 
-// TestMaxBytesWrapsAccessLogForConnectionClose pins the ordering fix from
-// the Opus review: maxBytes must wrap accessLog (not the reverse), because
-// http.MaxBytesReader signals net/http via an unexported interface that
-// accessLog's statusRecorder wrapper cannot implement. Nesting them the
-// other way silently defeats the size limit's connection-handling — the
-// server would keep the connection open and drain part of the rejected
-// body instead of closing it, verified live before this fix existed.
+// TestMaxBytesWrapsAccessLogForConnectionClose asserts maxBytes wraps
+// accessLog (not the reverse): nested the other way, statusRecorder can't
+// satisfy the unexported interface MaxBytesReader needs to signal net/http,
+// and the connection would stay open instead of closing on overflow.
 func TestMaxBytesWrapsAccessLogForConnectionClose(t *testing.T) {
 	t.Parallel()
 
@@ -442,13 +400,10 @@ func TestPanicRecoveryBeforeWriteReturns500(t *testing.T) {
 	}
 }
 
-// TestPanicRecoveryAfterWriteAbortsConnection pins the other Opus-review
-// fix: a panic after a handler already wrote part of a response must not
-// try to layer a fresh 500 over it (net/http would append it, producing a
-// corrupted-but-parseable response — verified live to reach a client as a
-// clean 200 with two concatenated JSON documents before this fix). The
-// connection is aborted instead, which surfaces to a client as a request
-// error, never as success.
+// TestPanicRecoveryAfterWriteAbortsConnection asserts a panic after a
+// handler already wrote part of a response aborts the connection rather
+// than layering a fresh 500 over it (which net/http would just append,
+// producing a corrupted-but-parseable response).
 func TestPanicRecoveryAfterWriteAbortsConnection(t *testing.T) {
 	t.Parallel()
 
@@ -470,14 +425,6 @@ func TestPanicRecoveryAfterWriteAbortsConnection(t *testing.T) {
 			t.Fatalf("response contains a second, concatenated JSON document: %s", body)
 		}
 	}
-	// Deterministic in practice (confirmed stable over 20 consecutive
-	// runs), not merely the common case: net/http never flushes this
-	// sub-4KiB buffered partial response before http.ErrAbortHandler closes
-	// the raw connection, so the client always observes a connection error
-	// rather than a truncated-but-parseable body. Asserted explicitly per
-	// an Opus review of this stage, which found the `if err == nil` body
-	// above never actually ran on a healthy machine — a property this
-	// test's own design relied on without stating it.
 	if err == nil {
 		t.Error("expected the connection to be aborted (a client-visible error), got a successful response instead")
 	}
@@ -507,10 +454,6 @@ func TestPanicRecoveryReRaisesErrAbortHandler(t *testing.T) {
 			t.Fatalf("http.ErrAbortHandler was converted into a fabricated 500 instead of re-panicking: %s", body)
 		}
 	}
-	// Same determinism as TestPanicRecoveryAfterWriteAbortsConnection: the
-	// connection is aborted before any response is written at all here, so
-	// the client always sees a connection error, never a response to
-	// inspect at all.
 	if err == nil {
 		t.Error("expected the connection to be aborted (a client-visible error), got a successful response instead")
 	}

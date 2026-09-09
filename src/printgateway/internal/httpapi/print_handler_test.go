@@ -16,9 +16,7 @@ import (
 )
 
 // newMultipartBody builds a multipart/form-data body with the given parts in
-// exactly the given order — mime/multipart.Writer emits parts in call order,
-// which is what TestPrintHandlerMultipartFieldOrderIndependence relies on to
-// prove the handler doesn't care which part arrives first.
+// exactly the given order (mime/multipart.Writer emits parts in call order).
 func newMultipartBody(t *testing.T, fileFirst bool, printer, filename, fileContent string) (io.Reader, string) {
 	t.Helper()
 	var buf bytes.Buffer
@@ -105,10 +103,6 @@ func TestPrintHandlerMultipartHappyPath(t *testing.T) {
 		t.Errorf("response has %d keys, want exactly 2 (status, output): %v", len(got), got)
 	}
 
-	// Pins what actually got printed, not just that *something* did - an
-	// Opus review of this stage found no test in this package ever checked
-	// this, so a mutant substituting the printer, title, or spooled body
-	// passed the whole suite.
 	jobs := submitter.snapshotJobs()
 	if len(jobs) != 1 {
 		t.Fatalf("Submit called %d times, want 1", len(jobs))
@@ -125,10 +119,8 @@ func TestPrintHandlerMultipartHappyPath(t *testing.T) {
 	}
 }
 
-// TestPrintHandlerMultipartFieldOrderIndependence pins that the handler
-// doesn't assume "printer" arrives before "file" in the multipart body —
-// ParseMultipartForm reads the whole body before FormValue/FormFile are
-// ever called, so both orders must behave identically.
+// TestPrintHandlerMultipartFieldOrderIndependence asserts the handler
+// doesn't care whether "printer" or "file" arrives first in the body.
 func TestPrintHandlerMultipartFieldOrderIndependence(t *testing.T) {
 	t.Parallel()
 
@@ -240,10 +232,9 @@ func TestPrintHandlerJSONS3KeyPathTraversalIs400(t *testing.T) {
 	}
 }
 
-// TestPrintHandlerJSONConcatenatedDocumentsIs400 exercises decodeStrictJSON's
-// "err == nil" branch specifically: two syntactically valid JSON values back
-// to back, as opposed to TestPrintHandlerJSONTrailingGarbageIs400's
-// not-valid-JSON tail (a different branch of the same function).
+// TestPrintHandlerJSONConcatenatedDocumentsIs400 covers two valid JSON
+// values back to back (decodeStrictJSON's "err == nil" branch), distinct
+// from TestPrintHandlerJSONTrailingGarbageIs400's not-valid-JSON tail.
 func TestPrintHandlerJSONConcatenatedDocumentsIs400(t *testing.T) {
 	t.Parallel()
 
@@ -292,11 +283,6 @@ func TestPrintHandlerJSONHappyPath(t *testing.T) {
 		b, _ := io.ReadAll(resp.Body)
 		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, b)
 	}
-	// Pins that the URL the handler decoded is the one actually fetched,
-	// and that the printer/spooled body reaching Submit match - an Opus
-	// review of this stage found fakeFetcher discarded rawURL entirely, so
-	// a mutant hardcoding a different file_url before calling PrintURL
-	// passed the whole suite.
 	if fetcher.rawURL != "http://example.invalid/x.pdf" {
 		t.Errorf("fetcher received rawURL = %q, want %q", fetcher.rawURL, "http://example.invalid/x.pdf")
 	}
@@ -357,10 +343,6 @@ func TestPrintHandlerS3KeyHappyPath(t *testing.T) {
 		b, _ := io.ReadAll(resp.Body)
 		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, b)
 	}
-	// Pins that the key the handler decoded is the one actually fetched
-	// from the store, and that the printer/spooled body reaching Submit
-	// match - see TestPrintHandlerJSONHappyPath's comment for why this
-	// matters (an Opus review of this stage found none of this recorded).
 	if objectStore.key != "docs/a.pdf" {
 		t.Errorf("store received key = %q, want %q", objectStore.key, "docs/a.pdf")
 	}
@@ -442,12 +424,9 @@ func TestPrintHandlerBadTokenIs401(t *testing.T) {
 	}
 }
 
-// TestPrintHandlerDoesNotLeakInternalDetailToTheClient is the leak-regression
-// case from the plan's own test table: an unclassified Submitter error whose
-// text names a temp file path and lp's own stderr must reach the log (an
-// operator needs it) but never the HTTP response body (an authenticated
-// caller is not automatically trusted with the server's filesystem layout or
-// subprocess internals).
+// TestPrintHandlerDoesNotLeakInternalDetailToTheClient asserts a
+// Submitter error's temp-file-path/stderr detail reaches the log but never
+// the HTTP response body.
 func TestPrintHandlerDoesNotLeakInternalDetailToTheClient(t *testing.T) {
 	t.Parallel()
 
@@ -483,5 +462,423 @@ func TestPrintHandlerDoesNotLeakInternalDetailToTheClient(t *testing.T) {
 	}
 	if !strings.Contains(joined, leakedStderr) {
 		t.Errorf("log does not contain lp's stderr (an operator needs it): %v", errs)
+	}
+}
+
+// newMultipartBodyWithCopies is newMultipartBody plus an optional "copies"
+// text field; copies == "" omits the field entirely (the absent-default path).
+func newMultipartBodyWithCopies(t *testing.T, printer, filename, fileContent, copies string) (io.Reader, string) {
+	t.Helper()
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	if err := w.WriteField("printer", printer); err != nil {
+		t.Fatal(err)
+	}
+	if copies != "" {
+		if err := w.WriteField("copies", copies); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fw, err := w.CreateFormFile("file", filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fw.Write([]byte(fileContent)); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return &buf, w.FormDataContentType()
+}
+
+func TestPrintHandlerMultipartCopiesHappyPath(t *testing.T) {
+	t.Parallel()
+
+	submitter := &fakeSubmitter{result: printgw.SubmitResult{Output: "ok"}}
+	a, _ := newTestAPI(testAPIOpts{submitter: submitter})
+	srv := httptest.NewServer(NewServer(a).Handler)
+	defer srv.Close()
+
+	body, ct := newMultipartBodyWithCopies(t, "q1", "doc.pdf", "content", "3")
+	resp := doPrint(t, srv, "test-token", body, ct)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, b)
+	}
+	jobs := submitter.snapshotJobs()
+	if len(jobs) != 1 {
+		t.Fatalf("Submit called %d times, want 1", len(jobs))
+	}
+	if jobs[0].Copies != 3 {
+		t.Errorf("Copies = %d, want 3", jobs[0].Copies)
+	}
+}
+
+func TestPrintHandlerMultipartCopiesAbsentDefaultsToOne(t *testing.T) {
+	t.Parallel()
+
+	submitter := &fakeSubmitter{result: printgw.SubmitResult{Output: "ok"}}
+	a, _ := newTestAPI(testAPIOpts{submitter: submitter})
+	srv := httptest.NewServer(NewServer(a).Handler)
+	defer srv.Close()
+
+	body, ct := newMultipartBodyWithCopies(t, "q1", "doc.pdf", "content", "")
+	resp := doPrint(t, srv, "test-token", body, ct)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, b)
+	}
+	jobs := submitter.snapshotJobs()
+	if len(jobs) != 1 {
+		t.Fatalf("Submit called %d times, want 1", len(jobs))
+	}
+	if jobs[0].Copies != 1 {
+		t.Errorf("Copies = %d, want 1 (default when the field is absent)", jobs[0].Copies)
+	}
+}
+
+func TestPrintHandlerMultipartCopiesNonNumericIs400(t *testing.T) {
+	t.Parallel()
+
+	a, _ := newTestAPI(testAPIOpts{})
+	srv := httptest.NewServer(NewServer(a).Handler)
+	defer srv.Close()
+
+	body, ct := newMultipartBodyWithCopies(t, "q1", "doc.pdf", "content", "abc")
+	resp := doPrint(t, srv, "test-token", body, ct)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 400 (non-numeric copies); body=%s", resp.StatusCode, b)
+	}
+}
+
+func TestPrintHandlerMultipartCopiesLessThanOneIs400(t *testing.T) {
+	t.Parallel()
+
+	for _, copies := range []string{"0", "-1"} {
+		copies := copies
+		t.Run(copies, func(t *testing.T) {
+			t.Parallel()
+
+			a, _ := newTestAPI(testAPIOpts{})
+			srv := httptest.NewServer(NewServer(a).Handler)
+			defer srv.Close()
+
+			body, ct := newMultipartBodyWithCopies(t, "q1", "doc.pdf", "content", copies)
+			resp := doPrint(t, srv, "test-token", body, ct)
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusBadRequest {
+				b, _ := io.ReadAll(resp.Body)
+				t.Fatalf("status = %d, want 400 (copies=%s); body=%s", resp.StatusCode, copies, b)
+			}
+		})
+	}
+}
+
+func TestPrintHandlerJSONCopiesHappyPath(t *testing.T) {
+	t.Parallel()
+
+	submitter := &fakeSubmitter{result: printgw.SubmitResult{Output: "ok"}}
+	objectStore := &fakeObjectStore{body: []byte("content"), size: 7}
+	a, _ := newTestAPI(testAPIOpts{submitter: submitter, objectStore: objectStore})
+	srv := httptest.NewServer(NewServer(a).Handler)
+	defer srv.Close()
+
+	resp := doPrint(t, srv, "test-token", strings.NewReader(`{"printer":"q1","s3_key":"a.pdf","copies":4}`), "application/json")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, b)
+	}
+	jobs := submitter.snapshotJobs()
+	if len(jobs) != 1 {
+		t.Fatalf("Submit called %d times, want 1", len(jobs))
+	}
+	if jobs[0].Copies != 4 {
+		t.Errorf("Copies = %d, want 4", jobs[0].Copies)
+	}
+}
+
+func TestPrintHandlerJSONCopiesAbsentDefaultsToOne(t *testing.T) {
+	t.Parallel()
+
+	submitter := &fakeSubmitter{result: printgw.SubmitResult{Output: "ok"}}
+	objectStore := &fakeObjectStore{body: []byte("content"), size: 7}
+	a, _ := newTestAPI(testAPIOpts{submitter: submitter, objectStore: objectStore})
+	srv := httptest.NewServer(NewServer(a).Handler)
+	defer srv.Close()
+
+	resp := doPrint(t, srv, "test-token", strings.NewReader(`{"printer":"q1","s3_key":"a.pdf"}`), "application/json")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, b)
+	}
+	jobs := submitter.snapshotJobs()
+	if len(jobs) != 1 {
+		t.Fatalf("Submit called %d times, want 1", len(jobs))
+	}
+	if jobs[0].Copies != 1 {
+		t.Errorf("Copies = %d, want 1 (default when the field is absent)", jobs[0].Copies)
+	}
+}
+
+func TestPrintHandlerJSONCopiesNonNumericIs400(t *testing.T) {
+	t.Parallel()
+
+	a, _ := newTestAPI(testAPIOpts{})
+	srv := httptest.NewServer(NewServer(a).Handler)
+	defer srv.Close()
+
+	resp := doPrint(t, srv, "test-token", strings.NewReader(`{"printer":"q1","s3_key":"a.pdf","copies":"abc"}`), "application/json")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 400 (non-numeric copies); body=%s", resp.StatusCode, b)
+	}
+}
+
+func TestPrintHandlerJSONCopiesLessThanOneIs400(t *testing.T) {
+	t.Parallel()
+
+	for _, copies := range []string{"0", "-1"} {
+		copies := copies
+		t.Run(copies, func(t *testing.T) {
+			t.Parallel()
+
+			a, _ := newTestAPI(testAPIOpts{})
+			srv := httptest.NewServer(NewServer(a).Handler)
+			defer srv.Close()
+
+			resp := doPrint(t, srv, "test-token", strings.NewReader(fmt.Sprintf(`{"printer":"q1","s3_key":"a.pdf","copies":%s}`, copies)), "application/json")
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusBadRequest {
+				b, _ := io.ReadAll(resp.Body)
+				t.Fatalf("status = %d, want 400 (copies=%s); body=%s", resp.StatusCode, copies, b)
+			}
+		})
+	}
+}
+
+// TestPrintHandlerJSONCopiesNullIsAbsentDefault pins that explicit JSON
+// `null` for "copies" is intentionally treated as absent (defaults to 1),
+// not rejected. See the Copies field's doc comment in print_handler.go.
+func TestPrintHandlerJSONCopiesNullIsAbsentDefault(t *testing.T) {
+	t.Parallel()
+
+	submitter := &fakeSubmitter{result: printgw.SubmitResult{Output: "ok"}}
+	objectStore := &fakeObjectStore{body: []byte("content"), size: 7}
+	a, _ := newTestAPI(testAPIOpts{submitter: submitter, objectStore: objectStore})
+	srv := httptest.NewServer(NewServer(a).Handler)
+	defer srv.Close()
+
+	resp := doPrint(t, srv, "test-token", strings.NewReader(`{"printer":"q1","s3_key":"a.pdf","copies":null}`), "application/json")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200 (null copies treated as absent); body=%s", resp.StatusCode, b)
+	}
+	jobs := submitter.snapshotJobs()
+	if len(jobs) != 1 {
+		t.Fatalf("Submit called %d times, want 1", len(jobs))
+	}
+	if jobs[0].Copies != 1 {
+		t.Errorf("Copies = %d, want 1 (null is intentionally equivalent to absent)", jobs[0].Copies)
+	}
+}
+
+// TestPrintHandlerJSONCopiesAboveMaxIs400 asserts copies is bounded above,
+// since it controls consumption of a physical shared resource.
+func TestPrintHandlerJSONCopiesAboveMaxIs400(t *testing.T) {
+	t.Parallel()
+
+	a, _ := newTestAPI(testAPIOpts{})
+	srv := httptest.NewServer(NewServer(a).Handler)
+	defer srv.Close()
+
+	resp := doPrint(t, srv, "test-token", strings.NewReader(`{"printer":"q1","s3_key":"a.pdf","copies":1000000}`), "application/json")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 400 (copies above the max); body=%s", resp.StatusCode, b)
+	}
+}
+
+// TestPrintHandlerJSONFileURLCopiesHappyPath covers copies via the
+// file_url/PrintURL intake path (other copies tests use s3_key).
+func TestPrintHandlerJSONFileURLCopiesHappyPath(t *testing.T) {
+	t.Parallel()
+
+	fetcher := &fakeFetcher{body: []byte("%PDF-1.4 fake")}
+	submitter := &fakeSubmitter{result: printgw.SubmitResult{Output: "ok"}}
+	a, _ := newTestAPI(testAPIOpts{fetcher: fetcher, submitter: submitter})
+	srv := httptest.NewServer(NewServer(a).Handler)
+	defer srv.Close()
+
+	resp := doPrint(t, srv, "test-token", strings.NewReader(`{"printer":"q1","file_url":"http://example.invalid/x.pdf","copies":3}`), "application/json")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, b)
+	}
+	jobs := submitter.snapshotJobs()
+	if len(jobs) != 1 {
+		t.Fatalf("Submit called %d times, want 1", len(jobs))
+	}
+	if jobs[0].Copies != 3 {
+		t.Errorf("Copies = %d, want 3", jobs[0].Copies)
+	}
+}
+
+// newMultipartBodyWithExplicitCopiesField always writes the "copies" field,
+// even when empty, unlike newMultipartBodyWithCopies (which treats "" as
+// omitting it) — for exercising "field present but empty".
+func newMultipartBodyWithExplicitCopiesField(t *testing.T, printer, filename, fileContent, copies string) (io.Reader, string) {
+	t.Helper()
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	if err := w.WriteField("printer", printer); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteField("copies", copies); err != nil {
+		t.Fatal(err)
+	}
+	fw, err := w.CreateFormFile("file", filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fw.Write([]byte(fileContent)); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return &buf, w.FormDataContentType()
+}
+
+// TestPrintHandlerMultipartCopiesPresentButEmptyIs400 asserts copies=
+// (present but empty) is rejected as a 400, not silently defaulted to 1.
+func TestPrintHandlerMultipartCopiesPresentButEmptyIs400(t *testing.T) {
+	t.Parallel()
+
+	a, _ := newTestAPI(testAPIOpts{})
+	srv := httptest.NewServer(NewServer(a).Handler)
+	defer srv.Close()
+
+	body, ct := newMultipartBodyWithExplicitCopiesField(t, "q1", "doc.pdf", "content", "")
+	resp := doPrint(t, srv, "test-token", body, ct)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 400 (copies present but empty); body=%s", resp.StatusCode, b)
+	}
+}
+
+// TestPrintHandlerMultipartCopiesAboveMaxIs400 is the multipart-path sibling
+// of TestPrintHandlerJSONCopiesAboveMaxIs400.
+func TestPrintHandlerMultipartCopiesAboveMaxIs400(t *testing.T) {
+	t.Parallel()
+
+	a, _ := newTestAPI(testAPIOpts{})
+	srv := httptest.NewServer(NewServer(a).Handler)
+	defer srv.Close()
+
+	body, ct := newMultipartBodyWithCopies(t, "q1", "doc.pdf", "content", "1000000")
+	resp := doPrint(t, srv, "test-token", body, ct)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 400 (copies above the max); body=%s", resp.StatusCode, b)
+	}
+}
+
+// TestPrintHandlerMultipartCopiesIgnoresQueryString asserts a
+// "?copies=5" query string is ignored; copies must come from the parsed
+// multipart body only.
+func TestPrintHandlerMultipartCopiesIgnoresQueryString(t *testing.T) {
+	t.Parallel()
+
+	submitter := &fakeSubmitter{result: printgw.SubmitResult{Output: "ok"}}
+	a, _ := newTestAPI(testAPIOpts{submitter: submitter})
+	srv := httptest.NewServer(NewServer(a).Handler)
+	defer srv.Close()
+
+	body, ct := newMultipartBodyWithCopies(t, "q1", "doc.pdf", "content", "")
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/print?copies=5", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set(authTokenHeader, "test-token")
+	req.Header.Set("Content-Type", ct)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, b)
+	}
+	jobs := submitter.snapshotJobs()
+	if len(jobs) != 1 {
+		t.Fatalf("Submit called %d times, want 1", len(jobs))
+	}
+	if jobs[0].Copies != 1 {
+		t.Errorf("Copies = %d, want 1 (the query string's copies=5 must be ignored, not smuggled in)", jobs[0].Copies)
+	}
+}
+
+// TestPrintHandlerMultipartCopiesQueryStringNeverWinsOverFormField asserts
+// that when both the query string and the form field are present, the form
+// field wins.
+func TestPrintHandlerMultipartCopiesQueryStringNeverWinsOverFormField(t *testing.T) {
+	t.Parallel()
+
+	submitter := &fakeSubmitter{result: printgw.SubmitResult{Output: "ok"}}
+	a, _ := newTestAPI(testAPIOpts{submitter: submitter})
+	srv := httptest.NewServer(NewServer(a).Handler)
+	defer srv.Close()
+
+	body, ct := newMultipartBodyWithCopies(t, "q1", "doc.pdf", "content", "3")
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/print?copies=5", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set(authTokenHeader, "test-token")
+	req.Header.Set("Content-Type", ct)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body=%s", resp.StatusCode, b)
+	}
+	jobs := submitter.snapshotJobs()
+	if len(jobs) != 1 {
+		t.Fatalf("Submit called %d times, want 1", len(jobs))
+	}
+	if jobs[0].Copies != 3 {
+		t.Errorf("Copies = %d, want 3 (the form field, not the query string's copies=5)", jobs[0].Copies)
 	}
 }

@@ -7,23 +7,22 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"regexp"
+	"strconv"
 
 	"printgateway/internal/apperr"
 	"printgateway/internal/printgw"
 )
 
+// lp counts documents named as file arguments on its command line, so
+// piping the document on stdin (see LPSubmitter's doc comment) makes it
+// report "(0 file(s))" even though it printed the piped document — this
+// corrects that count back to the one document actually submitted.
+var lpFileCountRe = regexp.MustCompile(`\(\d+ file\(s\)\)`)
+
 // LPSubmitter hands a spooled file to CUPS via `lp -d <printer> -t <title>`,
-// with the document piped on stdin rather than passed as a path argument.
-//
-// Passing ctx through exec.CommandContext (P0-1) means a wedged queue no
-// longer hangs the handler forever: on expiry/cancellation the child is
-// killed and the goroutine, process, and temp file (removed by the caller's
-// cleanup) are all reclaimed instead of leaking.
-//
-// Dropping the path operand from argv makes filename-based argument
-// injection structurally impossible rather than merely guarded against — the
-// temp path never appears in argv, so it can't be mistaken for a flag and
-// never shows up in `ps` or an lp error string either.
+// with the document piped on stdin rather than passed as a path argument
+// (so the spool path can't be mistaken for a flag or leak via `ps`/lp errors).
 type LPSubmitter struct{}
 
 func NewLPSubmitter() *LPSubmitter { return &LPSubmitter{} }
@@ -39,21 +38,20 @@ func (s *LPSubmitter) Submit(ctx context.Context, job printgw.SubmitJob) (printg
 	}
 	defer f.Close()
 
-	cmd := exec.CommandContext(ctx, "lp", "-d", job.Printer, "-t", job.Title)
-	// exec.Command's default is to hand the child the WHOLE process
-	// environment. That used to only leak PRINT_GATEWAY_TOKEN; since F1
-	// (Vault secrets) it would also leak VAULT_TOKEN/SECRET_STORE_PASSWORD —
-	// materially more valuable credentials — to lp and every CUPS filter it
-	// spawns, visible via e.g. /proc/<pid>/environ. lp needs none of that:
-	// PATH to find its own helpers, HOME for CUPS client-side config lookups
-	// (~/.cups). Nothing else is passed through.
+	argv := []string{"-d", job.Printer, "-t", job.Title}
+	if job.Copies > 1 {
+		argv = append(argv, "-n", strconv.Itoa(job.Copies))
+	}
+	cmd := exec.CommandContext(ctx, "lp", argv...)
+	// Don't inherit the full process env (exec.Command's default): that
+	// would leak PRINT_GATEWAY_TOKEN/VAULT_TOKEN/SECRET_STORE_PASSWORD to lp
+	// and every CUPS filter it spawns. lp only needs PATH and HOME.
 	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME")}
 	cmd.Stdin = f
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		// Internal carries the temp-file path and lp's raw stderr — both
-		// disclose server-side detail (CUPS queue/backend names in
-		// particular) and must never reach the client; see apperr.HTTPError.
+		// Internal (temp path + lp's raw stderr) must never reach the
+		// client — see apperr.HTTPError.
 		if ctx.Err() != nil {
 			return printgw.SubmitResult{}, &apperr.HTTPError{
 				Status: http.StatusGatewayTimeout,
@@ -69,5 +67,6 @@ func (s *LPSubmitter) Submit(ctx context.Context, job printgw.SubmitJob) (printg
 				job.Printer, job.Path, err, out),
 		}
 	}
-	return printgw.SubmitResult{Output: string(out)}, nil
+	corrected := lpFileCountRe.ReplaceAll(out, []byte("(1 file(s))"))
+	return printgw.SubmitResult{Output: string(corrected)}, nil
 }

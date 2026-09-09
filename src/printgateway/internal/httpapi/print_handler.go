@@ -8,6 +8,7 @@ import (
 	"mime"
 	"net/http"
 	"path"
+	"strconv"
 	"strings"
 
 	"printgateway/internal/apperr"
@@ -15,13 +16,17 @@ import (
 	"printgateway/internal/printgw"
 )
 
-// printHandler accepts a print request over HTTP in one of two ways:
-//  1. multipart/form-data — the file is attached directly in the request.
-//  2. application/json    — {"printer": "...", "file_url": "..."} or
-//     {"printer": "...", "s3_key": "..."}: the server fetches the file
-//     itself, either from any HTTP(S) URL (file_url, SSRF-guarded) or from
-//     the configured object store bucket (s3_key, no SSRF surface — the
-//     bucket is fixed and server-credentialed, not caller-controlled).
+// defaultCopies is used when a caller does not supply one.
+const defaultCopies = 1
+
+// maxCopies bounds copies per request, since they consume a physical shared
+// resource (paper/toner). Also enforced independently by printgw.Service
+// for callers that bypass these HTTP handlers.
+const maxCopies = 100
+
+// printHandler accepts a print request as either multipart/form-data (file
+// attached directly) or application/json ({"printer","file_url"} or
+// {"printer","s3_key"}, fetched server-side).
 func (a *API) printHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		a.fail(w, r, &apperr.HTTPError{Status: http.StatusMethodNotAllowed, Public: "use POST"})
@@ -44,16 +49,8 @@ func (a *API) printHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // isMultipart reports whether contentType names a multipart/form-data
-// request, matching on the parsed media type rather than a literal prefix.
-// mime.ParseMediaType already lowercases the returned type, so the
-// strings.EqualFold below is defensive rather than load-bearing for
-// case-insensitivity — the real reason a literal-prefix check would be
-// wrong is RFC 9110 case-insensitivity of the token itself, which
-// ParseMediaType already normalizes. Shared with the maxBytes middleware,
-// which must agree with this dispatch on which requests get the larger
-// upload limit rather than the tighter JSON one — two independent checks
-// that happened to agree today would silently diverge the moment either
-// one were reimplemented differently.
+// request. Also used by the maxBytes middleware, which must agree with this
+// dispatch on which requests get the larger upload limit.
 func isMultipart(contentType string) bool {
 	mediaType, _, err := mime.ParseMediaType(contentType)
 	if err != nil {
@@ -62,18 +59,11 @@ func isMultipart(contentType string) bool {
 	return strings.EqualFold(mediaType, "multipart/form-data")
 }
 
-// Option 1: the caller attaches the file itself.
-// multipart fields: "printer" (text), "file" (the file part).
-//
-// The multipart/JSON parsing errors below are the caller's own mistake, not
-// server-internal detail, so their full text is safe as the Public message
-// — unlike printgw's errors, which come from the filesystem/subprocess/
-// network and must stay out of the response body (see apperr.HTTPError).
+// handleMultipart handles option 1: the caller attaches the file itself.
+// Multipart fields: "printer" (text), "file" (the file part).
 func (a *API) handleMultipart(w http.ResponseWriter, r *http.Request) {
-	// In-memory threshold only; the hard cap on the whole body is
-	// a.cfg.MaxUploadBytes, already enforced by the maxBytes middleware
-	// before this handler ever runs (see config.DefaultMultipartMemoryBytes
-	// for why these are deliberately different values).
+	// In-memory threshold only; the hard body-size cap (MaxUploadBytes) is
+	// already enforced by the maxBytes middleware.
 	if err := r.ParseMultipartForm(config.DefaultMultipartMemoryBytes); err != nil {
 		a.fail(w, r, bodyErr(err, "invalid multipart body"))
 		return
@@ -85,6 +75,13 @@ func (a *API) handleMultipart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	copiesRaw, copiesPresent := multipartFormValue(r, "copies")
+	copies, cerr := parseCopiesFormValue(copiesRaw, copiesPresent)
+	if cerr != nil {
+		a.fail(w, r, cerr)
+		return
+	}
+
 	file, header, err := r.FormFile("file")
 	if err != nil {
 		a.fail(w, r, &apperr.HTTPError{Status: http.StatusBadRequest, Public: fmt.Sprintf("missing file part: %v", err)})
@@ -92,7 +89,7 @@ func (a *API) handleMultipart(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	result, err := a.svc.PrintReader(r.Context(), printer, header.Filename, file)
+	result, err := a.svc.PrintReader(r.Context(), printer, header.Filename, file, copies)
 	if err != nil {
 		a.fail(w, r, err)
 		return
@@ -100,17 +97,65 @@ func (a *API) handleMultipart(w http.ResponseWriter, r *http.Request) {
 	a.writeSuccess(w, r, printer, result)
 }
 
+// multipartFormValue returns the first value for key from the parsed
+// multipart body only (never r.URL.Query(), which r.FormValue would merge
+// in — letting a query string silently override the "copies" form field),
+// plus whether key was present, so callers can distinguish "absent" from
+// "present but empty".
+func multipartFormValue(r *http.Request, key string) (value string, present bool) {
+	if r.MultipartForm == nil {
+		return "", false
+	}
+	vals, ok := r.MultipartForm.Value[key]
+	if !ok || len(vals) == 0 {
+		return "", false
+	}
+	return vals[0], true
+}
+
+// parseCopiesFormValue parses the optional "copies" multipart form value,
+// defaulting to defaultCopies when absent and validating range when present.
+func parseCopiesFormValue(raw string, present bool) (int, *apperr.HTTPError) {
+	if !present {
+		return defaultCopies, nil
+	}
+	copies, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, &apperr.HTTPError{Status: http.StatusBadRequest, Public: "copies must be a positive integer"}
+	}
+	if cerr := validateCopiesRange(copies); cerr != nil {
+		return 0, cerr
+	}
+	return copies, nil
+}
+
+// validateCopiesRange enforces >=1/<=maxCopies, shared by both intake paths.
+func validateCopiesRange(copies int) *apperr.HTTPError {
+	if copies < 1 || copies > maxCopies {
+		return &apperr.HTTPError{
+			Status: http.StatusBadRequest,
+			Public: fmt.Sprintf("copies must be between 1 and %d", maxCopies),
+		}
+	}
+	return nil
+}
+
 type urlPrintRequest struct {
 	Printer string `json:"printer"`
 	FileURL string `json:"file_url"` // e.g. a presigned S3/MinIO URL, or any HTTP(S) URL
 	S3Key   string `json:"s3_key"`   // a key in the configured object store bucket
+
+	// Copies is a pointer so an omitted field (defaults to defaultCopies) is
+	// distinguishable from an explicit 0/negative (rejected below). JSON
+	// null is deliberately treated as omitted too, not rejected — encoding/json
+	// can't tell the two apart on a *int anyway (see
+	// TestPrintHandlerJSONCopiesNullIsAbsentDefault).
+	Copies *int `json:"copies"`
 }
 
-// Option 2: the caller sends only a reference — either a URL the server
-// fetches itself (file_url) or a key in the configured object store
-// (s3_key). Exactly one of the two must be set: file_url goes through
-// PrintURL's SSRF-guarded fetch, s3_key goes through PrintS3Key's
-// fixed-bucket download, and mixing them would leave one silently ignored.
+// handleURLReference handles option 2: the caller sends only a reference —
+// a URL the server fetches (file_url, SSRF-guarded) or a key in the
+// configured object store (s3_key). Exactly one of the two must be set.
 func (a *API) handleURLReference(w http.ResponseWriter, r *http.Request) {
 	var req urlPrintRequest
 	if err := decodeStrictJSON(r, &req); err != nil {
@@ -129,15 +174,23 @@ func (a *API) handleURLReference(w http.ResponseWriter, r *http.Request) {
 		a.fail(w, r, &apperr.HTTPError{Status: http.StatusBadRequest, Public: "s3_key must not contain path traversal segments"})
 		return
 	}
+	copies := defaultCopies
+	if req.Copies != nil {
+		if cerr := validateCopiesRange(*req.Copies); cerr != nil {
+			a.fail(w, r, cerr)
+			return
+		}
+		copies = *req.Copies
+	}
 
 	var (
 		result printgw.SubmitResult
 		err    error
 	)
 	if req.S3Key != "" {
-		result, err = a.svc.PrintS3Key(r.Context(), req.Printer, req.S3Key)
+		result, err = a.svc.PrintS3Key(r.Context(), req.Printer, req.S3Key, copies)
 	} else {
-		result, err = a.svc.PrintURL(r.Context(), req.Printer, req.FileURL)
+		result, err = a.svc.PrintURL(r.Context(), req.Printer, req.FileURL, copies)
 	}
 	if err != nil {
 		a.fail(w, r, err)
@@ -146,58 +199,25 @@ func (a *API) handleURLReference(w http.ResponseWriter, r *http.Request) {
 	a.writeSuccess(w, r, req.Printer, result)
 }
 
-// validObjectKey rejects a key that could address something outside the
-// one configured bucket via path traversal (e.g. "../other-bucket/x").
-// Shared by handleURLReference (s3_key) and presignHandler (key): both use
-// a caller-supplied key verbatim against the same fixed, server-credentialed
-// bucket.
-//
-// Verified live against a real MinIO instance that it independently rejects
-// this server-side (XMinioInvalidResourceName) — Go's net/http client sends
-// ".." in a URL path unnormalized, over the wire, exactly as given — but
-// that is one backend's behavior this service should not depend on for a
-// security property its own README claims ("a caller can at most read/write
-// within that one bucket, not escape it"). path.Clean resolves ".."/"."
-// segments the same way a filesystem would; a key that isn't already in
-// that clean form is rejected outright rather than silently normalized,
-// so there is no discrepancy between what a caller thinks they asked for
-// and what request actually reaches the store.
+// validObjectKey rejects a key that could escape the configured bucket via
+// path traversal (e.g. "../other-bucket/x"). Rejects outright rather than
+// normalizing via path.Clean, so what the caller sent and what reaches the
+// store never diverge.
 func validObjectKey(key string) bool {
 	return path.Clean("/"+key) == "/"+key
 }
 
 // decodeStrictJSON decodes exactly one JSON value from r.Body into v,
-// rejecting an unknown field and any trailing content after that value.
-// Both intakes that take a JSON body (handleURLReference, presignHandler)
-// use this rather than a bare json.Decode: a caller who mistypes "file_url"
-// as "fiel_url" would otherwise have the typo silently dropped and the
-// request fail downstream on the confusing-sounding "exactly one of
-// file_url or s3_key is required" instead of the actual mistake, and a
-// caller who accidentally concatenates two JSON bodies would have the
-// second one silently discarded instead of rejected.
-//
-// Two properties this does NOT enforce, verified empirically rather than
-// assumed: field-name matching stays case-insensitive ({"Printer":...}
-// still matches Printer string `json:"printer"`) since DisallowUnknownFields
-// inherits encoding/json's own case-insensitive matching rather than adding
-// stricter rules of its own, and a duplicate key ({"printer":"a","printer":
-// "b"}) is not rejected — encoding/json applies the last occurrence and
-// this function does nothing to change that. Only a genuinely unrecognized
-// field name and trailing content are rejected.
-//
-// The trailing-content check decodes a second value into a throwaway
-// json.RawMessage rather than calling Decoder.More (which only answers
-// "is there a next array/object element", not "is there more input at the
-// top level"): a second Decode call returns io.EOF when nothing but
-// whitespace remains, returns nil when it successfully parsed another JSON
-// value (reject), and returns any other error when what follows is present
-// but not valid JSON on its own (also reject, via that same error).
+// rejecting an unknown field (catches typo'd field names) and any trailing
+// content after that value (catches concatenated bodies).
 func decodeStrictJSON(r *http.Request, v any) error {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
 		return err
 	}
+	// A second Decode call is used rather than Decoder.More, which only
+	// answers "more in this array/object", not "more at the top level".
 	var extra json.RawMessage
 	switch err := dec.Decode(&extra); {
 	case errors.Is(err, io.EOF):
@@ -209,23 +229,25 @@ func decodeStrictJSON(r *http.Request, v any) error {
 	}
 }
 
-// bodyErr classifies an error from reading or decoding a request body.
-// what describes what was being parsed (e.g. "invalid JSON body"), matching
-// the message shape every call site already used before this existed.
-//
-// A *http.MaxBytesError — produced when the maxBytes middleware's
-// http.MaxBytesReader cuts a read short — means the client's own body
-// exceeded the configured limit, not that it was malformed; that is a 413
-// naming the limit, not the generic 400 every other parsing mistake here
-// gets. Without this, a caller hitting the size limit saw the same 400 as a
-// caller who sent garbage, with no way to tell the two apart from the
-// response alone.
+// bodyErr classifies an error from reading or decoding a request body. what
+// describes what was being parsed (e.g. "invalid JSON body").
 func bodyErr(err error, what string) *apperr.HTTPError {
 	var maxBytesErr *http.MaxBytesError
 	if errors.As(err, &maxBytesErr) {
+		// Distinguish "body too large" (413, names the limit) from an
+		// ordinary malformed body (400) — both would otherwise look the same.
 		return &apperr.HTTPError{
 			Status: http.StatusRequestEntityTooLarge,
 			Public: fmt.Sprintf("request body exceeds the %d byte limit", maxBytesErr.Limit),
+		}
+	}
+	var typeErr *json.UnmarshalTypeError
+	if errors.As(err, &typeErr) {
+		// Rebuild the message from Field/Value/Type: the error's own
+		// Error() string names the internal Go struct, not just the JSON tag.
+		return &apperr.HTTPError{
+			Status: http.StatusBadRequest,
+			Public: fmt.Sprintf("%s: field %q must be a %s, got %s", what, typeErr.Field, typeErr.Type, typeErr.Value),
 		}
 	}
 	return &apperr.HTTPError{Status: http.StatusBadRequest, Public: fmt.Sprintf("%s: %v", what, err)}

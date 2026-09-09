@@ -13,15 +13,10 @@ import (
 	"printgateway/internal/apperr"
 )
 
-// capturePath records the real spool file handed to fill. spoolTo passes the
-// *os.File itself as the io.Writer, so a test can learn the path even on the
-// paths where spoolTo returns "" — which is exactly the case that matters,
-// since that is when the file must have been removed.
-// It returns an error rather than calling t.Fatalf, and every caller inside a
-// fill closure returns that error: t.Fatalf runs runtime.Goexit, which would
-// unwind straight out of spoolTo — a function with no defers — leaving the
-// temp file open and unremoved (on Windows the handle is held until the test
-// binary exits). A failing assertion should not also leak.
+// capturePath records the real spool file handed to fill, letting a test learn
+// the path even when spoolTo returns "". Returns an error rather than calling
+// t.Fatalf: Fatalf's runtime.Goexit would unwind out of spoolTo (which has no
+// defers) leaving the temp file open on Windows.
 func capturePath(t *testing.T, w io.Writer) (string, error) {
 	t.Helper()
 	f, ok := w.(*os.File)
@@ -67,8 +62,6 @@ func TestSpoolToSuccess(t *testing.T) {
 		t.Errorf("returned path %q differs from the file fill was given (%q)", path, innerPath)
 	}
 
-	// The file must still be there when spoolTo returns: its whole purpose is
-	// to hand a readable path to the Submitter.
 	got, readErr := os.ReadFile(path)
 	if readErr != nil {
 		t.Fatalf("spooled file is not readable after spoolTo: %v", readErr)
@@ -77,9 +70,6 @@ func TestSpoolToSuccess(t *testing.T) {
 		t.Errorf("spooled content = %q, want %q", got, content)
 	}
 
-	// The name honors os.CreateTemp's pattern semantics — the "*" is where the
-	// random part goes, so the caller-supplied suffix survives and a job stays
-	// identifiable.
 	if base := filepath.Base(path); !strings.HasPrefix(base, "spool-success-") || !strings.HasSuffix(base, ".pdf") {
 		t.Errorf("spooled file name = %q, want the pattern's prefix and suffix preserved", base)
 	}
@@ -87,16 +77,13 @@ func TestSpoolToSuccess(t *testing.T) {
 	cleanup()
 	assertNotExist(t, path, "after cleanup")
 
-	// cleanup must tolerate a second call: PrintReader/PrintURL/PrintS3Key all
-	// `defer cleanup()` and some paths call it eagerly too, so it runs twice on
-	// every failure.
+	// cleanup must tolerate a second call: it runs twice on every failure path.
 	cleanup()
 	assertNotExist(t, path, "after a second cleanup")
 }
 
-// TestSpoolToRemovesTheFileWhenFillFails is the P0-3-adjacent invariant: a
-// document that could not be written completely must never be left on disk
-// where a later change might hand it to lp.
+// TestSpoolToRemovesTheFileWhenFillFails: a document that could not be written
+// completely must never be left on disk.
 func TestSpoolToRemovesTheFileWhenFillFails(t *testing.T) {
 	t.Parallel()
 
@@ -112,8 +99,6 @@ func TestSpoolToRemovesTheFileWhenFillFails(t *testing.T) {
 		if innerPath, capErr = capturePath(t, w); capErr != nil {
 			return capErr
 		}
-		// Write something first: the interesting case is a PARTIALLY written
-		// file, not an empty one.
 		if _, wErr := io.WriteString(w, "half a document"); wErr != nil {
 			return fmt.Errorf("writing to the spool file failed: %w", wErr)
 		}
@@ -121,9 +106,8 @@ func TestSpoolToRemovesTheFileWhenFillFails(t *testing.T) {
 	})
 	defer cleanup()
 
-	// fill's error is returned verbatim, not re-wrapped: the callers rely on
-	// this to pass an already-classified *apperr.HTTPError (a blocked SSRF
-	// target, a 404 object key) through with its own status intact.
+	// fill's error is returned verbatim, not re-wrapped: callers rely on this to
+	// pass an already-classified *apperr.HTTPError through with its status intact.
 	if err != fillErr { //nolint:errorlint // identity is the property under test
 		t.Errorf("spoolTo returned %#v, want fill's own error value", err)
 	}
@@ -136,11 +120,9 @@ func TestSpoolToRemovesTheFileWhenFillFails(t *testing.T) {
 	assertNotExist(t, innerPath, "after fill failed")
 }
 
-// TestSpoolToRejectsAPatternWithASeparator covers the os.CreateTemp failure
-// branch, and documents why sanitizeName exists: os.CreateTemp refuses any
-// pattern containing a path separator (os.IsPathSeparator accepts both "/"
-// and "\" on Windows), so an unsanitized caller-supplied filename reaching
-// the pattern is a 500, not a traversal.
+// TestSpoolToRejectsAPatternWithASeparator: os.CreateTemp refuses a pattern
+// containing a path separator, so an unsanitized filename reaching it is a 500,
+// not a traversal.
 func TestSpoolToRejectsAPatternWithASeparator(t *testing.T) {
 	t.Parallel()
 
@@ -171,8 +153,6 @@ func TestSpoolToRejectsAPatternWithASeparator(t *testing.T) {
 	if httpErr.Public != "internal server error" {
 		t.Errorf("public message = %q, want a generic one", httpErr.Public)
 	}
-	// The pattern reaches Internal (it may embed a caller-supplied filename)
-	// and must not reach the client.
 	if httpErr.Internal == nil {
 		t.Error("Internal is nil; the CreateTemp failure detail is what makes this diagnosable")
 	}
@@ -181,17 +161,10 @@ func TestSpoolToRejectsAPatternWithASeparator(t *testing.T) {
 	}
 }
 
-// TestSpoolToFailsWhenTheSpooledFileCannotBeSynced covers the Sync-error
-// branch, which is the whole reason spoolTo checks Sync at all (P0-3): on
-// ENOSPC a buffered write's failure often surfaces only here, never at the
-// earlier io.Copy, and an unchecked Sync means a truncated document gets
-// physically printed while the API answers 200 {"status":"submitted"}.
-//
-// ENOSPC cannot be provoked portably from a test. What CAN be provoked is the
-// same failure mode through a different cause: fill receives the real
-// *os.File, so a fill that closes it leaves Sync to fail with EBADF. The
-// cause differs; the branch, the status, and the cleanup obligation under
-// test are identical.
+// TestSpoolToFailsWhenTheSpooledFileCannotBeSynced covers the Sync-error branch
+// (see spoolTo's comment on why Sync is checked). ENOSPC can't be provoked
+// portably, so this triggers the same branch via a different cause: fill closes
+// the real *os.File first, leaving Sync to fail with EBADF.
 func TestSpoolToFailsWhenTheSpooledFileCannotBeSynced(t *testing.T) {
 	t.Parallel()
 
@@ -206,7 +179,6 @@ func TestSpoolToFailsWhenTheSpooledFileCannotBeSynced(t *testing.T) {
 		if _, wErr := io.WriteString(file, "a document"); wErr != nil {
 			return fmt.Errorf("writing to the spool file failed: %w", wErr)
 		}
-		// Leave the descriptor unusable, so the Sync that follows fails.
 		if cErr := file.Close(); cErr != nil {
 			return fmt.Errorf("closing the spool file failed: %w", cErr)
 		}
@@ -225,18 +197,12 @@ func TestSpoolToFailsWhenTheSpooledFileCannotBeSynced(t *testing.T) {
 	if !strings.Contains(httpErr.Internal.Error(), "syncing spooled file") {
 		t.Errorf("Internal = %v, want it to name the sync failure", httpErr.Internal)
 	}
-	// The half-written file is removed rather than left where a later change
-	// might pick it up.
 	assertNotExist(t, innerPath, "after sync failed")
 }
 
-// requireSpoolHTTPError is the local form of the classification assertion.
-// It differs from service_test.go's requireHTTPError by also pinning the
-// generic public message: every failure spoolTo produces is a server-side
-// fault whose detail (a filesystem path, a caller-supplied pattern) must stay
-// internal, so there is exactly one right answer here. The service-level
-// helper cannot assert that, because its callers legitimately surface a
-// caller-facing message that varies per case.
+// requireSpoolHTTPError also pins the generic public message: every failure
+// spoolTo produces is a server-side fault, unlike service_test.go's
+// requireHTTPError whose callers legitimately vary their public message.
 func requireSpoolHTTPError(t *testing.T, err error, wantStatus int) *apperr.HTTPError {
 	t.Helper()
 	if err == nil {
@@ -258,22 +224,13 @@ func requireSpoolHTTPError(t *testing.T, err error, wantStatus int) *apperr.HTTP
 	return httpErr
 }
 
-// spoolTo's tmp.Close() error branch (the one AFTER a successful Sync) is the
-// one statement pair in this package left uncovered. It is NOT unreachable —
-// an earlier draft of this comment claimed that, and it is wrong in a way
-// that could get a correct branch deleted. close(2) can return EIO or ENOSPC
-// after a successful fsync on NFS and CIFS, where delayed write-back errors
-// are reported at close; that is live whenever TMPDIR is a network mount,
-// which is not exotic for a print spooler.
-//
-// What is true is that it is not provokable PORTABLY from a test: every
-// locally-producible state that makes Close fail (a closed or invalid
-// descriptor) also makes the preceding Sync fail, so control lands in the
-// Sync branch instead — verified, that is exactly where the
-// fill-closes-the-file route above goes. Closing the gap would need a seam in
-// production code (an overridable syncFile/closeFile func var), which is a
-// change to make deliberately, not as a side effect of chasing a coverage
-// number.
+// spoolTo's tmp.Close() error branch (after a successful Sync) is left uncovered
+// deliberately: it is reachable in production (close(2) can report a delayed
+// write-back error via EIO/ENOSPC on NFS/CIFS after a successful fsync), but not
+// provokable portably from a test — every locally-producible Close failure also
+// fails the preceding Sync. Closing the gap needs a production seam (an
+// overridable syncFile/closeFile func var), a deliberate change, not a side effect
+// of chasing coverage.
 
 func TestSanitizeName(t *testing.T) {
 	t.Parallel()
@@ -293,9 +250,8 @@ func TestSanitizeName(t *testing.T) {
 		{"leading and trailing", " /x/ ", "__x__"},
 		{"absolute posix path", "/etc/passwd", "_etc_passwd"},
 		{"absolute windows path", `C:\Windows\System32\x`, "C:_Windows_System32_x"},
-		// Dot segments are left alone on purpose: with every separator gone
-		// they cannot form a traversal, and os.CreateTemp treats them as
-		// ordinary name characters.
+		// Dot segments are left alone: with every separator gone they cannot form
+		// a traversal.
 		{"dot segments are harmless once separators are gone", "../../etc/passwd", ".._.._etc_passwd"},
 		{"non-ASCII is preserved", "חשבון.pdf", "חשבון.pdf"},
 		{"tab and newline are not touched", "a\tb\nc", "a\tb\nc"},
@@ -311,17 +267,10 @@ func TestSanitizeName(t *testing.T) {
 	}
 }
 
-// TestSanitizeNameOutputIsAlwaysAUsableTempPattern is the property that
-// matters, asserted against the real os.CreateTemp rather than by inspecting
-// the string: whatever a caller names their upload, the sanitized form must be
-// a legal pattern. sanitizeName replaces both "/" and "\" specifically because
-// os.IsPathSeparator accepts both on Windows.
-//
-// Creation happens in t.TempDir(), not os.TempDir(): os.CreateTemp's pattern
-// validation is directory-independent, so the property under test is
-// unchanged, and the testing package then removes everything afterwards. That
-// matters more than tidiness here — see the Windows note below, where one of
-// these names produces a file this test could not reliably remove on its own.
+// TestSanitizeNameOutputIsAlwaysAUsableTempPattern asserts against the real
+// os.CreateTemp, in t.TempDir() rather than os.TempDir() so the testing package
+// cleans up afterwards — see the Windows note below, where one of these names
+// produces a file this test could not reliably remove on its own.
 func TestSanitizeNameOutputIsAlwaysAUsableTempPattern(t *testing.T) {
 	t.Parallel()
 
@@ -339,16 +288,13 @@ func TestSanitizeNameOutputIsAlwaysAUsableTempPattern(t *testing.T) {
 		t.Run(fmt.Sprintf("%d", i), func(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
-			// Same shape PrintReader builds.
-			pattern := "print-upload-*-" + sanitizeName(name)
+			pattern := "print-upload-*-" + sanitizeName(name) // same shape PrintReader builds
 			f, err := os.CreateTemp(dir, pattern)
 			if err != nil {
 				t.Fatalf("os.CreateTemp rejected the sanitized pattern for %q: %v", name, err)
 			}
 			defer f.Close()
 
-			// The file really landed in the directory given, not anywhere the
-			// original name pointed at.
 			if got := filepath.Dir(f.Name()); got != filepath.Clean(dir) {
 				t.Errorf("spool file for %q landed in %q, want %q", name, got, dir)
 			}
@@ -356,17 +302,9 @@ func TestSanitizeNameOutputIsAlwaysAUsableTempPattern(t *testing.T) {
 	}
 }
 
-// Windows note, observed while writing the test above and worth recording
-// because it is invisible on the deployment platform: sanitizeName does NOT
-// replace ":", so on Windows `C:\Program Files\evil.pdf` sanitizes to
-// "C:_Program_Files_evil.pdf" and os.CreateTemp then creates an NTFS
-// *alternate data stream* — a base file "print-upload-<rand>-C" carrying a
-// stream named "_Program_Files_evil.pdf". os.Remove on the full name deletes
-// only the stream, so spoolTo's cleanup would leave a zero-byte base file
-// behind on every such request.
-//
-// Deliberately NOT treated as a defect to fix here: printgateway runs where
-// CUPS runs (Linux/WSL — see CLAUDE.md), and on Linux ":" is an ordinary
-// filename character with none of this behavior. Recorded as a follow-up
-// rather than papered over, since it would become real if this service ever
-// spooled on Windows.
+// Windows note: sanitizeName does not replace ":", so on Windows
+// `C:\Program Files\evil.pdf` sanitizes to "C:_Program_Files_evil.pdf" and
+// os.CreateTemp creates an NTFS alternate data stream — spoolTo's cleanup then
+// leaves a zero-byte base file behind. Not fixed here: printgateway runs on
+// Linux/WSL (see CLAUDE.md), where ":" is an ordinary filename character; this
+// would only become real if the service ever spooled on Windows.

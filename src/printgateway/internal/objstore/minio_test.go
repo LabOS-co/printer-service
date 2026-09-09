@@ -17,20 +17,16 @@ import (
 )
 
 // fakeObject is the cloud_storage.CloudStorageObject fakeClient.GetObject
-// hands back. MinIO.Get does nothing with it beyond passing it through, so
-// there is nothing to assert about its behavior here — only that the exact
-// value the client returned comes back out of Get unchanged.
+// hands back; MinIO.Get passes it through unchanged.
 type fakeObject struct {
 	io.Reader
 }
 
 func (fakeObject) Close() error { return nil }
 
-// fakeClient implements cloud_storage.CloudStorageStreamingClient.
-// objstore.MinIO only ever calls GetObject/PresignGetURL/PresignPutURL, so
-// every other method panics if invoked — a call there would mean MinIO
-// started depending on a capability neither this package nor printgw's own
-// ObjectStore/httpapi.Presigner ports currently need.
+// fakeClient implements cloud_storage.CloudStorageStreamingClient. MinIO
+// only calls GetObject/PresignGetURL/PresignPutURL, so every other method
+// panics if invoked.
 type fakeClient struct {
 	getObjectResult cloud_storage.CloudStorageObject
 	getObjectSize   int64
@@ -136,12 +132,8 @@ func (f *fakeClient) DeleteObject(ctx context.Context, key string) error {
 
 var _ cloud_storage.CloudStorageStreamingClient = (*fakeClient)(nil)
 
-// ctxKey distinguishes a test's ctx from context.Background() itself.
-// context.Background() returns the same singleton on every call, so
-// asserting `gotCtx != context.Background()` would still pass against a
-// mutant that discarded the caller's ctx and substituted its own
-// context.Background() — the comparison needs a ctx no code under test could
-// plausibly reconstruct.
+// ctxKey builds a distinguishable ctx, so a test can prove the caller's ctx
+// was passed through rather than replaced with a fresh context.Background().
 type ctxKey struct{}
 
 func probeCtx() context.Context {
@@ -326,12 +318,8 @@ func TestPresignPutError(t *testing.T) {
 	}
 }
 
-// TestNewRejectsIncompleteSettings covers New's own responsibility — passing
-// settings through to cloud_storage.NewS3 — without needing a reachable S3
-// endpoint: NewS3 validates its arguments before constructing anything, and
-// the only network-capable call it makes is minio.New, which builds a client
-// value locally and does not itself dial out (verified by reading
-// s3_client.go — NewS3 carries no doc comment of its own on this point).
+// TestNewRejectsIncompleteSettings needs no reachable S3 endpoint: NewS3
+// validates its arguments before constructing a client or dialing out.
 func TestNewRejectsIncompleteSettings(t *testing.T) {
 	t.Parallel()
 
@@ -353,17 +341,9 @@ func TestNewBuildsAStoreOnValidSettings(t *testing.T) {
 	}
 }
 
-// capturingLogger records NewS3's own startup lines — the only externally
-// observable evidence of how New mapped its positional arguments onto
-// cloud_storage.CloudStorageSettings, since New has no seam of its own (it
-// calls the concrete cloud_storage.NewS3 directly, unlike MinIO.client,
-// which is an injectable interface field). NewS3 always logs
-// "Initializing S3 client with url '%s' and bucket '%s'" and, only when
-// Insecure is set, a separate loud warning — together those catch a
-// url/bucket transposition and a wrong/inverted Insecure value, both
-// realistic mistakes given New's 8 positional, mostly-string parameters.
-// Credentials and Region are never logged by NewS3, so a transposed
-// accessKey/secretKey or a dropped Region stays unverifiable from here.
+// capturingLogger records NewS3's startup log lines, the only observable
+// evidence of how New mapped its positional arguments onto
+// cloud_storage.CloudStorageSettings (New has no injectable seam of its own).
 type capturingLogger struct {
 	logs.LoggerMock
 	infos []string
@@ -388,14 +368,11 @@ func TestNewPassesURLBucketAndInsecureThrough(t *testing.T) {
 			}
 
 			all := strings.Join(log.infos, "\n")
-			// Positional, not just "both substrings present somewhere":
-			// catches a url<->bucket transposition, not only a dropped one.
 			if !strings.Contains(all, `url 'localhost:9000' and bucket 'my-bucket'`) {
 				t.Errorf("url/bucket not mapped as expected; NewS3 logged:\n%s", all)
 			}
 			if got := strings.Contains(all, "Insecure=true"); got != insecure {
-				t.Errorf("insecure=%v but the Insecure=true warning present=%v — New must not "+
-					"invert or hardcode Insecure; a wrong value here silently drops TLS", insecure, got)
+				t.Errorf("insecure=%v but the Insecure=true warning present=%v", insecure, got)
 			}
 		})
 	}

@@ -10,11 +10,10 @@ import (
 	"printgateway/internal/apperr"
 )
 
-// spoolTo creates a new temp file matching namePattern (same semantics as
-// os.CreateTemp), lets fill write the document into it, and returns its
-// path plus a cleanup func that removes it. cleanup is never nil: the
-// caller can always `defer cleanup()` unconditionally, whether or not err
-// is nil.
+// spoolTo creates a new temp file matching namePattern (os.CreateTemp semantics),
+// lets fill write the document into it, and returns its path plus a cleanup func
+// that removes it. cleanup is never nil, so callers can always `defer cleanup()`
+// unconditionally.
 func spoolTo(namePattern string, fill func(io.Writer) error) (path string, cleanup func(), err error) {
 	tmp, err := os.CreateTemp("", namePattern)
 	if err != nil {
@@ -32,11 +31,8 @@ func spoolTo(namePattern string, fill func(io.Writer) error) (path string, clean
 		return "", cleanup, fillErr
 	}
 
-	// Sync before Close: on ENOSPC a buffered write's failure often only
-	// surfaces here (or at Close), not at the earlier io.Copy — and both
-	// PrintReader and PrintURL spool through this one function, so this is
-	// the single site that must catch it (P0-3). Left unchecked, a
-	// truncated file gets physically printed while this reports success.
+	// Sync before Close: on ENOSPC a buffered write can fail silently at Close
+	// instead of at the earlier io.Copy, which would otherwise print a truncated file.
 	if syncErr := tmp.Sync(); syncErr != nil {
 		tmp.Close()
 		cleanup()

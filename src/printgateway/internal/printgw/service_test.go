@@ -3,6 +3,7 @@ package printgw
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"net/http"
 	"os"
@@ -14,16 +15,9 @@ import (
 	"printgateway/internal/apperr"
 )
 
-// testTimeouts are long enough never to fire incidentally — the cases that
-// are actually about a deadline set their own short value, so a slow machine
-// can never turn a behavior test into a timeout test.
-//
-// The three are deliberately far APART, not merely non-zero. With
-// assertDeadlineWithin's CI slack, three equal values make a Fetch/S3/Submit
-// mispairing in service.go invisible (confirmed by mutation: getObject using
-// timeouts.Fetch, and fetch using timeouts.S3, both survived a suite where
-// these were all 30s) — which is precisely the swap the named Timeouts struct
-// was introduced to prevent.
+// testTimeouts are long enough never to fire incidentally; deadline-specific cases
+// set their own short value. The three values are kept far apart so a Fetch/S3/Submit
+// mispairing in service.go can't hide behind assertDeadlineWithin's CI slack.
 var testTimeouts = Timeouts{
 	Submit: 30 * time.Second,
 	Fetch:  10 * time.Minute,
@@ -32,27 +26,22 @@ var testTimeouts = Timeouts{
 
 const testS3Max = 1 << 20
 
-// uniqueName derives a spool-file name component unique to the calling test,
-// so assertNoSpoolFilesMatching can glob for this test's files alone. The
-// package's temp directory is shared with every other parallel subtest, and
-// PrintURL's own spool pattern is a fixed string, so this is the handle that
-// makes leak assertions safe to parallelize.
+// uniqueName derives a spool-file name unique to the calling test, so
+// assertNoSpoolFilesMatching can glob for this test's files alone in a temp
+// directory shared with every parallel subtest.
 func uniqueName(t *testing.T) string {
 	t.Helper()
 	name := sanitizeName(strings.ReplaceAll(t.Name(), "/", "-")) + ".pdf"
-	// A glob metacharacter surviving into the name would make
-	// assertNoSpoolFilesMatching either match nothing (silently vacuous
-	// forever) or fail with ErrBadPattern. Subtest names come from table rows,
-	// so that is one rename away; fail loudly instead of quietly.
+	// A glob metacharacter here would make assertNoSpoolFilesMatching silently
+	// match nothing instead of failing loudly.
 	if strings.ContainsAny(name, `*?[]`) {
 		t.Fatalf("test name %q yields a glob-unsafe spool name %q; rename the subtest", t.Name(), name)
 	}
 	return name
 }
 
-// assertNoSpoolFilesMatching fails if any file matching pattern survives in
-// the temp directory. pattern must be unique to the calling test — see
-// uniqueName — which is also what makes watchSpoolFiles' up-front sweep safe.
+// assertNoSpoolFilesMatching fails if any file matching pattern survives in the
+// temp directory. pattern must be unique to the calling test — see uniqueName.
 func assertNoSpoolFilesMatching(t *testing.T, pattern string) {
 	t.Helper()
 	matches := spoolFilesMatching(t, pattern)
@@ -65,26 +54,14 @@ func spoolFilesMatching(t *testing.T, pattern string) []string {
 	t.Helper()
 	matches, err := filepath.Glob(filepath.Join(os.TempDir(), pattern))
 	if err != nil {
-		// Only ErrBadPattern is possible here; uniqueName's guard should have
-		// prevented it, so reaching this means that guard has a hole.
 		t.Fatalf("globbing %q: %v", pattern, err)
 	}
 	return matches
 }
 
-// watchSpoolFiles makes a leak assertion survive a previously crashed run.
-//
-// The temp directory is shared and persistent, so a run that panicked or hit
-// the go test timeout leaves spool files behind — and because the name is
-// unique per test, every LATER run of that test then fails on files it did
-// not create. That was not hypothetical: mutation-testing this package left
-// exactly such orphans (a mutant that removed submit's timeout made a
-// blocking test hang to the test binary's deadline), and the next clean run
-// reported four spurious leaks.
-//
-// Anything already matching is stale by definition — only one instance of a
-// given test runs at a time — so it is swept first, and the assertion is
-// registered via t.Cleanup so it still runs if the body returns early.
+// watchSpoolFiles sweeps any stale files left by a previously crashed/timed-out run
+// (the shared temp directory is persistent) before registering the leak assertion
+// via t.Cleanup, so it still runs if the body returns early.
 func watchSpoolFiles(t *testing.T, pattern string) {
 	t.Helper()
 	for _, stale := range spoolFilesMatching(t, pattern) {
@@ -95,11 +72,8 @@ func watchSpoolFiles(t *testing.T, pattern string) {
 	t.Cleanup(func() { assertNoSpoolFilesMatching(t, pattern) })
 }
 
-// assertDeadlineWithin checks that a deadline observed by a fake was derived
-// from want, without depending on how long the test took to get there. The
-// deadline is set to time.Now()+want inside Service, at some point after
-// start, so the gap can only be >= want; the generous upper bound keeps a
-// loaded CI machine from failing this.
+// assertDeadlineWithin checks that a deadline observed by a fake was derived from
+// want. The upper bound is generous to tolerate a loaded CI machine.
 func assertDeadlineWithin(t *testing.T, label string, start time.Time, got time.Time, want time.Duration) {
 	t.Helper()
 	gap := got.Sub(start)
@@ -136,9 +110,6 @@ func TestPrintReaderSubmitsTheSpooledUpload(t *testing.T) {
 
 	var seenPath, seenContent string
 	sub.inspect = func(job SubmitJob) {
-		// Read the file at submission time: this is the only moment it exists,
-		// and it is what proves the document really reached disk before lp
-		// would have been handed the path.
 		seenPath = job.Path
 		b, err := os.ReadFile(job.Path)
 		if err != nil {
@@ -149,7 +120,7 @@ func TestPrintReaderSubmitsTheSpooledUpload(t *testing.T) {
 	}
 
 	svc := NewService(sub, nil, nil, testTimeouts, testS3Max)
-	res, err := svc.PrintReader(context.Background(), "q-hp", "invoice.pdf", strings.NewReader(content))
+	res, err := svc.PrintReader(context.Background(), "q-hp", "invoice.pdf", strings.NewReader(content), 1)
 	if err != nil {
 		t.Fatalf("PrintReader returned an unexpected error: %v", err)
 	}
@@ -172,13 +143,24 @@ func TestPrintReaderSubmitsTheSpooledUpload(t *testing.T) {
 		t.Error("Path is empty; the submitter has nothing to open")
 	}
 
-	// The temp file is gone once PrintReader returns. Cleanup on the SUCCESS
-	// path is not itself P0-1 — that defect was `defer cleanup()` never
-	// running because a wedged lp hung the handler forever (see
-	// TestPrintReaderBoundsTheSubmitCall for the leak under timeout) — but it
-	// is the same obligation, and a per-request file that is never reclaimed
-	// fills the disk either way.
 	assertNotExist(t, seenPath, "after PrintReader returned")
+}
+
+// TestPrintReaderThreadsCopiesThroughToSubmitJob uses a non-default copies value
+// (3), since 1 would pass even if PrintReader silently dropped the argument.
+func TestPrintReaderThreadsCopiesThroughToSubmitJob(t *testing.T) {
+	t.Parallel()
+
+	sub := &fakeSubmitter{result: SubmitResult{Output: "ok"}}
+	svc := NewService(sub, nil, nil, testTimeouts, testS3Max)
+
+	if _, err := svc.PrintReader(context.Background(), "q", "doc.pdf", strings.NewReader("x"), 3); err != nil {
+		t.Fatalf("PrintReader returned an unexpected error: %v", err)
+	}
+
+	if job := sub.lastJob(); job.Copies != 3 {
+		t.Errorf("Copies = %d, want 3", job.Copies)
+	}
 }
 
 func TestPrintReaderSanitizesTheFilename(t *testing.T) {
@@ -187,9 +169,7 @@ func TestPrintReaderSanitizesTheFilename(t *testing.T) {
 	sub := &fakeSubmitter{}
 	svc := NewService(sub, nil, nil, testTimeouts, testS3Max)
 
-	// A caller-supplied name with separators must not reach os.CreateTemp's
-	// pattern (it would fail outright) nor lp's -t argument unsanitized.
-	if _, err := svc.PrintReader(context.Background(), "q", `../../etc/my file.pdf`, strings.NewReader("x")); err != nil {
+	if _, err := svc.PrintReader(context.Background(), "q", `../../etc/my file.pdf`, strings.NewReader("x"), 1); err != nil {
 		t.Fatalf("PrintReader returned an unexpected error: %v", err)
 	}
 
@@ -200,13 +180,8 @@ func TestPrintReaderSanitizesTheFilename(t *testing.T) {
 	if strings.ContainsAny(filepath.Base(job.Path), `/\`) {
 		t.Errorf("spool file name %q contains a path separator", filepath.Base(job.Path))
 	}
-	// Load-bearing for other tests, not cosmetic: every
-	// assertNoSpoolFilesMatching in this file globs on the sanitized name
-	// being part of the spool pattern. If PrintReader's pattern ever dropped
-	// it, those globs would match nothing and pass forever — four leak
-	// assertions going vacuous at once, with no test failing. Confirmed by
-	// mutation: without this line, changing the pattern to "print-upload-*"
-	// survives the whole suite.
+	// Load-bearing for other tests: every assertNoSpoolFilesMatching in this file
+	// globs on the sanitized name being part of the spool pattern.
 	if base := filepath.Base(job.Path); !strings.HasSuffix(base, ".._.._etc_my_file.pdf") {
 		t.Errorf("spool file name = %q, want it to end in the sanitized filename", base)
 	}
@@ -221,7 +196,7 @@ func TestPrintReaderSpoolFailureNeverReachesTheSubmitter(t *testing.T) {
 	svc := NewService(sub, nil, nil, testTimeouts, testS3Max)
 
 	readErr := errors.New("connection reset mid-upload")
-	_, err := svc.PrintReader(context.Background(), "q", name, &failingReader{err: readErr})
+	_, err := svc.PrintReader(context.Background(), "q", name, &failingReader{err: readErr}, 1)
 
 	httpErr := requireHTTPError(t, err, http.StatusInternalServerError)
 	if httpErr.Public != "internal server error" {
@@ -230,8 +205,6 @@ func TestPrintReaderSpoolFailureNeverReachesTheSubmitter(t *testing.T) {
 	if !errors.Is(err, readErr) {
 		t.Error("the underlying read error is not reachable through Internal")
 	}
-	// The reader's error text could name anything about the transport; it must
-	// stay out of what the client sees.
 	if strings.Contains(httpErr.Public, "connection reset") {
 		t.Errorf("public message %q leaks the internal detail", httpErr.Public)
 	}
@@ -244,8 +217,6 @@ func TestPrintReaderSpoolFailureNeverReachesTheSubmitter(t *testing.T) {
 func TestPrintReaderPropagatesTheSubmitterError(t *testing.T) {
 	t.Parallel()
 
-	// cups.LPSubmitter classifies its own failures; Service must hand them
-	// back untouched rather than re-wrapping and re-classifying.
 	submitErr := &apperr.HTTPError{
 		Status:   http.StatusGatewayTimeout,
 		Public:   "print submission timed out",
@@ -254,24 +225,16 @@ func TestPrintReaderPropagatesTheSubmitterError(t *testing.T) {
 	sub := &fakeSubmitter{err: submitErr}
 	svc := NewService(sub, nil, nil, testTimeouts, testS3Max)
 
-	_, err := svc.PrintReader(context.Background(), "q", "x.pdf", strings.NewReader("x"))
+	_, err := svc.PrintReader(context.Background(), "q", "x.pdf", strings.NewReader("x"), 1)
 	if err != submitErr { //nolint:errorlint // identity is the property under test
 		t.Errorf("error = %#v, want the submitter's own error value", err)
 	}
 }
 
-// TestPrintReaderClassifiesAnUnwrappedSubmitterError is the sibling of
-// TestPrintReaderPropagatesTheSubmitterError: when the Submitter returns a
+// TestPrintReaderClassifiesAnUnwrappedSubmitterError covers a Submitter returning a
 // plain error (not an *apperr.HTTPError) — unreachable through the real
-// cups.LPSubmitter today, since it always classifies its own failures, but
-// not something the interface itself rules out — Service.submit must
-// re-wrap it into a generic *apperr.HTTPError rather than handing the raw
-// text upward. Not pinned anywhere else in the repo: an Opus review of the
-// A8 httpapi stage found removing this re-wrap (submit's return statement
-// reduced to `return s.submitter.Submit(ctx, job)`) survived every test in
-// both this package and httpapi, since the leak-regression test there
-// happens to use exactly this shape of fake and would still not leak (via
-// httpapi.fail's own, separate `!matched` fallback) even without it.
+// cups.LPSubmitter, which always classifies its own failures, but still an
+// interface-level case Service.submit must re-wrap rather than pass through raw.
 func TestPrintReaderClassifiesAnUnwrappedSubmitterError(t *testing.T) {
 	t.Parallel()
 
@@ -279,7 +242,7 @@ func TestPrintReaderClassifiesAnUnwrappedSubmitterError(t *testing.T) {
 	sub := &fakeSubmitter{err: rawErr}
 	svc := NewService(sub, nil, nil, testTimeouts, testS3Max)
 
-	_, err := svc.PrintReader(context.Background(), "q", "x.pdf", strings.NewReader("x"))
+	_, err := svc.PrintReader(context.Background(), "q", "x.pdf", strings.NewReader("x"), 1)
 
 	var httpErr *apperr.HTTPError
 	if !errors.As(err, &httpErr) {
@@ -292,14 +255,12 @@ func TestPrintReaderClassifiesAnUnwrappedSubmitterError(t *testing.T) {
 		t.Errorf("Public = %q, want a generic message with no filesystem/subprocess detail", httpErr.Public)
 	}
 	if !errors.Is(httpErr.Internal, rawErr) {
-		t.Errorf("Internal = %v, want it to wrap the submitter's original error (an operator still needs this detail in the log)", httpErr.Internal)
+		t.Errorf("Internal = %v, want it to wrap the submitter's original error", httpErr.Internal)
 	}
 }
 
-// TestPrintReaderBoundsTheSubmitCall is the P0-1 headline test: a wedged CUPS
-// queue must fail the request at SubmitTimeout instead of hanging the handler
-// goroutine forever, leaking the goroutine, the lp process, the temp file and
-// the client connection, permanently, per request.
+// TestPrintReaderBoundsTheSubmitCall: a wedged CUPS queue must fail at SubmitTimeout
+// instead of hanging the handler goroutine forever.
 func TestPrintReaderBoundsTheSubmitCall(t *testing.T) {
 	t.Parallel()
 
@@ -310,7 +271,7 @@ func TestPrintReaderBoundsTheSubmitCall(t *testing.T) {
 	svc := NewService(sub, nil, nil, Timeouts{Submit: submitTimeout, Fetch: time.Minute, S3: time.Minute}, testS3Max)
 
 	start := time.Now()
-	_, err := svc.PrintReader(context.Background(), "q", name, strings.NewReader("x"))
+	_, err := svc.PrintReader(context.Background(), "q", name, strings.NewReader("x"), 1)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -322,8 +283,6 @@ func TestPrintReaderBoundsTheSubmitCall(t *testing.T) {
 	if elapsed < submitTimeout {
 		t.Errorf("returned after %s, want at least the %s submit timeout", elapsed, submitTimeout)
 	}
-	// Generous: the point is that it returns at all, in the order of the
-	// timeout rather than of the (unbounded) submitter.
 	if elapsed > 10*time.Second {
 		t.Errorf("returned after %s, want roughly %s", elapsed, submitTimeout)
 	}
@@ -332,8 +291,6 @@ func TestPrintReaderBoundsTheSubmitCall(t *testing.T) {
 		t.Fatalf("submitter saw %d deadlines, want 1 — Service must bound every Submit call", len(sub.deadlines))
 	}
 	assertDeadlineWithin(t, "submit", start, sub.deadlines[0], submitTimeout)
-
-	// The spool file is reclaimed even though the submission failed.
 }
 
 func TestPrintReaderHonorsACancelledCallerContext(t *testing.T) {
@@ -347,10 +304,7 @@ func TestPrintReaderHonorsACancelledCallerContext(t *testing.T) {
 	sub := &fakeSubmitter{}
 	svc := NewService(sub, nil, nil, testTimeouts, testS3Max)
 
-	// Spooling still happens (it does not consult ctx), but the submit must
-	// see the cancellation — Service derives its bounded context FROM the
-	// caller's, so a client that disconnected does not get a print anyway.
-	if _, err := svc.PrintReader(ctx, "q", name, strings.NewReader("x")); err == nil {
+	if _, err := svc.PrintReader(ctx, "q", name, strings.NewReader("x"), 1); err == nil {
 		t.Error("PrintReader returned nil for a cancelled context")
 	}
 }
@@ -376,7 +330,7 @@ func TestPrintURLSubmitsTheFetchedDocument(t *testing.T) {
 
 	svc := NewService(sub, fetcher, nil, testTimeouts, testS3Max)
 	start := time.Now()
-	res, err := svc.PrintURL(context.Background(), "q-canon", "https://example.com/a.pdf")
+	res, err := svc.PrintURL(context.Background(), "q-canon", "https://example.com/a.pdf", 1)
 	if err != nil {
 		t.Fatalf("PrintURL returned an unexpected error: %v", err)
 	}
@@ -395,9 +349,6 @@ func TestPrintURLSubmitsTheFetchedDocument(t *testing.T) {
 	if job.Printer != "q-canon" {
 		t.Errorf("Printer = %q, want %q", job.Printer, "q-canon")
 	}
-	// A fixed title, not the URL: the URL can be arbitrarily long and carry a
-	// query string full of credentials (a presigned link), neither of which
-	// belongs in lpstat.
 	if job.Title != "download" {
 		t.Errorf("Title = %q, want %q", job.Title, "download")
 	}
@@ -410,6 +361,24 @@ func TestPrintURLSubmitsTheFetchedDocument(t *testing.T) {
 	assertNotExist(t, fetcher.dstPath(), "after PrintURL returned")
 }
 
+// TestPrintURLThreadsCopiesThroughToSubmitJob is PrintReader's twin for the
+// file_url intake path.
+func TestPrintURLThreadsCopiesThroughToSubmitJob(t *testing.T) {
+	t.Parallel()
+
+	fetcher := &fakeFetcher{body: []byte("%PDF-1.4")}
+	sub := &fakeSubmitter{result: SubmitResult{Output: "ok"}}
+	svc := NewService(sub, fetcher, nil, testTimeouts, testS3Max)
+
+	if _, err := svc.PrintURL(context.Background(), "q", "https://example.com/a.pdf", 3); err != nil {
+		t.Fatalf("PrintURL returned an unexpected error: %v", err)
+	}
+
+	if job := sub.lastJob(); job.Copies != 3 {
+		t.Errorf("Copies = %d, want 3", job.Copies)
+	}
+}
+
 func TestPrintURLClassifiesFetchFailures(t *testing.T) {
 	t.Parallel()
 
@@ -420,17 +389,14 @@ func TestPrintURLClassifiesFetchFailures(t *testing.T) {
 		wantPublic string
 	}{
 		{
-			// A transport failure carries no status of its own, so Service
-			// supplies 502: the gateway could not reach the upstream.
 			name:       "an unclassified error becomes 502",
 			fetchErr:   errors.New("dial tcp 93.184.216.34:443: i/o timeout"),
 			wantStatus: http.StatusBadGateway,
 			wantPublic: "failed to download file_url",
 		},
 		{
-			// The A5 behavior: fetch.SafeFetcher already classified this as a
-			// caller mistake. Collapsing it to 502 would tell the caller the
-			// gateway is broken when in fact their URL was rejected.
+			// fetch.SafeFetcher already classified this as a caller mistake, not a
+			// gateway failure; collapsing it to 502 would misdirect the caller.
 			name: "a blocked SSRF target stays a 400",
 			fetchErr: &apperr.HTTPError{
 				Status:   http.StatusBadRequest,
@@ -468,7 +434,7 @@ func TestPrintURLClassifiesFetchFailures(t *testing.T) {
 			sub := &fakeSubmitter{}
 			svc := NewService(sub, fetcher, nil, testTimeouts, testS3Max)
 
-			_, err := svc.PrintURL(context.Background(), "q", "https://example.com/a.pdf")
+			_, err := svc.PrintURL(context.Background(), "q", "https://example.com/a.pdf", 1)
 			httpErr := requireHTTPError(t, err, tt.wantStatus)
 			if httpErr.Public != tt.wantPublic {
 				t.Errorf("public message = %q, want %q", httpErr.Public, tt.wantPublic)
@@ -481,9 +447,8 @@ func TestPrintURLClassifiesFetchFailures(t *testing.T) {
 	}
 }
 
-// TestPrintURLPartialFetchLeavesNothingBehind is the invariant the plan names
-// explicitly: a fetch that fails AFTER writing some bytes must remove the
-// half-written file and never invoke lp on it.
+// TestPrintURLPartialFetchLeavesNothingBehind: a fetch that fails after writing
+// some bytes must remove the half-written file and never invoke lp on it.
 func TestPrintURLPartialFetchLeavesNothingBehind(t *testing.T) {
 	t.Parallel()
 
@@ -495,7 +460,7 @@ func TestPrintURLPartialFetchLeavesNothingBehind(t *testing.T) {
 	sub := &fakeSubmitter{}
 	svc := NewService(sub, fetcher, nil, testTimeouts, testS3Max)
 
-	_, err := svc.PrintURL(context.Background(), "q", "https://example.com/a.pdf")
+	_, err := svc.PrintURL(context.Background(), "q", "https://example.com/a.pdf", 1)
 	requireHTTPError(t, err, http.StatusBadGateway)
 
 	if sub.called() {
@@ -504,12 +469,9 @@ func TestPrintURLPartialFetchLeavesNothingBehind(t *testing.T) {
 	assertNotExist(t, fetcher.dstPath(), "after a partial fetch failed")
 }
 
-// TestPrintURLHonorsACancelledCallerContext is PrintReader's twin for the
-// download path. Without it, Service.fetch deriving its bounded context from
-// context.Background() instead of the caller's survives the whole suite
-// (confirmed by mutation) — and the consequence is concrete: a client that
-// disconnects leaves a 64 MiB file_url download running to completion, per
-// abandoned request.
+// TestPrintURLHonorsACancelledCallerContext is PrintReader's twin for the download
+// path: Service.fetch must derive its bounded context from the caller's, or an
+// abandoned request's download keeps running to completion.
 func TestPrintURLHonorsACancelledCallerContext(t *testing.T) {
 	t.Parallel()
 
@@ -520,7 +482,7 @@ func TestPrintURLHonorsACancelledCallerContext(t *testing.T) {
 	sub := &fakeSubmitter{}
 	svc := NewService(sub, fetcher, nil, testTimeouts, testS3Max)
 
-	_, err := svc.PrintURL(ctx, "q", "https://example.com/a.pdf")
+	_, err := svc.PrintURL(ctx, "q", "https://example.com/a.pdf", 1)
 	if err == nil {
 		t.Fatal("PrintURL returned nil for a cancelled context")
 	}
@@ -536,11 +498,9 @@ func TestPrintURLHonorsACancelledCallerContext(t *testing.T) {
 	assertNotExist(t, fetcher.dstPath(), "after a cancelled fetch")
 }
 
-// TestPrintURLAcceptsAZeroByteDocument pins current behavior rather than
-// endorsing it: an empty response is spooled and submitted, so lp prints a
-// blank page and the API answers 200. Nothing in printgw rejects it today.
-// Recorded so that adding an emptiness check later is a deliberate, visible
-// decision instead of an accidental behavior change.
+// TestPrintURLAcceptsAZeroByteDocument pins current behavior, not an endorsement:
+// an empty response is spooled and submitted (lp prints a blank page, API answers
+// 200). Nothing in printgw rejects it today.
 func TestPrintURLAcceptsAZeroByteDocument(t *testing.T) {
 	t.Parallel()
 
@@ -558,7 +518,7 @@ func TestPrintURLAcceptsAZeroByteDocument(t *testing.T) {
 	}
 
 	svc := NewService(sub, fetcher, nil, testTimeouts, testS3Max)
-	if _, err := svc.PrintURL(context.Background(), "q", "https://example.com/empty.pdf"); err != nil {
+	if _, err := svc.PrintURL(context.Background(), "q", "https://example.com/empty.pdf", 1); err != nil {
 		t.Fatalf("PrintURL returned an unexpected error: %v", err)
 	}
 	if !sub.called() {
@@ -577,11 +537,9 @@ func TestPrintS3KeyWithoutAnObjectStore(t *testing.T) {
 	name := uniqueName(t)
 	watchSpoolFiles(t, "print-s3-*-"+name)
 	sub := &fakeSubmitter{}
-	// S3 is additive: a Service built without it must still serve everything
-	// else, and answer 503 only for this one intake.
 	svc := NewService(sub, &fakeFetcher{}, nil, testTimeouts, testS3Max)
 
-	_, err := svc.PrintS3Key(context.Background(), "q", name)
+	_, err := svc.PrintS3Key(context.Background(), "q", name, 1)
 	httpErr := requireHTTPError(t, err, http.StatusServiceUnavailable)
 	if httpErr.Public != "object storage is not configured" {
 		t.Errorf("public message = %q, want %q", httpErr.Public, "object storage is not configured")
@@ -592,7 +550,6 @@ func TestPrintS3KeyWithoutAnObjectStore(t *testing.T) {
 	if sub.called() {
 		t.Error("the submitter was called with no object store configured")
 	}
-	// Nothing was spooled at all — the nil check happens before spoolTo.
 }
 
 func TestPrintS3KeySubmitsTheDownloadedObject(t *testing.T) {
@@ -615,7 +572,7 @@ func TestPrintS3KeySubmitsTheDownloadedObject(t *testing.T) {
 
 	svc := NewService(sub, nil, store, testTimeouts, testS3Max)
 	start := time.Now()
-	res, err := svc.PrintS3Key(context.Background(), "q-brother", "docs/2026/invoice.pdf")
+	res, err := svc.PrintS3Key(context.Background(), "q-brother", "docs/2026/invoice.pdf", 1)
 	if err != nil {
 		t.Fatalf("PrintS3Key returned an unexpected error: %v", err)
 	}
@@ -631,8 +588,6 @@ func TestPrintS3KeySubmitsTheDownloadedObject(t *testing.T) {
 	}
 
 	job := sub.lastJob()
-	// The whole key is sanitized into the title (so the folder is still
-	// visible in lpstat), while the spool file name uses only path.Base.
 	if want := "docs_2026_invoice.pdf"; job.Title != want {
 		t.Errorf("Title = %q, want %q", job.Title, want)
 	}
@@ -648,6 +603,24 @@ func TestPrintS3KeySubmitsTheDownloadedObject(t *testing.T) {
 	assertNotExist(t, seenPath, "after PrintS3Key returned")
 }
 
+// TestPrintS3KeyThreadsCopiesThroughToSubmitJob is PrintReader/PrintURL's twin for
+// the s3_key intake path.
+func TestPrintS3KeyThreadsCopiesThroughToSubmitJob(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeObjectStore{body: []byte("x"), size: 1}
+	sub := &fakeSubmitter{result: SubmitResult{Output: "ok"}}
+	svc := NewService(sub, nil, store, testTimeouts, testS3Max)
+
+	if _, err := svc.PrintS3Key(context.Background(), "q", "a.pdf", 3); err != nil {
+		t.Fatalf("PrintS3Key returned an unexpected error: %v", err)
+	}
+
+	if job := sub.lastJob(); job.Copies != 3 {
+		t.Errorf("Copies = %d, want 3", job.Copies)
+	}
+}
+
 func TestPrintS3KeyClassifiesGetFailures(t *testing.T) {
 	t.Parallel()
 
@@ -658,9 +631,6 @@ func TestPrintS3KeyClassifiesGetFailures(t *testing.T) {
 		wantPublic string
 	}{
 		{
-			// objstore.MinIO already turned cloud_storage.ErrNotFound into a
-			// 404; passing it through is what lets a caller tell "your key is
-			// wrong" from "our storage is broken".
 			name: "a missing key stays a 404",
 			getErr: &apperr.HTTPError{
 				Status:   http.StatusNotFound,
@@ -697,7 +667,7 @@ func TestPrintS3KeyClassifiesGetFailures(t *testing.T) {
 			sub := &fakeSubmitter{}
 			svc := NewService(sub, nil, store, testTimeouts, testS3Max)
 
-			_, err := svc.PrintS3Key(context.Background(), "q", name)
+			_, err := svc.PrintS3Key(context.Background(), "q", name, 1)
 			httpErr := requireHTTPError(t, err, tt.wantStatus)
 			if httpErr.Public != tt.wantPublic {
 				t.Errorf("public message = %q, want %q", httpErr.Public, tt.wantPublic)
@@ -710,12 +680,8 @@ func TestPrintS3KeyClassifiesGetFailures(t *testing.T) {
 }
 
 // TestPrintS3KeyEnforcesTheSizeLimit covers both halves of getObject's size
-// handling, which exist because a store's reported size is a contract on the
-// ObjectStore interface, not something this code can verify: the up-front
-// check on the reported size, and the LimitReader that catches a store which
-// under-reports. Without the second, a lying or truncated stream could spool
-// and print while this reported success — the P0-3 failure class in a new
-// guise.
+// handling: the up-front check on the store's reported size, and the LimitReader
+// that catches a store which under-reports.
 func TestPrintS3KeyEnforcesTheSizeLimit(t *testing.T) {
 	t.Parallel()
 
@@ -726,9 +692,7 @@ func TestPrintS3KeyEnforcesTheSizeLimit(t *testing.T) {
 		reportedSize int64
 		wantStatus   int // 0 means the call must succeed
 		wantInPublic string
-		// wantNoRead asserts the object was rejected before a single byte was
-		// copied — the property that separates the up-front metadata check
-		// from the downstream copy limit.
+		// wantNoRead asserts the object was rejected before a single byte was copied.
 		wantNoRead bool
 	}{
 		{
@@ -738,12 +702,8 @@ func TestPrintS3KeyEnforcesTheSizeLimit(t *testing.T) {
 			reportedSize: 10,
 		},
 		{
-			// The ONLY case that reaches the up-front `size > s.s3MaxBytes`
-			// check: an over-limit BODY is caught identically by the copy
-			// limit downstream, so without a store that over-REPORTS (a stale
-			// HEAD, a multipart manifest) that check is untested. Confirmed by
-			// mutation: with only the over-body case below, replacing the
-			// up-front check with `if false` survives the suite.
+			// The only case that reaches the up-front `size > s.s3MaxBytes` check
+			// rather than the downstream copy limit: a store that over-reports.
 			name:         "a store that over-reports is rejected before any byte is copied",
 			maxBytes:     10,
 			body:         "abc",
@@ -762,8 +722,6 @@ func TestPrintS3KeyEnforcesTheSizeLimit(t *testing.T) {
 			wantNoRead:   true,
 		},
 		{
-			// The store claims a small object and then streams a large one.
-			// Only the LimitReader catches this.
 			name:         "a store that under-reports its size is caught by the copy limit",
 			maxBytes:     10,
 			body:         "0123456789ABCDEF",
@@ -772,8 +730,6 @@ func TestPrintS3KeyEnforcesTheSizeLimit(t *testing.T) {
 			wantInPublic: "maximum allowed size of 10 bytes",
 		},
 		{
-			// Fewer bytes than promised: a truncated stream. Reporting success
-			// here would physically print a truncated document.
 			name:         "a stream shorter than the reported size is rejected",
 			maxBytes:     100,
 			body:         "abc",
@@ -782,34 +738,25 @@ func TestPrintS3KeyEnforcesTheSizeLimit(t *testing.T) {
 			wantInPublic: "failed to fetch object from storage",
 		},
 		{
-			// A negative size is NOT part of the ObjectStore contract —
-			// ports.go says "claimed size" and objstore/minio.go says "exact
-			// size", and the one production implementation gets it from a
-			// successful minio Stat, so it is never negative. This pins the
-			// defensive `size >= 0` guard: a future ObjectStore returning a
-			// sentinel must not make the call fail spuriously. Note the guard
-			// also means such a store SKIPS the copied-vs-reported
-			// verification entirely — a real gap, recorded rather than
-			// asserted away.
+			// A negative size is not part of the ObjectStore contract (the one
+			// production implementation gets it from a successful minio Stat and
+			// it's never negative); pins the defensive `size >= 0` guard, which also
+			// means such a store skips the copied-vs-reported verification entirely.
 			name:         "a negative size is tolerated when the body fits",
 			maxBytes:     100,
 			body:         "abc",
 			reportedSize: -1,
 		},
 		{
-			// Pinned, not endorsed: a zero-byte object is spooled and
-			// submitted, so lp prints a blank page and the API answers 200.
-			// Adding an emptiness check later should be a visible decision.
+			// Pinned, not endorsed: a zero-byte object is spooled and submitted.
 			name:         "a zero-byte object is accepted and prints a blank page",
 			maxBytes:     100,
 			body:         "",
 			reportedSize: 0,
 		},
 		{
-			// A maxBytes near math.MaxInt64 would overflow maxBytes+1 into a
-			// negative LimitReader bound, which io.LimitReader treats as
-			// "already at the limit" — an immediate EOF that reads as a
-			// genuine zero-byte success and prints a blank page.
+			// A maxBytes near math.MaxInt64 would overflow maxBytes+1 into a negative
+			// LimitReader bound, read as an immediate EOF/false success.
 			name:         "a limit at math.MaxInt64 does not overflow into an empty read",
 			maxBytes:     math.MaxInt64,
 			body:         "not empty",
@@ -837,7 +784,7 @@ func TestPrintS3KeyEnforcesTheSizeLimit(t *testing.T) {
 			}
 
 			svc := NewService(sub, nil, store, testTimeouts, tt.maxBytes)
-			_, err := svc.PrintS3Key(context.Background(), "q", name)
+			_, err := svc.PrintS3Key(context.Background(), "q", name, 1)
 
 			if tt.wantStatus == 0 {
 				if err != nil {
@@ -860,9 +807,6 @@ func TestPrintS3KeyEnforcesTheSizeLimit(t *testing.T) {
 				t.Error("the object was read; an over-reported size must be rejected before any byte is copied")
 			}
 
-			// Closed on every path, including the ones that reject the object
-			// without reading it — otherwise the store's connection leaks per
-			// request.
 			if store.closes() != 1 {
 				t.Errorf("object was closed %d times, want exactly 1", store.closes())
 			}
@@ -886,7 +830,7 @@ func TestPrintS3KeyCopyFailure(t *testing.T) {
 		sub := &fakeSubmitter{}
 		svc := NewService(sub, nil, store, testTimeouts, testS3Max)
 
-		_, err := svc.PrintS3Key(context.Background(), "q", name)
+		_, err := svc.PrintS3Key(context.Background(), "q", name, 1)
 		httpErr := requireHTTPError(t, err, http.StatusBadGateway)
 		if httpErr.Public != "failed to fetch object from storage" {
 			t.Errorf("public message = %q, want %q", httpErr.Public, "failed to fetch object from storage")
@@ -910,16 +854,10 @@ func TestPrintS3KeyCopyFailure(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		// Cancel the caller's context from inside the first Read. getObject
-		// derives its own bounded context from this one, so ctx.Err() is
-		// non-nil by the time io.Copy reports the failure — which is what
-		// separates "storage broke" (502) from "we ran out of time" (504).
-		//
-		// No fake read error is needed: fakeObject is ctx-bound the way the
-		// real CloudStorageObject is, so the cancellation itself is what
-		// fails the read. An invented error here would have made the test
-		// look like the classification keys off the error text; it does not,
-		// it keys off ctx.Err().
+		// Cancels the caller's context from inside the first Read, so ctx.Err() is
+		// non-nil by the time io.Copy reports failure — separating "storage broke"
+		// (502) from "we ran out of time" (504). No fake read error is needed:
+		// classification keys off ctx.Err(), not the error text.
 		store := &fakeObjectStore{
 			body:   []byte("abc"),
 			size:   3,
@@ -928,7 +866,7 @@ func TestPrintS3KeyCopyFailure(t *testing.T) {
 		sub := &fakeSubmitter{}
 		svc := NewService(sub, nil, store, testTimeouts, testS3Max)
 
-		_, err := svc.PrintS3Key(ctx, "q", name)
+		_, err := svc.PrintS3Key(ctx, "q", name, 1)
 		httpErr := requireHTTPError(t, err, http.StatusGatewayTimeout)
 		if httpErr.Public != "print submission timed out" {
 			t.Errorf("public message = %q, want %q", httpErr.Public, "print submission timed out")
@@ -945,10 +883,8 @@ func TestPrintS3KeyCopyFailure(t *testing.T) {
 	})
 }
 
-// TestPrintS3KeySpoolNameUsesOnlyTheBasename documents the difference between
-// the two uses of the key: the spool file name takes path.Base (a full key
-// would otherwise blow past filename length limits), while the job title
-// keeps the whole sanitized key so an operator can still tell jobs apart.
+// TestPrintS3KeySpoolNameUsesOnlyTheBasename: the spool file name takes
+// path.Base, while the job title keeps the whole sanitized key.
 func TestPrintS3KeySpoolNameUsesOnlyTheBasename(t *testing.T) {
 	t.Parallel()
 
@@ -959,7 +895,7 @@ func TestPrintS3KeySpoolNameUsesOnlyTheBasename(t *testing.T) {
 	sub.inspect = func(job SubmitJob) { spoolBase = filepath.Base(job.Path) }
 
 	svc := NewService(sub, nil, store, testTimeouts, testS3Max)
-	if _, err := svc.PrintS3Key(context.Background(), "q", "a/deep/nested/report.pdf"); err != nil {
+	if _, err := svc.PrintS3Key(context.Background(), "q", "a/deep/nested/report.pdf", 1); err != nil {
 		t.Fatalf("PrintS3Key returned an unexpected error: %v", err)
 	}
 
@@ -974,15 +910,13 @@ func TestPrintS3KeySpoolNameUsesOnlyTheBasename(t *testing.T) {
 	}
 }
 
-// failingReader fails on the first Read, standing in for a client connection
-// that drops mid-upload.
+// failingReader fails on the first Read, standing in for a dropped connection.
 type failingReader struct{ err error }
 
 func (r *failingReader) Read([]byte) (int, error) { return 0, r.err }
 
-// TestNewServiceAcceptsANilObjectStore pins the constructor contract its doc
-// comment states: only PrintS3Key checks for nil, so building a Service
-// without object storage must not panic anywhere else.
+// TestNewServiceAcceptsANilObjectStore pins the constructor contract: only
+// PrintS3Key checks for nil.
 func TestNewServiceAcceptsANilObjectStore(t *testing.T) {
 	t.Parallel()
 
@@ -992,16 +926,61 @@ func TestNewServiceAcceptsANilObjectStore(t *testing.T) {
 	}
 	for i, call := range []func() error{
 		func() error {
-			_, err := svc.PrintReader(context.Background(), "q", "a.pdf", strings.NewReader("x"))
+			_, err := svc.PrintReader(context.Background(), "q", "a.pdf", strings.NewReader("x"), 1)
 			return err
 		},
 		func() error {
-			_, err := svc.PrintURL(context.Background(), "q", "https://example.com/a.pdf")
+			_, err := svc.PrintURL(context.Background(), "q", "https://example.com/a.pdf", 1)
 			return err
 		},
 	} {
 		if err := call(); err != nil {
 			t.Errorf("call %d failed with a nil object store: %v", i, err)
 		}
+	}
+}
+
+// TestServiceRejectsOutOfRangeCopiesIndependentlyOfHTTPLayer guards that
+// [1, maxCopies] is enforced here too, not only at the HTTP edge.
+func TestServiceRejectsOutOfRangeCopiesIndependentlyOfHTTPLayer(t *testing.T) {
+	t.Parallel()
+
+	for _, copies := range []int{0, -5, maxCopies + 1, 99999999} {
+		copies := copies
+		t.Run(fmt.Sprintf("copies=%d", copies), func(t *testing.T) {
+			t.Parallel()
+
+			sub := &fakeSubmitter{result: SubmitResult{Output: "ok"}}
+			fetcher := &fakeFetcher{body: []byte("x")}
+			store := &fakeObjectStore{body: []byte("x"), size: 1}
+			svc := NewService(sub, fetcher, store, testTimeouts, testS3Max)
+
+			calls := []func() error{
+				func() error {
+					_, err := svc.PrintReader(context.Background(), "q", "a.pdf", strings.NewReader("x"), copies)
+					return err
+				},
+				func() error {
+					_, err := svc.PrintURL(context.Background(), "q", "https://example.com/a.pdf", copies)
+					return err
+				},
+				func() error {
+					_, err := svc.PrintS3Key(context.Background(), "q", "a.pdf", copies)
+					return err
+				},
+			}
+			for i, call := range calls {
+				err := call()
+				if err == nil {
+					t.Fatalf("call %d: got nil error for copies=%d, want a rejection", i, copies)
+				}
+				if got := apperr.StatusCodeOf(err); got != http.StatusBadRequest {
+					t.Errorf("call %d: status = %d, want 400", i, got)
+				}
+			}
+			if sub.called() {
+				t.Error("Submit was called for an out-of-range copies value; validation must happen before submission")
+			}
+		})
 	}
 }

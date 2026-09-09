@@ -51,11 +51,6 @@ func TestPresignHandlerGetHappyPath(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
 		t.Fatal(err)
 	}
-	// Asserting the response carries the GET url is not enough on its own -
-	// getURL and putURL happen to differ here, but a mutant that dispatched
-	// to PresignPut regardless of method would still return SOME url the
-	// test could mistake for correct if it only checked the response. calls
-	// below records which method the store itself was actually asked for.
 	if got.URL != presigner.getURL {
 		t.Errorf("url = %q, want the GET url %q", got.URL, presigner.getURL)
 	}
@@ -122,9 +117,8 @@ func TestPresignHandlerPutHappyPath(t *testing.T) {
 	}
 }
 
-// TestPresignHandlerLowercaseMethodIsNormalized pins strings.ToUpper's
-// actual job: a caller sending "put" (not "PUT") must still dispatch to
-// PresignPut, not be rejected as an invalid method.
+// TestPresignHandlerLowercaseMethodIsNormalized asserts "put" dispatches to
+// PresignPut rather than being rejected as an invalid method.
 func TestPresignHandlerLowercaseMethodIsNormalized(t *testing.T) {
 	t.Parallel()
 
@@ -207,7 +201,7 @@ func TestPresignHandlerPathTraversalKeyIs400(t *testing.T) {
 func TestPresignHandlerNotConfiguredIs503(t *testing.T) {
 	t.Parallel()
 
-	a, _ := newTestAPI(testAPIOpts{}) // no presigner set -> objectStore is a nil interface
+	a, _ := newTestAPI(testAPIOpts{}) // no presigner set: objectStore is nil
 	srv := httptest.NewServer(NewServer(a).Handler)
 	defer srv.Close()
 
@@ -219,11 +213,8 @@ func TestPresignHandlerNotConfiguredIs503(t *testing.T) {
 	}
 }
 
-// TestPresignHandlerStoreErrorIsGenericized: nothing about the fake
-// Presigner's own error text passes through - fail's fallback for an
-// unclassified error genericizes it to "internal server error" the same
-// way it would for any other dependency's raw failure text (see api.go's
-// fail doc comment). The name previously implied the opposite.
+// TestPresignHandlerStoreErrorIsGenericized asserts an unclassified
+// Presigner error never reaches the client's response body verbatim.
 func TestPresignHandlerStoreErrorIsGenericized(t *testing.T) {
 	t.Parallel()
 
@@ -263,9 +254,8 @@ func TestPresignHandlerGetIs405(t *testing.T) {
 	}
 }
 
-// TestPresignHandlerCustomTTLUnderTheCapIsHonored covers the other half of
-// the clamp: a caller-supplied ttl_seconds smaller than cfg.PresignTTL must
-// be used as given, not silently widened to the cap.
+// TestPresignHandlerCustomTTLUnderTheCapIsHonored asserts a ttl_seconds
+// smaller than cfg.PresignTTL is used as given, not widened to the cap.
 func TestPresignHandlerCustomTTLUnderTheCapIsHonored(t *testing.T) {
 	t.Parallel()
 
@@ -290,18 +280,13 @@ func TestPresignHandlerCustomTTLUnderTheCapIsHonored(t *testing.T) {
 	if got.ExpiresAt.After(before.Add(60 * time.Second)) {
 		t.Errorf("expires_at %v was not honored as the requested 30s ttl", got.ExpiresAt)
 	}
-	// Pins the ttl actually handed to the store, not just the response's
-	// derived expires_at - a mutant passing a.cfg.PresignTTL (15m) instead
-	// of the clamped 30s here would still produce a response consistent
-	// with SOME ttl, just not the one the caller asked for.
 	if calls := presigner.snapshotCalls(); len(calls) != 1 || calls[0].ttl != 30*time.Second {
 		t.Errorf("presigner calls = %+v, want exactly one call with ttl=30s", calls)
 	}
 }
 
-// TestPresignHandlerTTLIsClampedNotRejected pins the plan's own contract: a
-// caller asking for longer than cfg.PresignTTL gets the capped value, not an
-// error — "as long as possible" is not a caller mistake.
+// TestPresignHandlerTTLIsClampedNotRejected asserts a caller asking for
+// longer than cfg.PresignTTL gets the capped value, not an error.
 func TestPresignHandlerTTLIsClampedNotRejected(t *testing.T) {
 	t.Parallel()
 
@@ -328,10 +313,8 @@ func TestPresignHandlerTTLIsClampedNotRejected(t *testing.T) {
 	}
 }
 
-// TestPresignHandlerTTLOverflowDoesNotProduceANegativeDuration guards the
-// int64-overflow fix from the Opus review: a plausible "milliseconds by
-// mistake" value must clamp cleanly, not silently produce a negative
-// duration (which would then presumably fail oddly deep inside the store).
+// TestPresignHandlerTTLOverflowDoesNotProduceANegativeDuration guards
+// against int64 overflow on a "milliseconds by mistake" ttl_seconds value.
 func TestPresignHandlerTTLOverflowDoesNotProduceANegativeDuration(t *testing.T) {
 	t.Parallel()
 

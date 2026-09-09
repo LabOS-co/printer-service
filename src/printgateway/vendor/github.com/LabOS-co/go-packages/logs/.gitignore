@@ -1,0 +1,37 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Output files
+*.o
+*.a
+*.out
+
+# Ignore the vendor directory
+/vendor/
+
+# Ignore any generated files
+/_generated/
+
+# Ignore the Go module cache
+/.cache/
+
+# Ignore the Go test cache
+/.testcache/
+
+# Ignore the Go coverage files
+/coverage.txt
+/coverage/
+
+# Ignore any editor-specific files
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+
+# Ignore any OS-specific files
+.DS_Store
+Thumbs.db

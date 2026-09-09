@@ -1,10 +1,6 @@
-// Package objstore adapts the shared github.com/LabOS-co/go-packages/
-// cloud_storage package to printgw.ObjectStore. All the actual S3/MinIO
-// logic (auth, presigning, streaming, 404 classification) lives in
-// cloud_storage — this file is deliberately thin, the same role cups.go and
-// fetch.go play for Submitter/Fetcher: adapt a shared/stdlib dependency to
-// this service's own narrow port, so printgw itself never imports minio-go
-// (or cloud_storage) directly.
+// Package objstore adapts github.com/LabOS-co/go-packages/cloud_storage to
+// printgw.ObjectStore, so printgw itself never imports cloud_storage/minio-go
+// directly.
 package objstore
 
 import (
@@ -27,11 +23,8 @@ type MinIO struct {
 }
 
 // New builds a MinIO-backed ObjectStore. url/bucket/accessKey/secretKey are
-// required (mirroring cloud_storage.NewS3's own validation); region may be
-// empty, but see cloud_storage.CloudStorageSettings.Region's doc comment —
-// leaving it empty costs a live network round trip and, on a non-AWS
-// backend whose bucket-location lookup fails, can silently sign requests
-// for the wrong region.
+// required; region may be empty, at the cost of an extra bucket-location
+// lookup (see cloud_storage.CloudStorageSettings.Region).
 func New(url, bucket, accessKey, secretKey, region string, insecure bool, logger logs.Logger, meta *logs.LogMetaData) (*MinIO, error) {
 	client, err := cloud_storage.NewS3(&cloud_storage.CloudStorageSettings{
 		Url:        url,
@@ -52,12 +45,8 @@ func New(url, bucket, accessKey, secretKey, region string, insecure bool, logger
 }
 
 // Get returns key's content and its exact size. A missing key is reported
-// as *apperr.HTTPError{Status: 404}, translated from cloud_storage.ErrNotFound
-// so callers never need to know this is backed by MinIO specifically.
-//
-// The returned io.ReadCloser is cloud_storage.GetObject's CloudStorageObject
-// value, which is bound to ctx for its entire read lifetime — a Read after
-// ctx is done fails with ctx's error, not just this call.
+// as *apperr.HTTPError{Status: 404}. The returned io.ReadCloser stays bound
+// to ctx for its entire read lifetime.
 func (m *MinIO) Get(ctx context.Context, key string) (io.ReadCloser, int64, error) {
 	object, size, err := m.client.GetObject(ctx, key)
 	if err != nil {

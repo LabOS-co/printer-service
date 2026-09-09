@@ -1,0 +1,5506 @@
+{
+  "info": {
+    "_postman_id": "b7d1f0c2-4a3e-4f21-9c8d-printgateway0001",
+    "name": "LAB-16894 Print Gateway",
+    "description": "GENERATED FILE — do not edit. Edit tests/postman/build-collection.js and re-run:\n\n    node tests/postman/build-collection.js\n\nEvery request name starts with its scenario ID from tests/TEST-PLAN.md.\n\nRun headless, per profile:\n    tests/scripts/profile.sh A && tests/scripts/run-newman.sh A\n\nA scenario whose profile does not provide what it needs reports as SKIPPED,\nnot as a failure — so the same collection runs green against every profile\nand each profile simply exercises a different subset.\n\nASSERTION RULE: nothing here asserts on errorCode or errorMessage.\nerror_handler hardcodes both on every failure regardless of status, so only\nthe HTTP status and errorDetails.details discriminate (TEST-PLAN section 3).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Auth and routing",
+      "description": "Authentication, method/route dispatch, and the X-Laas-Identifier correlation id. Nothing here contacts a printer, so it is safe to run against any profile at any time.",
+      "item": [
+        {
+          "name": "GW-AUTH-01 · No token → 401",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "Prerequisite: gateway running under any profile."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  expectFail(401, 'unauthorized');",
+                  "  pm.test('correlation id present even on a 401', function () {",
+                  "  pm.expect(pm.response.headers.has('X-Laas-Identifier')).to.be.true;",
+                  "  });",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-AUTH-02 · Wrong token → 401",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{altToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "Under a Vault profile the wrong token IS the environment token, so a pass here also proves Vault won the precedence contest (GW-SEC-02)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  expectFail(401, 'unauthorized');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-AUTH-04 · Right prefix, wrong suffix → 401",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}x"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "Constant-time compare: a token sharing a prefix with the real one must fare no better than a random one."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  expectFail(401, 'unauthorized');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-AUTH-03 · Valid token passes auth → 415 not 401",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "text/plain"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "The positive control for the whole auth layer: proves 415 below is reached, i.e. the token was accepted.",
+            "body": {
+              "mode": "raw",
+              "raw": "x",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  expectFail(415, 'Content-Type must be');",
+                  "  pm.test('not a 401', function () { pm.expect(pm.response.code).to.not.eql(401); });",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-AUTH-05 · /files/presign without token → 401",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/files/presign",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "files",
+                "presign"
+              ]
+            },
+            "description": "Both routes are token-guarded; presign is not a lesser-privilege endpoint (it mints object-store credentials).",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"key\":\"{{s3Key}}\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  expectFail(401, 'unauthorized');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-AUTH-06 · GET /print → 405",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": ""
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  expectFail(405, 'use POST');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-AUTH-07 · PUT /files/presign → 405",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/files/presign",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "files",
+                "presign"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"key\":\"{{s3Key}}\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  expectFail(405, 'use POST');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-AUTH-08 · Unknown route → 404 plain text",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/nope",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "nope"
+              ]
+            },
+            "description": "requireToken is per-route, so an unknown path is NOT authenticated and answers ServeMux's own plain-text 404 rather than the labOS JSON envelope. Intended; asserted so a future catch-all cannot change it silently."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  expectStatus(404);",
+                  "  pm.test('plain text, not the JSON envelope', function () {",
+                  "  pm.expect(pm.response.text()).to.include('404 page not found');",
+                  "  pm.expect(pm.response.text()).to.not.include('errorCode');",
+                  "  });",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-AUTH-09 · Subpath /print/anything → 404",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print/anything",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print",
+                "anything"
+              ]
+            },
+            "description": "/print is an exact ServeMux pattern, not a subtree — no route below it exists. The literal trailing-slash form (\"/print/\") cannot be expressed through Postman's URL model at all: parsed, it normalises the empty final segment away and sends /print (a 415); raw-only, the SDK fails to build a request. Verified separately with curl that /print/ is also a 404, so nothing is lost by asserting the subtree form here."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  expectStatus(404);",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-AUTH-10 · text/plain → 415",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "text/plain"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "printer=x",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  expectFail(415, 'Content-Type must be');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-AUTH-11 · No Content-Type → 415",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "",
+                "disabled": false
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "printer=x",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  expectFail(415, 'Content-Type must be');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-AUTH-12 · Uppercase multipart Content-Type is still multipart",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "MULTIPART/FORM-DATA; boundary=xyz"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "Dispatch is by mime.ParseMediaType, not a literal lowercase prefix — so this must reach the multipart handler (400 on the bad body), never fall through to 415.",
+            "body": {
+              "mode": "raw",
+              "raw": "not actually multipart",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  expectFail(400, 'invalid multipart body');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-ID-01 · Supplied correlation id is echoed",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Laas-Identifier",
+                "value": "e2e-abc-123"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": ""
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  pm.test('id echoed verbatim', function () {",
+                  "  pm.expect(pm.response.headers.get('X-Laas-Identifier')).to.eql('e2e-abc-123');",
+                  "  });",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-ID-02 · Absent id is generated",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": ""
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  pm.test('generated id', function () {",
+                  "  pm.expect(pm.response.headers.get('X-Laas-Identifier')).to.match(/^req-/);",
+                  "  });",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-ID-03 · Non-ASCII id is rejected and replaced",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Laas-Identifier",
+                "value": "abcdef"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "U+0085 (NEL) is a line terminator to many log consumers and is exactly what the byte-wise 0x20..0x7e allowlist exists to stop. Node permits \\x80-\\xff in a header value, so this actually reaches the server, unlike a C0 control which the client itself would refuse to send."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  pm.test('rejected, replaced with a generated id', function () {",
+                  "  var got = pm.response.headers.get('X-Laas-Identifier');",
+                  "  pm.expect(got).to.not.include('def');",
+                  "  pm.expect(got).to.match(/^req-/);",
+                  "  });",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-ID-04 · Over-length id is rejected and replaced",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Laas-Identifier",
+                "value": "{{longId}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": ""
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.variables.set('longId', 'x'.repeat(129));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  pm.test('129 chars rejected', function () {",
+                  "  var got = pm.response.headers.get('X-Laas-Identifier');",
+                  "  pm.expect(got).to.match(/^req-/);",
+                  "  pm.expect(got.length).to.be.below(129);",
+                  "  });",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-ID-06 · Exactly 128 chars is accepted (boundary)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Laas-Identifier",
+                "value": "{{maxId}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": ""
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.variables.set('maxId', 'y'.repeat(128));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  pm.test('128 chars echoed verbatim', function () {",
+                  "  pm.expect(pm.response.headers.get('X-Laas-Identifier')).to.eql('y'.repeat(128));",
+                  "  });",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-ID-05 · Correlation id survives a 401",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{altToken}}"
+              },
+              {
+                "key": "X-Laas-Identifier",
+                "value": "e2e-on-401"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": ""
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  expectStatus(401);",
+                  "  pm.test('id echoed on the rejection too', function () {",
+                  "  pm.expect(pm.response.headers.get('X-Laas-Identifier')).to.eql('e2e-on-401');",
+                  "  });",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Multipart intake",
+      "description": "Option 1 of the contract: the caller attaches the document. This is the primary, never-deprecated intake path — the HLD is explicit that not every Windows caller has an S3 SDK. Prints go to {{printer}} (a virtual ippeveprinter queue), so no paper is consumed.",
+      "item": [
+        {
+          "name": "GW-MP-01 · Happy path → 200 submitted",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "Prerequisite: CUPS queue {{printer}} exists and is enabled (lpstat -p).",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "printer",
+                  "value": "{{printer}}",
+                  "type": "text"
+                },
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "testdata/small.pdf"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  expectSubmitted();",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-MP-03 · Missing printer field → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "testdata/small.pdf"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  expectFail(400, 'missing url parameter: printer');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-MP-04 · Missing file part → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "printer",
+                  "value": "{{printer}}",
+                  "type": "text"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  expectFail(400, 'missing file part');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-MP-05 · Empty printer value → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "printer",
+                  "value": "",
+                  "type": "text"
+                },
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "testdata/small.pdf"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  expectFail(400, 'missing url parameter: printer');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-MP-06 · Nonexistent queue → 500, nothing leaked",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "The apperr Public/Internal split under load: lp's stderr names the queue and the spool path, and none of it may reach the caller.",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "printer",
+                  "value": "there-is-no-such-queue",
+                  "type": "text"
+                },
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "testdata/small.pdf"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  expectFail(500, 'print submission failed');",
+                  "  expectNoLeak();",
+                  "  pm.test('details is exactly the public text', function () {",
+                  "  pm.expect(details()).to.eql('print submission failed');",
+                  "  });",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-MP-07 · Multipart with no boundary → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "multipart/form-data"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "garbage",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  expectFail(400, 'invalid multipart body');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-MP-10 · Non-PDF content → 200 (documented gap)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "ASSERTS A KNOWN GAP (README \"No content validation of a fetched or uploaded document\"). If this ever starts failing, content validation was added — update the README and this row together, do not \"fix\" the expectation.",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "printer",
+                  "value": "{{printer}}",
+                  "type": "text"
+                },
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "testdata/not-a-pdf.txt"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  expectSubmitted();",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-MP-11 · Empty file → 500 (lp refuses it, not the gateway)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "Verified live: a zero-byte document is accepted and spooled by the gateway — which validates nothing — and then rejected by lp itself (\"lp: No file in print request.\"), surfacing as the generic 500. So the README's \"a 200 response with an empty or non-PDF body is spooled and handed to lp as a success\" holds for non-PDF (GW-MP-10) but NOT for empty. The gap is real; its blast radius is smaller than documented.",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "printer",
+                  "value": "{{printer}}",
+                  "type": "text"
+                },
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "testdata/empty.pdf"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  expectFail(500, 'print submission failed');",
+                  "  expectNoLeak();",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-MP-12 · Hostile filename is sanitized",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "The spool filename is built from the caller-supplied part name. Verify the sanitized name in the gateway log (journalctl -u printgateway); the response cannot show it.",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "printer",
+                  "value": "{{printer}}",
+                  "type": "text"
+                },
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "testdata/weird-name.pdf"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  expectSubmitted();",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-MP-13 · Unknown extra form field → 200",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "Multipart intake is deliberately NOT strict, unlike the JSON one — asserted so the asymmetry is intentional and visible.",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "printer",
+                  "value": "{{printer}}",
+                  "type": "text"
+                },
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "testdata/small.pdf"
+                },
+                {
+                  "key": "bogus",
+                  "value": "1",
+                  "type": "text"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  expectSubmitted();",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-MP-14 · Two file parts → first wins",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "printer",
+                  "value": "{{printer}}",
+                  "type": "text"
+                },
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "testdata/small.pdf"
+                },
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "testdata/weird-name.pdf"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  expectSubmitted();",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "JSON contract",
+      "description": "Strict JSON decoding, shared by POST /print (by-reference form) and POST /files/presign. Two properties are deliberately NOT enforced and are asserted as such: case-insensitive field matching, and duplicate-key last-wins.",
+      "item": [
+        {
+          "name": "GW-JSON-01 · Malformed JSON → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{ not valid",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  expectFail(400, 'invalid JSON body');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-JSON-02 · Unknown field → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "A mistyped field name must name the typo, not fail downstream with the confusing \"exactly one of file_url or s3_key is required\".",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"fiel_url\":\"https://example.com/a.pdf\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  expectFail(400, 'invalid JSON body');",
+                  "  pm.test('names the unknown field', function () {",
+                  "  pm.expect(details()).to.include('unknown field');",
+                  "  });",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-JSON-03 · Two concatenated JSON values → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"s3_key\":\"a\"}{\"x\":1}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  expectFail(400, 'body must contain exactly one JSON value');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-JSON-04 · Trailing garbage after JSON → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"s3_key\":\"a\"} oops",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  expectFail(400);",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-JSON-05 · Missing printer → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"file_url\":\"https://example.com/a.pdf\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  expectFail(400, 'printer is required');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-JSON-06 · Neither file_url nor s3_key → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  expectFail(400, 'exactly one of file_url or s3_key is required');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-JSON-07 · Both file_url and s3_key → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "Mixing them would leave one silently ignored — and the write-timeout budget assumes only one download per request.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"file_url\":\"https://example.com/a.pdf\",\"s3_key\":\"{{s3Key}}\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  expectFail(400, 'exactly one of file_url or s3_key is required');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-JSON-08 · Field names are case-insensitive (documented gap)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "ASSERTS A DOCUMENTED BEHAVIOUR: DisallowUnknownFields inherits encoding/json's case-insensitive matching. So this is accepted — 503 without storage, 200 with — and must NOT be 400.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"Printer\":\"{{printer}}\",\"S3_Key\":\"{{s3Key}}\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  pm.test('accepted, not rejected as an unknown field', function () {",
+                  "  pm.expect(pm.response.code, 'a 400 here would mean case-sensitivity changed').to.not.eql(400);",
+                  "  });",
+                  "  expectAnyStatus(s3PrintStatuses());",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-JSON-09 · Duplicate key, last wins (documented gap)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "ASSERTS A DOCUMENTED BEHAVIOUR: encoding/json applies the last occurrence. The first value names a queue that does not exist, so a 500 here would mean the FIRST one won.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"no-such-queue\",\"printer\":\"{{printer}}\",\"s3_key\":\"{{s3Key}}\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  pm.test('resolved to the last value', function () {",
+                  "  pm.expect(details(), 'a submit failure means the first printer won').to.not.include('print submission failed');",
+                  "  });",
+                  "  expectAnyStatus(s3PrintStatuses());",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-JSON-11 · Empty body → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  expectFail(400, 'invalid JSON body');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-JSON-12 · JSON null body → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "null",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  expectFail(400, 'printer is required');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-JSON-13 · charset parameter still routes as JSON",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json; charset=utf-8"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  expectFail(400, 'exactly one of file_url or s3_key is required');",
+                  "  pm.test('not 415', function () { pm.expect(pm.response.code).to.not.eql(415); });",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "file_url intake",
+      "description": "Option 2: the server fetches a caller-supplied URL. EVERY 4xx row here is a security assertion — a 200 where a 4xx is expected is a live SSRF hole, not a test bug. Rows gated \"strict\" run under profile A; rows gated \"permissive\" need profile E (fixture server up).",
+      "item": [
+        {
+          "name": "GW-URL-01 · Happy path via fixture server → 200",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "Uses small.pdf, not printDemo.pdf, so the happy path also holds under profile G's tightened fetch limit. Prerequisite: scripts/fixtures-server.sh start. Only possible with the guard relaxed — see TEST-PLAN 4.1.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"file_url\":\"{{fixtureBase}}/small.pdf\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('allowPrivate')) { return skip(\"needs PRINT_GATEWAY_ALLOW_PRIVATE_TARGETS=true (profile E / G)\"); }",
+                  "  if (!flag('fixturesUp')) { return skip(\"needs the fixture HTTP server (profile E / G)\"); }",
+                  "  if (flag('allowlistOn')) { return skip(\"the host allowlist answers 403 before this gate is reached; run under profile A / E\"); }",
+                  "  expectSubmitted();",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-URL-02 · Loopback address blocked → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"file_url\":\"http://127.0.0.1/x.pdf\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (flag('allowPrivate')) { return skip(\"asserts the strict fetch guard; run under profile A\"); }",
+                  "  if (flag('allowlistOn')) { return skip(\"the host allowlist answers 403 before this gate is reached; run under profile A / E\"); }",
+                  "  expectFail(400, 'file_url resolved to a disallowed address');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-URL-03 · CUPS admin port blocked → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "The single rule that kills the original P0-4 finding. The port gate runs before the address gate, so this reports the port, not the address.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"file_url\":\"http://127.0.0.1:631/admin\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (flag('allowPrivate')) { return skip(\"asserts the strict fetch guard; run under profile A\"); }",
+                  "  expectFail(400, 'file_url port 631 is not allowed');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-URL-04 · Cloud metadata endpoint blocked → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"file_url\":\"http://169.254.169.254/latest/meta-data/\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (flag('allowPrivate')) { return skip(\"asserts the strict fetch guard; run under profile A\"); }",
+                  "  if (flag('allowlistOn')) { return skip(\"the host allowlist answers 403 before this gate is reached; run under profile A / E\"); }",
+                  "  expectFail(400, 'file_url resolved to a disallowed address');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-URL-05 · RFC1918 address blocked → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "That address is the real printer — proving the guard also stops the gateway being aimed at the very devices it fronts.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"file_url\":\"http://192.168.252.210/\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (flag('allowPrivate')) { return skip(\"asserts the strict fetch guard; run under profile A\"); }",
+                  "  if (flag('allowlistOn')) { return skip(\"the host allowlist answers 403 before this gate is reached; run under profile A / E\"); }",
+                  "  expectFail(400, 'file_url resolved to a disallowed address');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-URL-21 · IPv6-mapped IPv4 loopback blocked → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "One of the six IPv6 schemes that embed an IPv4 address; an IPv4-only blocklist would let all of them through.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"file_url\":\"http://[::ffff:127.0.0.1]/x.pdf\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (flag('allowPrivate')) { return skip(\"asserts the strict fetch guard; run under profile A\"); }",
+                  "  if (flag('allowlistOn')) { return skip(\"the host allowlist answers 403 before this gate is reached; run under profile A / E\"); }",
+                  "  expectFail(400, 'file_url resolved to a disallowed address');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-URL-06 · ftp:// scheme → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"file_url\":\"ftp://example.com/a.pdf\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  expectFail(400, 'file_url scheme must be http or https');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-URL-07 · file:// scheme → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"file_url\":\"file:///etc/passwd\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  expectFail(400, 'file_url scheme must be http or https');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-URL-08 · Embedded credentials → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"file_url\":\"http://user:pass@example.com/a.pdf\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  expectFail(400, 'file_url must not contain embedded credentials');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-URL-09 · No host → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"file_url\":\"http:///a.pdf\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  expectFail(400, 'file_url must name a host');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-URL-10 · Not a URL at all → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "Rejected by the scheme check rather than by a parse failure: url.Parse is permissive and happily returns a relative reference with an empty scheme for this input, so \"invalid file_url:\" is NOT the message. Asserting the status plus whichever of the two gates fires keeps this honest without pinning it to the wrong one.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"file_url\":\"not a url\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  expectFail(400);",
+                  "  pm.test('rejected by one of the URL gates', function () {",
+                  "  pm.expect(details()).to.match(/invalid file_url|scheme must be http or https/);",
+                  "  });",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-URL-19 · Non-80/443 port: blocked strict, allowed permissive",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "One request, two profiles, opposite expectations — this is what proves ALLOW_PRIVATE_TARGETS lifts the PORT rule and not only the address rule. Run it under A and under E.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"file_url\":\"{{fixtureBase}}/small.pdf\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (flag('allowlistOn')) { return skip(\"the host allowlist answers 403 before this gate is reached; run under profile A / E\"); }",
+                  "  if (flag('allowPrivate')) {",
+                  "  if (!flag('fixturesUp')) { return skip('needs the fixture server'); }",
+                  "  expectSubmitted();",
+                  "  } else {",
+                  "  expectFail(400, 'is not allowed (only 80/443)');",
+                  "  }",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-URL-11 · Redirect not followed → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "A presigned URL is a direct link by construction; following a 3xx would re-open every address check on a server-chosen target.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"file_url\":\"{{fixtureBase}}/redirect\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('allowPrivate')) { return skip(\"needs PRINT_GATEWAY_ALLOW_PRIVATE_TARGETS=true (profile E / G)\"); }",
+                  "  if (!flag('fixturesUp')) { return skip(\"needs the fixture HTTP server (profile E / G)\"); }",
+                  "  if (flag('allowlistOn')) { return skip(\"the host allowlist answers 403 before this gate is reached; run under profile A / E\"); }",
+                  "  expectFail(400, 'file_url must be a direct link');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-URL-12 · Upstream 404 → 502",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"file_url\":\"{{fixtureBase}}/notfound\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('allowPrivate')) { return skip(\"needs PRINT_GATEWAY_ALLOW_PRIVATE_TARGETS=true (profile E / G)\"); }",
+                  "  if (!flag('fixturesUp')) { return skip(\"needs the fixture HTTP server (profile E / G)\"); }",
+                  "  if (flag('allowlistOn')) { return skip(\"the host allowlist answers 403 before this gate is reached; run under profile A / E\"); }",
+                  "  expectFail(502, 'file_url returned an error');",
+                  "  expectNoLeak();",
+                  "  pm.test('upstream body not reflected', function () {",
+                  "  pm.expect(pm.response.text()).to.not.include('fixture-404-body');",
+                  "  });",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-URL-13 · Nothing listening → 502",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "Under the strict guard this same URL is a 400 (port 1). Permissive is the only profile in which the dial itself is reached.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"file_url\":\"http://127.0.0.1:1/x.pdf\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('allowPrivate')) { return skip(\"needs PRINT_GATEWAY_ALLOW_PRIVATE_TARGETS=true (profile E / G)\"); }",
+                  "  if (flag('allowlistOn')) { return skip(\"the host allowlist answers 403 before this gate is reached; run under profile A / E\"); }",
+                  "  expectFail(502, 'failed to download file_url');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-URL-16 · Stalled host fails at the fetch timeout",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "Profile E sets PRINT_GATEWAY_FETCH_TIMEOUT=5s. The point is that it fails in seconds, not at the 8-minute write timeout.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"file_url\":\"{{fixtureBase}}/slow\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('allowPrivate')) { return skip(\"needs PRINT_GATEWAY_ALLOW_PRIVATE_TARGETS=true (profile E / G)\"); }",
+                  "  if (!flag('fixturesUp')) { return skip(\"needs the fixture HTTP server (profile E / G)\"); }",
+                  "  if (flag('allowlistOn')) { return skip(\"the host allowlist answers 403 before this gate is reached; run under profile A / E\"); }",
+                  "  if (flag('tightLimits')) { return skip(\"the tightened fetch cap rejects the response up front, before the behaviour under test occurs\"); }",
+                  "  expectAnyStatus([502, 504]);",
+                  "  pm.test('failed fast (under 20s), not at the write timeout', function () {",
+                  "  pm.expect(pm.response.responseTime).to.be.below(20000);",
+                  "  });",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-URL-17 · Host not in the allowlist → 403",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "403, not 400 — the allowlist is a distinct gate from the address block, and conflating the two statuses would hide which one fired.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"file_url\":\"{{allowlistBlockedUrl}}\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('allowlistOn')) { return skip(\"needs PRINT_GATEWAY_FETCH_ALLOWED_HOSTS (profile F / E-allowlist)\"); }",
+                  "  expectFail(403, 'file_url host is not allowed');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-URL-18 · Allowlisted host still address-checked → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "Profile F allowlists \"localhost\" precisely so this can be shown: passing the allowlist does not exempt a host from the address block.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"file_url\":\"http://localhost/a.pdf\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('allowlistOn')) { return skip(\"needs PRINT_GATEWAY_FETCH_ALLOWED_HOSTS (profile F / E-allowlist)\"); }",
+                  "  if (flag('allowPrivate')) { return skip(\"asserts the strict fetch guard; run under profile A\"); }",
+                  "  expectFail(400, 'file_url resolved to a disallowed address');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-URL-20 · Permissive does not lift the allowlist → 403",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "Profile E-allowlist only. The two knobs are independent: the address/port block is off, the host allowlist is still on.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"file_url\":\"{{fixtureBase}}/printDemo.pdf\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('allowPrivate')) { return skip(\"needs PRINT_GATEWAY_ALLOW_PRIVATE_TARGETS=true (profile E / G)\"); }",
+                  "  if (!flag('allowlistOn')) { return skip(\"needs PRINT_GATEWAY_FETCH_ALLOWED_HOSTS (profile F / E-allowlist)\"); }",
+                  "  expectFail(403, 'file_url host is not allowed');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-URL-22 · DNS rebinding → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "Needs a public hostname with an A record pointing at 127.0.0.1 (nip.io, if reachable). The property — the gate runs on the RESOLVED IP at connect(2), not on the submitted URL string — is the single most important one in the guard, so the row stays even when the environment cannot run it. Un-gate this scenario once name resolution for such a host is available.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"file_url\":\"http://127.0.0.1.nip.io/x.pdf\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (true) { return skip(\"not assertable over HTTP — see the named script\"); }",
+                  "  expectFail(400, 'file_url resolved to a disallowed address');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "s3_key intake",
+      "description": "Option 3: a key in the one server-configured bucket. No SSRF surface by construction — the caller controls the key, never the destination. Prerequisite: scripts/setup-minio.sh has seeded the bucket (TEST-PLAN 5.3).",
+      "item": [
+        {
+          "name": "GW-S3-01 · Object storage disabled → 503",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "Absent S3 config is never a startup failure — it degrades this one capability and nothing else.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"s3_key\":\"{{s3Key}}\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (flag('s3Enabled')) { return skip(\"asserts the storage-disabled path; run under profile A\"); }",
+                  "  expectFail(503, 'object storage is not configured');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-S3-02 · Happy path → 200",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"s3_key\":\"{{s3Key}}\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('s3Enabled') || val('s3Fault') !== 'none') { return skip(\"needs a healthy object store (profile C / D / G)\"); }",
+                  "  expectSubmitted();",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-S3-04 · Missing key → 404",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "A miss must be a 404, distinguishable from the 502 a broken store gives (GW-S3-08/09).",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"s3_key\":\"{{s3MissingKey}}\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('s3Enabled') || val('s3Fault') !== 'none') { return skip(\"needs a healthy object store (profile C / D / G)\"); }",
+                  "  expectFail(404, 'not found');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-S3-05 · Path traversal key → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "What actually confines a caller to the one bucket. Rejected here regardless of backend, rather than relying on the store rejecting it (MinIO does; that is backend-specific).",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"s3_key\":\"../other-bucket/x.pdf\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('s3Enabled')) { return skip(\"needs a profile with object storage (C / D / G)\"); }",
+                  "  expectFail(400, 's3_key must not contain path traversal segments');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-S3-06 · Traversal via ./.. segments → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"s3_key\":\"a/./../../x.pdf\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('s3Enabled')) { return skip(\"needs a profile with object storage (C / D / G)\"); }",
+                  "  expectFail(400, 's3_key must not contain path traversal segments');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-S3-10 · Non-PDF object → 200 (documented gap)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "ASSERTS A KNOWN GAP — the s3_key twin of GW-MP-10.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"s3_key\":\"{{s3TextKey}}\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('s3Enabled') || val('s3Fault') !== 'none') { return skip(\"needs a healthy object store (profile C / D / G)\"); }",
+                  "  expectSubmitted();",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-S3-11 · Empty object → 500 (lp refuses it)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "The s3_key twin of GW-MP-11: downloaded and spooled without validation, then refused by lp. Same reasoning — see that row.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"s3_key\":\"{{s3EmptyKey}}\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('s3Enabled') || val('s3Fault') !== 'none') { return skip(\"needs a healthy object store (profile C / D / G)\"); }",
+                  "  expectFail(500, 'print submission failed');",
+                  "  expectNoLeak();",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-S3-12 · Key with spaces and non-ASCII → 200",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "The key is used exactly as given — only traversal is rejected, not unusual characters.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"s3_key\":\"{{s3SpaceKey}}\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('s3Enabled') || val('s3Fault') !== 'none') { return skip(\"needs a healthy object store (profile C / D / G)\"); }",
+                  "  expectSubmitted();",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "s3_key failure modes",
+      "description": "Each row needs its own gateway configuration, so each runs under its own profile: scripts/profile.sh C-fault-endpoint | C-fault-creds | C-fault-slow. run-all.sh drives all three.",
+      "item": [
+        {
+          "name": "GW-S3-08 · Dead endpoint → 502, endpoint not disclosed",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"s3_key\":\"{{s3Key}}\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (val('s3Fault') !== 'endpoint') { return skip(\"needs profile C-fault-endpoint\"); }",
+                  "  expectFail(502, 'failed to fetch object from storage');",
+                  "  expectNoLeak();",
+                  "  pm.test('endpoint address not disclosed', function () {",
+                  "  pm.expect(pm.response.text()).to.not.include('127.0.0.1:9');",
+                  "  });",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-S3-09 · Bad credentials → 502, not 404",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "An auth failure reported as a missing object would send whoever debugs it looking for the wrong problem entirely.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"s3_key\":\"{{s3Key}}\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (val('s3Fault') !== 'creds') { return skip(\"needs profile C-fault-creds\"); }",
+                  "  expectFail(502, 'failed to fetch object from storage');",
+                  "  pm.test('not misreported as a missing object', function () {",
+                  "  pm.expect(pm.response.code).to.not.eql(404);",
+                  "  });",
+                  "  expectNoLeak();",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-S3-13 · Stalled store fails at the S3 timeout",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "Profile C-fault-slow points the S3 endpoint at the fixture server, which accepts and then stalls, with PRINT_GATEWAY_S3_TIMEOUT=2s.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"s3_key\":\"{{s3Key}}\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (val('s3Fault') !== 'slow') { return skip(\"needs profile C-fault-slow\"); }",
+                  "  expectAnyStatus([502, 504]);",
+                  "  pm.test('failed fast (under 20s), not at the write timeout', function () {",
+                  "  pm.expect(pm.response.responseTime).to.be.below(20000);",
+                  "  });",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Presign",
+      "description": "POST /files/presign mints a time-limited object-store URL — the one operation that hands out storage credentials by proxy. Same token as /print.",
+      "item": [
+        {
+          "name": "GW-PRE-01 · Storage disabled → 503",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/files/presign",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "files",
+                "presign"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"key\":\"{{s3Key}}\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (flag('s3Enabled')) { return skip(\"asserts the storage-disabled path; run under profile A\"); }",
+                  "  expectFail(503, 'object storage is not configured');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-PRE-02 · Default GET, default TTL",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/files/presign",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "files",
+                "presign"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"key\":\"{{s3Key}}\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('s3Enabled') || val('s3Fault') !== 'none') { return skip(\"needs a healthy object store (profile C / D / G)\"); }",
+                  "  expectPresigned(val('s3Key'));",
+                  "  expectExpiry(Number(val('presignTtlSeconds')));",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-PRE-03 · Explicit method GET",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/files/presign",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "files",
+                "presign"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"key\":\"{{s3Key}}\",\"method\":\"GET\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('s3Enabled') || val('s3Fault') !== 'none') { return skip(\"needs a healthy object store (profile C / D / G)\"); }",
+                  "  expectPresigned(val('s3Key'));",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-PRE-04 · Method PUT",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/files/presign",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "files",
+                "presign"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"key\":\"test/uploaded-by-presign.pdf\",\"method\":\"PUT\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('s3Enabled') || val('s3Fault') !== 'none') { return skip(\"needs a healthy object store (profile C / D / G)\"); }",
+                  "  expectPresigned('test/uploaded-by-presign.pdf');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-PRE-05 · Lowercase method accepted",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/files/presign",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "files",
+                "presign"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"key\":\"{{s3Key}}\",\"method\":\"put\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('s3Enabled') || val('s3Fault') !== 'none') { return skip(\"needs a healthy object store (profile C / D / G)\"); }",
+                  "  expectPresigned(val('s3Key'));",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-PRE-06 · Method DELETE → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/files/presign",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "files",
+                "presign"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"key\":\"{{s3Key}}\",\"method\":\"DELETE\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('s3Enabled')) { return skip(\"needs a profile with object storage (C / D / G)\"); }",
+                  "  expectFail(400, 'method must be GET or PUT');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-PRE-07 · Shorter TTL honoured",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/files/presign",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "files",
+                "presign"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"key\":\"{{s3Key}}\",\"ttl_seconds\":60}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('s3Enabled') || val('s3Fault') !== 'none') { return skip(\"needs a healthy object store (profile C / D / G)\"); }",
+                  "  expectStatus(200); expectExpiry(60, 30);",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-PRE-08 · Longer TTL clamped, not rejected",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/files/presign",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "files",
+                "presign"
+              ]
+            },
+            "description": "A client asking for \"as long as possible\" is not a caller error — it is clamped down to the configured cap.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"key\":\"{{s3Key}}\",\"ttl_seconds\":86400}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('s3Enabled') || val('s3Fault') !== 'none') { return skip(\"needs a healthy object store (profile C / D / G)\"); }",
+                  "  expectStatus(200); expectExpiry(Number(val('presignTtlSeconds')));",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-PRE-09 · Absurd TTL clamped, never negative",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/files/presign",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "files",
+                "presign"
+              ]
+            },
+            "description": "Guards the int64 overflow path: ttl_seconds * time.Second overflows well before this value, which would silently produce a NEGATIVE ttl (an already-expired URL) instead of the documented clamp. A plausible real input — milliseconds pasted where seconds were meant.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"key\":\"{{s3Key}}\",\"ttl_seconds\":10000000000}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('s3Enabled') || val('s3Fault') !== 'none') { return skip(\"needs a healthy object store (profile C / D / G)\"); }",
+                  "  expectStatus(200);",
+                  "  pm.test('expiry is in the future, not overflowed negative', function () {",
+                  "  pm.expect(Date.parse(pm.response.json().expires_at)).to.be.above(Date.now());",
+                  "  });",
+                  "  expectExpiry(Number(val('presignTtlSeconds')));",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-PRE-10 · Zero TTL → default",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/files/presign",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "files",
+                "presign"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"key\":\"{{s3Key}}\",\"ttl_seconds\":0}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('s3Enabled') || val('s3Fault') !== 'none') { return skip(\"needs a healthy object store (profile C / D / G)\"); }",
+                  "  expectStatus(200); expectExpiry(Number(val('presignTtlSeconds')));",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-PRE-11 · Negative TTL → default",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/files/presign",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "files",
+                "presign"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"key\":\"{{s3Key}}\",\"ttl_seconds\":-5}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('s3Enabled') || val('s3Fault') !== 'none') { return skip(\"needs a healthy object store (profile C / D / G)\"); }",
+                  "  expectStatus(200); expectExpiry(Number(val('presignTtlSeconds')));",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-PRE-12 · Missing key → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/files/presign",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "files",
+                "presign"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('s3Enabled')) { return skip(\"needs a profile with object storage (C / D / G)\"); }",
+                  "  expectFail(400, 'key is required');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-PRE-13 · Traversal key → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/files/presign",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "files",
+                "presign"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"key\":\"../x\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('s3Enabled')) { return skip(\"needs a profile with object storage (C / D / G)\"); }",
+                  "  expectFail(400, 'key must not contain path traversal segments');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-PRE-14 · Nonexistent key still presigns → 200",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/files/presign",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "files",
+                "presign"
+              ]
+            },
+            "description": "ASSERTS A DOCUMENTED BEHAVIOUR: presigning does not verify existence. The URL is minted and 404s at the store when used — see E2E-02b.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"key\":\"{{s3MissingKey}}\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('s3Enabled') || val('s3Fault') !== 'none') { return skip(\"needs a healthy object store (profile C / D / G)\"); }",
+                  "  expectPresigned(val('s3MissingKey'));",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-PRE-15 · Unknown JSON field → 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/files/presign",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "files",
+                "presign"
+              ]
+            },
+            "description": "\"ttl\" instead of \"ttl_seconds\" — the strict decoder is what turns a silently-ignored typo into a visible mistake.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"key\":\"a\",\"ttl\":5}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('s3Enabled')) { return skip(\"needs a profile with object storage (C / D / G)\"); }",
+                  "  expectFail(400, 'invalid JSON body');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-PRE-16 · No token → 401",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/files/presign",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "files",
+                "presign"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"key\":\"{{s3Key}}\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('s3Enabled')) { return skip(\"needs a profile with object storage (C / D / G)\"); }",
+                  "  expectFail(401, 'unauthorized');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-PRE-17 · Presigned URL is never logged",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/files/presign",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "files",
+                "presign"
+              ]
+            },
+            "description": "The URL IS the credential. Asserted by scripts/ops-checks.sh, which greps journalctl for an X-Amz-Signature after issuing one — not observable from the response.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"key\":\"{{s3Key}}\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (true) { return skip(\"not assertable over HTTP — see the named script\"); }",
+                  "  expectStatus(200);",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Limits",
+      "description": "Every size gate, under profile G, whose tightened limits let the existing 2.5 MB printDemo.pdf and a few hundred bytes of JSON trip all of them. Prerequisite: scripts/profile.sh G.",
+      "item": [
+        {
+          "name": "GW-MP-08 · Oversize upload → 413",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "2.5 MB against profile G's 1 MiB cap. 413 rather than the generic 400 every other malformed-body case gets — the two are otherwise indistinguishable from the response alone.",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "printer",
+                  "value": "{{printer}}",
+                  "type": "text"
+                },
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "testdata/printDemo.pdf"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('tightLimits')) { return skip(\"needs the tight-limit profile G\"); }",
+                  "  expectFail(413, 'request body exceeds the ' + val('maxUploadBytes') + ' byte limit');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-MP-09 · Upload just under the limit → 200",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "The boundary's other side: the limit must not be off-by-one against a legitimate file.",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "printer",
+                  "value": "{{printer}}",
+                  "type": "text"
+                },
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "testdata/small.pdf"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('tightLimits')) { return skip(\"needs the tight-limit profile G\"); }",
+                  "  expectSubmitted();",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-JSON-10 · Oversize JSON body → 413",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "JSON intakes get a much tighter bound than uploads: a print-by-reference body has no legitimate reason to be large.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"file_url\":\"https://example.com/{{padding}}.pdf\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.variables.set('padding', 'p'.repeat(600));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('tightLimits')) { return skip(\"needs the tight-limit profile G\"); }",
+                  "  expectFail(413, 'request body exceeds the ' + val('maxJsonBytes') + ' byte limit');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-URL-14 · Oversize fetch, honest Content-Length → 413",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"file_url\":\"{{fixtureBase}}/printDemo.pdf\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('tightLimits')) { return skip(\"needs the tight-limit profile G\"); }",
+                  "  if (!flag('fixturesUp')) { return skip(\"needs the fixture HTTP server (profile E / G)\"); }",
+                  "  if (flag('allowlistOn')) { return skip(\"the host allowlist answers 403 before this gate is reached; run under profile A / E\"); }",
+                  "  expectFail(413, 'file_url response is too large');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-URL-15 · Oversize fetch, chunked and lying → 413",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "No Content-Length at all, so only the LimitReader around the body can catch it. This is the row that proves the up-front check is not the only defence.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"file_url\":\"{{fixtureBase}}/lying-chunked\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('tightLimits')) { return skip(\"needs the tight-limit profile G\"); }",
+                  "  if (!flag('fixturesUp')) { return skip(\"needs the fixture HTTP server (profile E / G)\"); }",
+                  "  if (flag('allowlistOn')) { return skip(\"the host allowlist answers 403 before this gate is reached; run under profile A / E\"); }",
+                  "  expectFail(413, 'file_url response is too large');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-S3-07 · Oversize object → 413",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "Checked against the store's own authoritative size metadata before a single byte is copied — unlike file_url's Content-Length, which is a claim until the read catches the lie.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"s3_key\":\"{{s3LargeKey}}\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('tightLimits')) { return skip(\"needs the tight-limit profile G\"); }",
+                  "  if (!flag('s3Enabled') || val('s3Fault') !== 'none') { return skip(\"needs a healthy object store (profile C / D / G)\"); }",
+                  "  expectFail(413, 'object exceeds the maximum allowed size of ' + val('s3MaxBytes') + ' bytes');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "End-to-end chains",
+      "description": "Multi-step flows that cross features. Requests here depend on the one before them (they pass state through collection variables), so run the folder in order — do not cherry-pick a single request out of it.",
+      "item": [
+        {
+          "name": "E2E-01a · Presign a PUT URL",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/files/presign",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "files",
+                "presign"
+              ]
+            },
+            "description": "Step 1 of the recommended large-file path: no document bytes ever cross the gateway on intake.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"key\":\"test/e2e-upload.pdf\",\"method\":\"PUT\",\"ttl_seconds\":300}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('s3Enabled') || val('s3Fault') !== 'none') { return skip(\"needs a healthy object store (profile C / D / G)\"); }",
+                  "  expectPresigned('test/e2e-upload.pdf');",
+                  "  pm.collectionVariables.set('e2ePutUrl', pm.response.json().url);",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "E2E-01b · Upload straight to the store",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/pdf"
+              }
+            ],
+            "url": {
+              "raw": "http://chain-did-not-run.invalid/",
+              "protocol": "http",
+              "host": [
+                "chain-did-not-run",
+                "invalid"
+              ],
+              "path": [
+                ""
+              ]
+            },
+            "description": "Step 2. Newman cannot attach a file to a raw PUT from a collection variable URL, so this uploads a small marker body — enough to prove the presigned PUT is honoured by the store. The PDF-bytes version of this chain is scripts/ops-checks.sh e2e-upload.",
+            "body": {
+              "mode": "raw",
+              "raw": "E2E-PLACEHOLDER-BODY",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "var chained = String(pm.variables.get(\"e2ePutUrl\") || '');",
+                  "var blocked = !flag('s3Enabled') || val('s3Fault') !== 'none';",
+                  "if (blocked || !/^https?:\\/\\//.test(chained)) {",
+                  "  if (pm.execution && pm.execution.skipRequest) { pm.execution.skipRequest(); }",
+                  "} else {",
+                  "  pm.request.url.update(chained);",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('s3Enabled') || val('s3Fault') !== 'none') { return skip(\"needs a healthy object store (profile C / D / G)\"); }",
+                  "  expectAnyStatus([200, 204]);",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "E2E-01c · Print the uploaded object by key",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "Step 3: the key written in E2E-01b is now printable. Completes the presign→upload→print chain.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"s3_key\":\"test/e2e-upload.pdf\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('s3Enabled') || val('s3Fault') !== 'none') { return skip(\"needs a healthy object store (profile C / D / G)\"); }",
+                  "  expectSubmitted();",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "E2E-02a · Presign a GET URL",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/files/presign",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "files",
+                "presign"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"key\":\"{{s3Key}}\",\"method\":\"GET\",\"ttl_seconds\":300}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('s3Enabled') || val('s3Fault') !== 'none') { return skip(\"needs a healthy object store (profile C / D / G)\"); }",
+                  "  expectPresigned(val('s3Key'));",
+                  "  pm.collectionVariables.set('e2eGetUrl', pm.response.json().url);",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "E2E-02b · Fetch it directly from the store",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "http://chain-did-not-run.invalid/",
+              "protocol": "http",
+              "host": [
+                "chain-did-not-run",
+                "invalid"
+              ],
+              "path": [
+                ""
+              ]
+            },
+            "description": "Proves the minted URL actually works against the backend, without our credentials."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "var chained = String(pm.variables.get(\"e2eGetUrl\") || '');",
+                  "var blocked = !flag('s3Enabled') || val('s3Fault') !== 'none';",
+                  "if (blocked || !/^https?:\\/\\//.test(chained)) {",
+                  "  if (pm.execution && pm.execution.skipRequest) { pm.execution.skipRequest(); }",
+                  "} else {",
+                  "  pm.request.url.update(chained);",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('s3Enabled') || val('s3Fault') !== 'none') { return skip(\"needs a healthy object store (profile C / D / G)\"); }",
+                  "  expectStatus(200);",
+                  "  pm.test('got the seeded document back', function () {",
+                  "  // Deliberately NOT a byte-count threshold: profile G points s3Key",
+                  "  // at small.pdf (698 B) so the general S3 rows do not trip its",
+                  "  // tightened cap, and a '> 1000' assertion here then failed for a",
+                  "  // reason having nothing to do with presigning. PDF magic bytes",
+                  "  // plus non-emptiness hold under every profile.",
+                  "  pm.expect(pm.response.responseSize, 'empty body').to.be.above(0);",
+                  "  pm.expect(pm.response.text().slice(0, 5), 'PDF magic bytes').to.eql('%PDF-');",
+                  "  });",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "E2E-04 · AWS presigned GET printed via file_url, strict guard",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "The ONLY file_url happy path that runs with the production security posture intact: an AWS presigned URL is public HTTPS on 443, so it passes the strict guard unaided. Depends on E2E-02a having run in this same run.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"file_url\":\"{{e2eGetUrl}}\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('s3Enabled') || val('s3Fault') !== 'none') { return skip(\"needs a healthy object store (profile C / D / G)\"); }",
+                  "  if (val('s3Backend') !== 'aws') { return skip(\"needs --s3-backend aws (a public presigned URL)\"); }",
+                  "  if (flag('allowPrivate')) { return skip(\"asserts the strict fetch guard; run under profile A\"); }",
+                  "  expectSubmitted();",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "E2E-05 · Local presigned GET via file_url is blocked",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "The mirror of E2E-04, and the reason profile E exists: the same chain against local MinIO is correctly refused, because the URL is loopback on a non-443 port. A 200 here would mean the guard had been disabled.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{printer}}\",\"file_url\":\"{{e2eGetUrl}}\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('s3Enabled') || val('s3Fault') !== 'none') { return skip(\"needs a healthy object store (profile C / D / G)\"); }",
+                  "  if (val('s3Backend') !== 'local') { return skip(\"needs --s3-backend local\"); }",
+                  "  if (flag('allowPrivate')) { return skip(\"asserts the strict fetch guard; run under profile A\"); }",
+                  "  expectFail(400);",
+                  "  pm.test('refused by the guard, not by the store', function () {",
+                  "  pm.expect(details()).to.match(/disallowed address|not allowed \\(only 80\\/443\\)/);",
+                  "  });",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "E2E-06 · Expired presigned URL is refused",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/files/presign",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "files",
+                "presign"
+              ]
+            },
+            "description": "Needs a real wait between minting and using the URL, which the Postman sandbox has no way to do. Implemented in scripts/ops-checks.sh expired-presign.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"key\":\"{{s3Key}}\",\"ttl_seconds\":5}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (true) { return skip(\"not assertable over HTTP — see the named script\"); }",
+                  "  expectStatus(200);",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Real paper",
+      "description": "PHYSICALLY PRINTS on the Brother MFC-L2700DW via the brother-direct queue. Excluded unless run-newman.sh is given --with-paper. A human must confirm the output; the assertions here only prove submission succeeded.",
+      "item": [
+        {
+          "name": "GW-MP-02 · Multipart to the real printer → 2 pages",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "X-Laas-Identifier",
+                "value": "paper-mp-{{$timestamp}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "CONFIRM AT THE PRINTER: 2 pages. Prerequisite: brother-direct enabled, printer online and loaded.",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "printer",
+                  "value": "{{paperPrinter}}",
+                  "type": "text"
+                },
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "testdata/printDemo.pdf"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('paper')) { return skip(\"prints on real paper; pass --with-paper to run it\"); }",
+                  "  expectSubmitted();",
+                  "  pm.test('submitted to the paper queue', function () {",
+                  "  pm.expect(pm.response.json().output).to.include(val('paperPrinter'));",
+                  "  });",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-S3-03 · s3_key to the real printer → 2 pages",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Laas-Identifier",
+                "value": "paper-s3-{{$timestamp}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "CONFIRM AT THE PRINTER: 2 pages.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{paperPrinter}}\",\"s3_key\":\"{{s3Key}}\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('paper')) { return skip(\"prints on real paper; pass --with-paper to run it\"); }",
+                  "  if (!flag('s3Enabled') || val('s3Fault') !== 'none') { return skip(\"needs a healthy object store (profile C / D / G)\"); }",
+                  "  expectSubmitted();",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "E2E-03 · presign→upload→print to the real printer",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Laas-Identifier",
+                "value": "paper-e2e-{{$timestamp}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "CONFIRM AT THE PRINTER: 2 pages. Run the End-to-end chains folder first so the object exists.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"printer\":\"{{paperPrinter}}\",\"s3_key\":\"{{s3Key}}\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('paper')) { return skip(\"prints on real paper; pass --with-paper to run it\"); }",
+                  "  if (!flag('s3Enabled') || val('s3Fault') !== 'none') { return skip(\"needs a healthy object store (profile C / D / G)\"); }",
+                  "  expectSubmitted();",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Vault precedence",
+      "description": "The HTTP-observable half of the Vault contract. The process-level half (refuse-to-start, fallback logging) is scripts/startup-matrix.sh — it cannot be asserted from a client, because a failing case has no listener at all.",
+      "item": [
+        {
+          "name": "GW-SEC-02a · Environment token is rejected when Vault supplies one",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{altToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "Profile B/D deliberately set PRINT_GATEWAY_TOKEN to a different value. If this 401 ever became a 200, Vault silently stopped being the source of truth — the exact regression this row exists to catch."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('vaultEnabled')) { return skip(\"needs a Vault-backed profile (B / D)\"); }",
+                  "  expectFail(401, 'unauthorized');",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GW-SEC-02b · Vault token authenticates",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Labos-Print-Token",
+                "value": "{{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "text/plain"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/print",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "print"
+              ]
+            },
+            "description": "415 (not 401) proves the Vault-sourced token was accepted.",
+            "body": {
+              "mode": "raw",
+              "raw": "x",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "eval(pm.variables.get('utils'));",
+                  "(function () {",
+                  "  if (!flag('vaultEnabled')) { return skip(\"needs a Vault-backed profile (B / D)\"); }",
+                  "  expectFail(415, 'Content-Type must be');",
+                  "  pm.test('authenticated', function () { pm.expect(pm.response.code).to.not.eql(401); });",
+                  "})();"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "event": [
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Runs after EVERY request in the collection.",
+          "// Guarded to gateway-addressed requests: the End-to-end folder also talks",
+          "// straight to the object store, which has no reason to carry our headers.",
+          "var base = String(pm.variables.get('baseUrl') || '');",
+          "if (base && pm.request.url.toString().indexOf(base) === 0) {",
+          "  pm.test('[all] X-Laas-Identifier present', function () {",
+          "    pm.expect(pm.response.headers.has('X-Laas-Identifier'), 'every response carries a correlation id').to.be.true;",
+          "  });",
+          "  if (pm.response.code >= 400 && pm.response.code !== 404) {",
+          "    pm.test('[all] labOS error envelope', function () {",
+          "      var j = pm.response.json();",
+          "      pm.expect(j).to.have.property('errorCode');",
+          "      pm.expect(j).to.have.property('errorMessage');",
+          "      pm.expect(j).to.have.nested.property('errorDetails.details');",
+          "    });",
+          "  }",
+          "}"
+        ]
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "utils",
+      "value": "val = function (n) { var v = pm.variables.get(n); return v === undefined || v === null ? '' : String(v); };\nflag = function (n) { return val(n).toLowerCase() === 'true'; };\n\n// The ONLY discriminating part of a failure body. error_handler@v1.2.4 hardcodes\n// errorCode \"21\" and errorMessage \"Internal server error\" on every failure\n// regardless of status, so nothing may ever assert on those two (TEST-PLAN 3.1).\ndetails = function () {\n  try { return String(pm.response.json().errorDetails.details || ''); }\n  catch (e) { return pm.response.text(); }\n};\n\nexpectStatus = function (s) {\n  pm.test('HTTP ' + s, function () { pm.response.to.have.status(s); });\n};\n\nexpectFail = function (s, sub) {\n  expectStatus(s);\n  if (sub) {\n    pm.test('details contains \"' + sub + '\"', function () {\n      pm.expect(details()).to.include(sub);\n    });\n  }\n};\n\nexpectAnyStatus = function (list) {\n  pm.test('HTTP one of [' + list.join(', ') + '] (got ' + pm.response.code + ')', function () {\n    pm.expect(list).to.include(pm.response.code);\n  });\n};\n\nexpectSubmitted = function () {\n  expectStatus(200);\n  pm.test('body is a submitted-print envelope', function () {\n    var j = pm.response.json();\n    pm.expect(j.status).to.eql('submitted');\n    // lp's own acknowledgement, e.g. \"request id is vp1-42 (0 file(s))\".\n    //\n    // ZERO, not one. cups.LPSubmitter pipes the document on stdin and passes\n    // no path operand at all, deliberately — that is what makes filename-based\n    // argument injection structurally impossible rather than merely guarded\n    // against. lp counts file OPERANDS, so a stdin job legitimately reports 0.\n    // Asserted exactly rather than loosely: if the path operand were ever\n    // reintroduced this count would silently become 1, and that regression is\n    // worth catching here.\n    // (src/printgateway/README.md documented \"(1 file(s))\" until this suite\n    // caught it — that example predated the stdin change.)\n    pm.expect(j.output).to.match(/request id is \\S+-\\d+ \\(0 file\\(s\\)\\)/);\n  });\n};\n\n// A 500/502 must never carry the apperr.Internal detail: a spool path, lp's\n// stderr, an S3 endpoint or a presigned URL. This is a security assertion, not\n// a cosmetic one (TEST-PLAN 3.4).\nexpectNoLeak = function () {\n  pm.test('no internal detail leaked into the response', function () {\n    var b = pm.response.text();\n    pm.expect(b, 'temp path').to.not.match(/\\/tmp\\//);\n    pm.expect(b, 'spool filename').to.not.match(/print-(upload|download|s3)-/);\n    pm.expect(b, 'lp stderr').to.not.match(/\\blp:/);\n    pm.expect(b, 'credential-ish').to.not.match(/X-Amz-Signature|SecretKey|AccessKey/i);\n  });\n};\n\nskip = function (why) {\n  pm.test.skip('SKIPPED — ' + why, function () {});\n};\n\n// The statuses a print-by-s3_key may legitimately return under the CURRENT\n// profile. Used by the rows whose subject is something else entirely (the JSON\n// decoder's case-insensitivity, its duplicate-key rule) but which have to name\n// a document somehow, and so inherit the store's health as well.\n//\n// Three cases, not two: \"storage not configured\" (503) and \"storage configured\n// and healthy\" (200) are the obvious pair, but the C-fault-* profiles are\n// configured AND deliberately broken, and answer 502 — which used to fail\n// GW-JSON-08/09 under all three fault profiles for a reason having nothing to\n// do with what those rows assert.\ns3PrintStatuses = function () {\n  if (!flag('s3Enabled')) return [503];\n  if (val('s3Fault') !== 'none') return [502, 504];\n  return [200];\n};\n\n// expires_at within tolerance of now+ttl. Generous by design: presigning can\n// cost a live bucket-location round trip when S3_REGION is empty.\nexpectExpiry = function (ttlSeconds, toleranceSeconds) {\n  pm.test('expires_at is about ' + ttlSeconds + 's away', function () {\n    var j = pm.response.json();\n    var delta = (Date.parse(j.expires_at) - Date.now()) / 1000;\n    pm.expect(delta, 'seconds until expiry').to.be.within(\n      ttlSeconds - (toleranceSeconds || 90),\n      ttlSeconds + (toleranceSeconds || 90)\n    );\n  });\n};\n\nexpectPresigned = function (key) {\n  expectStatus(200);\n  pm.test('presign envelope', function () {\n    var j = pm.response.json();\n    pm.expect(j.url, 'url').to.be.a('string').and.to.match(/^https?:\\/\\//);\n    pm.expect(j.key, 'key echoed verbatim').to.eql(key);\n    pm.expect(j.expires_at, 'expires_at').to.be.a('string');\n  });\n};",
+      "type": "string"
+    },
+    {
+      "key": "e2ePutUrl",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "e2eGetUrl",
+      "value": "",
+      "type": "string"
+    }
+  ]
+}

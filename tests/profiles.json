@@ -1,0 +1,354 @@
+{
+  "$comment": [
+    "SINGLE SOURCE OF TRUTH for every test profile (TEST-PLAN.md section 4).",
+    "Read by scripts/profile.sh (python3) to build the gateway's systemd env file,",
+    "and by postman/build-collection.js (node) to generate the Postman environments.",
+    "Both consume the same JSON so a profile can never mean two different things.",
+    "",
+    "${NAME} placeholders resolve against, in increasing precedence:",
+    "  1. the 'vars' block below,",
+    "  2. tests/.env.local (git-ignored; created by scripts/bootstrap.sh),",
+    "  3. the caller's own environment.",
+    "A placeholder that resolves to nothing and is not listed in 'optional' is a",
+    "hard error, so a half-configured backend fails loudly at profile-switch time",
+    "rather than as a confusing 503 forty scenarios later."
+  ],
+
+  "vars": {
+    "GW_ADDR": "127.0.0.1:8090",
+    "GW_BASE_URL": "http://127.0.0.1:8090",
+    "GW_PRINTER": "vp1",
+    "GW_PAPER_PRINTER": "brother-direct",
+    "GW_ALT_TOKEN": "definitely-not-the-real-token",
+
+    "VAULT_URL": "http://127.0.0.1:8200",
+    "VAULT_ROOT_TOKEN": "dev-root",
+    "VAULT_MOUNT": "kv-v2",
+    "VAULT_SECRET_PATH": "config/print_gateway",
+    "LABOS_ENV_VALUE": "",
+
+    "LOG_SERVER_ADDR": "127.0.0.1:514",
+
+    "FIXTURE_HOST": "127.0.0.1",
+    "FIXTURE_PORT": "8099",
+    "FIXTURE_BASE": "http://127.0.0.1:8099",
+
+    "$comment_ALLOWED_HOSTS": "localhost is allowlisted deliberately, for GW-URL-18: it is the only way to present a host that PASSES the allowlist and must still be refused by the address block, proving the two gates are independent rather than one implying the other.",
+    "ALLOWED_HOSTS": "amazonaws.com,example.com,localhost",
+    "ALLOWLIST_BLOCKED_URL": "https://not-in-the-list.invalid/a.pdf",
+
+    "S3_LOCAL_ENDPOINT": "127.0.0.1:9010",
+    "S3_LOCAL_BUCKET": "printgw-test",
+    "S3_LOCAL_REGION": "us-east-1",
+    "S3_LOCAL_INSECURE": "true",
+    "S3_LOCAL_ACCESS_KEY": "printgwtest",
+    "S3_LOCAL_SECRET_KEY": "printgwtest-secret",
+
+    "S3_TIGHT_MAX_BYTES": "65536",
+    "GW_TIGHT_UPLOAD_BYTES": "1048576",
+    "GW_TIGHT_JSON_BYTES": "256",
+    "GW_TIGHT_FETCH_BYTES": "65536",
+
+    "PRESIGN_TTL": "15m",
+    "PRESIGN_TTL_SECONDS": "900"
+  },
+
+  "$optional": [
+    "LABOS_ENV_VALUE",
+    "S3_INTERNAL_ENDPOINT", "S3_INTERNAL_BUCKET", "S3_INTERNAL_REGION",
+    "S3_INTERNAL_INSECURE", "S3_INTERNAL_ACCESS_KEY", "S3_INTERNAL_SECRET_KEY",
+    "S3_AWS_ENDPOINT", "S3_AWS_BUCKET", "S3_AWS_REGION",
+    "S3_AWS_INSECURE", "S3_AWS_ACCESS_KEY", "S3_AWS_SECRET_KEY"
+  ],
+
+  "$comment_keys": [
+    "Object keys seeded by scripts/setup-minio.sh. Named here so the collection",
+    "and the seeder can never disagree about what is supposed to be in the bucket."
+  ],
+  "objectKeys": {
+    "s3Key":        "test/printDemo.pdf",
+    "s3SmallKey":   "test/small.pdf",
+    "s3LargeKey":   "test/large.bin",
+    "s3TextKey":    "test/not-a-pdf.txt",
+    "s3EmptyKey":   "test/empty.pdf",
+    "s3SpaceKey":   "test/a b ü.pdf",
+    "s3MissingKey": "test/does-not-exist.pdf"
+  },
+
+  "profiles": {
+    "A": {
+      "label": "baseline",
+      "description": "Env token, no Vault, no object store, strict fetch guard, default limits. The default posture; most scenarios run here.",
+      "gateway": {
+        "GW_ADDR": "${GW_ADDR}",
+        "PRINT_GATEWAY_TOKEN": "${GW_TOKEN}"
+      },
+      "postman": {
+        "token": "${GW_TOKEN}",
+        "altToken": "${GW_ALT_TOKEN}"
+      }
+    },
+
+    "B": {
+      "label": "vault",
+      "description": "Print token resolved from Vault. PRINT_GATEWAY_TOKEN is deliberately set to a DIFFERENT value so that a passing run proves Vault won the precedence contest (GW-SEC-02), not merely that some token worked.",
+      "gateway": {
+        "GW_ADDR": "${GW_ADDR}",
+        "VAULT_ADDR": "${VAULT_URL}",
+        "VAULT_TOKEN": "${VAULT_ROOT_TOKEN}",
+        "LABOS_ENV": "${LABOS_ENV_VALUE}",
+        "PRINT_GATEWAY_TOKEN": "${GW_ALT_TOKEN}"
+      },
+      "requires": ["vault"],
+      "postman": {
+        "token": "${GW_VAULT_TOKEN}",
+        "altToken": "${GW_ALT_TOKEN}",
+        "vaultEnabled": "true"
+      }
+    },
+
+    "C": {
+      "label": "s3",
+      "description": "Env token + object storage. Run once per --s3-backend (local | internal | aws).",
+      "gateway": {
+        "GW_ADDR": "${GW_ADDR}",
+        "PRINT_GATEWAY_TOKEN": "${GW_TOKEN}",
+        "PRINT_GATEWAY_S3_ENDPOINT": "${S3_ENDPOINT}",
+        "PRINT_GATEWAY_S3_BUCKET": "${S3_BUCKET}",
+        "PRINT_GATEWAY_S3_REGION": "${S3_REGION}",
+        "PRINT_GATEWAY_S3_INSECURE": "${S3_INSECURE}",
+        "PRINT_GATEWAY_S3_ACCESS_KEY": "${S3_ACCESS_KEY}",
+        "PRINT_GATEWAY_S3_SECRET_KEY": "${S3_SECRET_KEY}",
+        "PRINT_GATEWAY_PRESIGN_TTL": "${PRESIGN_TTL}"
+      },
+      "requires": ["s3"],
+      "postman": {
+        "token": "${GW_TOKEN}",
+        "altToken": "${GW_ALT_TOKEN}",
+        "s3Enabled": "true"
+      }
+    },
+
+    "D": {
+      "label": "vault+s3",
+      "description": "Both secret layers at once: print token AND S3 credentials from Vault. No S3 access/secret key in the environment at all, so a passing GW-S3-02 proves the Vault credential path (GW-SEC-11).",
+      "gateway": {
+        "GW_ADDR": "${GW_ADDR}",
+        "VAULT_ADDR": "${VAULT_URL}",
+        "VAULT_TOKEN": "${VAULT_ROOT_TOKEN}",
+        "LABOS_ENV": "${LABOS_ENV_VALUE}",
+        "PRINT_GATEWAY_TOKEN": "${GW_ALT_TOKEN}",
+        "PRINT_GATEWAY_S3_ENDPOINT": "${S3_ENDPOINT}",
+        "PRINT_GATEWAY_S3_BUCKET": "${S3_BUCKET}",
+        "PRINT_GATEWAY_S3_REGION": "${S3_REGION}",
+        "PRINT_GATEWAY_S3_INSECURE": "${S3_INSECURE}",
+        "PRINT_GATEWAY_PRESIGN_TTL": "${PRESIGN_TTL}"
+      },
+      "requires": ["vault", "s3"],
+      "postman": {
+        "token": "${GW_VAULT_TOKEN}",
+        "altToken": "${GW_ALT_TOKEN}",
+        "vaultEnabled": "true",
+        "s3Enabled": "true"
+      }
+    },
+
+    "E": {
+      "label": "permissive",
+      "description": "Fetch guard disabled (PRINT_GATEWAY_ALLOW_PRIVATE_TARGETS=true). The ONLY profile in which a file_url happy path against a local fixture is possible. Fetch timeout shortened to 5s so the /slow row fails fast.",
+      "gateway": {
+        "GW_ADDR": "${GW_ADDR}",
+        "PRINT_GATEWAY_TOKEN": "${GW_TOKEN}",
+        "PRINT_GATEWAY_ALLOW_PRIVATE_TARGETS": "true",
+        "PRINT_GATEWAY_FETCH_TIMEOUT": "5s"
+      },
+      "requires": ["fixtures"],
+      "postman": {
+        "token": "${GW_TOKEN}",
+        "altToken": "${GW_ALT_TOKEN}",
+        "allowPrivate": "true",
+        "fixturesUp": "true"
+      }
+    },
+
+    "F": {
+      "label": "allowlist",
+      "description": "Strict guard PLUS a host-suffix allowlist, to prove the allowlist is an independent gate (403, not 400) and that neither knob lifts the other.",
+      "gateway": {
+        "GW_ADDR": "${GW_ADDR}",
+        "PRINT_GATEWAY_TOKEN": "${GW_TOKEN}",
+        "PRINT_GATEWAY_FETCH_ALLOWED_HOSTS": "${ALLOWED_HOSTS}"
+      },
+      "postman": {
+        "token": "${GW_TOKEN}",
+        "altToken": "${GW_ALT_TOKEN}",
+        "allowlistOn": "true"
+      }
+    },
+
+    "E-allowlist": {
+      "label": "permissive+allowlist",
+      "description": "GW-URL-20 only: ALLOW_PRIVATE_TARGETS does not lift the host allowlist. The two knobs are independent, and this is the only profile that can show it.",
+      "gateway": {
+        "GW_ADDR": "${GW_ADDR}",
+        "PRINT_GATEWAY_TOKEN": "${GW_TOKEN}",
+        "PRINT_GATEWAY_ALLOW_PRIVATE_TARGETS": "true",
+        "PRINT_GATEWAY_FETCH_ALLOWED_HOSTS": "example.com"
+      },
+      "requires": ["fixtures"],
+      "postman": {
+        "token": "${GW_TOKEN}",
+        "altToken": "${GW_ALT_TOKEN}",
+        "allowPrivate": "true",
+        "allowlistOn": "true",
+        "fixturesUp": "true"
+      }
+    },
+
+    "G": {
+      "label": "limits",
+      "description": "Everything enabled, every size limit tightened so the existing 2.5 MB printDemo.pdf and a few hundred bytes of JSON trip every 413 path. C + E + tight limits in one profile, because the limit scenarios span all three intakes.",
+      "gateway": {
+        "GW_ADDR": "${GW_ADDR}",
+        "PRINT_GATEWAY_TOKEN": "${GW_TOKEN}",
+        "PRINT_GATEWAY_ALLOW_PRIVATE_TARGETS": "true",
+        "PRINT_GATEWAY_FETCH_TIMEOUT": "5s",
+        "PRINT_GATEWAY_MAX_UPLOAD_BYTES": "${GW_TIGHT_UPLOAD_BYTES}",
+        "PRINT_GATEWAY_MAX_JSON_BYTES": "${GW_TIGHT_JSON_BYTES}",
+        "PRINT_GATEWAY_FETCH_MAX_BYTES": "${GW_TIGHT_FETCH_BYTES}",
+        "PRINT_GATEWAY_S3_MAX_BYTES": "${S3_TIGHT_MAX_BYTES}",
+        "PRINT_GATEWAY_S3_ENDPOINT": "${S3_ENDPOINT}",
+        "PRINT_GATEWAY_S3_BUCKET": "${S3_BUCKET}",
+        "PRINT_GATEWAY_S3_REGION": "${S3_REGION}",
+        "PRINT_GATEWAY_S3_INSECURE": "${S3_INSECURE}",
+        "PRINT_GATEWAY_S3_ACCESS_KEY": "${S3_ACCESS_KEY}",
+        "PRINT_GATEWAY_S3_SECRET_KEY": "${S3_SECRET_KEY}"
+      },
+      "requires": ["s3", "fixtures"],
+      "postman": {
+        "token": "${GW_TOKEN}",
+        "altToken": "${GW_ALT_TOKEN}",
+        "s3Enabled": "true",
+        "allowPrivate": "true",
+        "fixturesUp": "true",
+        "tightLimits": "true",
+        "$comment_s3Key": "The general s3_key scenarios download whatever s3Key names. Under this profile the 2.5 MB default would trip the tightened S3 cap and fail for the wrong reason, so they point at the small object instead; GW-S3-07 uses s3LargeKey to exercise the cap deliberately.",
+        "s3Key": "test/small.pdf",
+        "maxUploadBytes": "${GW_TIGHT_UPLOAD_BYTES}",
+        "maxJsonBytes": "${GW_TIGHT_JSON_BYTES}",
+        "fetchMaxBytes": "${GW_TIGHT_FETCH_BYTES}",
+        "s3MaxBytes": "${S3_TIGHT_MAX_BYTES}"
+      }
+    },
+
+    "C-fault-endpoint": {
+      "label": "s3 fault: dead endpoint",
+      "description": "GW-S3-08. Object storage configured but pointed at a port with nothing on it: every s3_key must answer 502 with no endpoint detail in the body.",
+      "gateway": {
+        "GW_ADDR": "${GW_ADDR}",
+        "PRINT_GATEWAY_TOKEN": "${GW_TOKEN}",
+        "PRINT_GATEWAY_S3_ENDPOINT": "127.0.0.1:9",
+        "PRINT_GATEWAY_S3_BUCKET": "${S3_BUCKET}",
+        "PRINT_GATEWAY_S3_REGION": "${S3_REGION}",
+        "PRINT_GATEWAY_S3_INSECURE": "true",
+        "PRINT_GATEWAY_S3_ACCESS_KEY": "${S3_ACCESS_KEY}",
+        "PRINT_GATEWAY_S3_SECRET_KEY": "${S3_SECRET_KEY}",
+        "PRINT_GATEWAY_S3_TIMEOUT": "5s"
+      },
+      "requires": ["s3"],
+      "postman": {
+        "token": "${GW_TOKEN}",
+        "altToken": "${GW_ALT_TOKEN}",
+        "s3Enabled": "true",
+        "s3Fault": "endpoint"
+      }
+    },
+
+    "C-fault-creds": {
+      "label": "s3 fault: bad credentials",
+      "description": "GW-S3-09. Real endpoint, wrong secret key: must be 502 (a downstream failure), never 404 (which would misreport an auth failure as a missing object).",
+      "gateway": {
+        "GW_ADDR": "${GW_ADDR}",
+        "PRINT_GATEWAY_TOKEN": "${GW_TOKEN}",
+        "PRINT_GATEWAY_S3_ENDPOINT": "${S3_ENDPOINT}",
+        "PRINT_GATEWAY_S3_BUCKET": "${S3_BUCKET}",
+        "PRINT_GATEWAY_S3_REGION": "${S3_REGION}",
+        "PRINT_GATEWAY_S3_INSECURE": "${S3_INSECURE}",
+        "PRINT_GATEWAY_S3_ACCESS_KEY": "${S3_ACCESS_KEY}",
+        "PRINT_GATEWAY_S3_SECRET_KEY": "wrong-secret-key-on-purpose",
+        "PRINT_GATEWAY_S3_TIMEOUT": "10s"
+      },
+      "requires": ["s3"],
+      "postman": {
+        "token": "${GW_TOKEN}",
+        "altToken": "${GW_ALT_TOKEN}",
+        "s3Enabled": "true",
+        "s3Fault": "creds"
+      }
+    },
+
+    "C-fault-slow": {
+      "label": "s3 fault: stalled endpoint",
+      "description": "GW-S3-13. The S3 endpoint is pointed at the fixture server, whose /slow route accepts the connection and then stalls. With S3_TIMEOUT=2s the request must fail in seconds, not hold the connection to the 8m write timeout.",
+      "gateway": {
+        "GW_ADDR": "${GW_ADDR}",
+        "PRINT_GATEWAY_TOKEN": "${GW_TOKEN}",
+        "PRINT_GATEWAY_S3_ENDPOINT": "${FIXTURE_HOST}:${FIXTURE_PORT}",
+        "PRINT_GATEWAY_S3_BUCKET": "${S3_BUCKET}",
+        "PRINT_GATEWAY_S3_REGION": "${S3_REGION}",
+        "PRINT_GATEWAY_S3_INSECURE": "true",
+        "PRINT_GATEWAY_S3_ACCESS_KEY": "${S3_ACCESS_KEY}",
+        "PRINT_GATEWAY_S3_SECRET_KEY": "${S3_SECRET_KEY}",
+        "PRINT_GATEWAY_S3_TIMEOUT": "2s"
+      },
+      "requires": ["fixtures"],
+      "postman": {
+        "token": "${GW_TOKEN}",
+        "altToken": "${GW_ALT_TOKEN}",
+        "s3Enabled": "true",
+        "s3Fault": "slow"
+      }
+    },
+
+    "LOG": {
+      "label": "logstash",
+      "description": "Baseline plus log shipping, for GW-OPS-10 / GW-SEC-13-14 (correlation id traceable in Kibana). Not part of the contract run.",
+      "gateway": {
+        "GW_ADDR": "${GW_ADDR}",
+        "PRINT_GATEWAY_TOKEN": "${GW_TOKEN}",
+        "LOG_SERVER": "${LOG_SERVER_ADDR}",
+        "HOST_IP": "127.0.0.1"
+      },
+      "postman": {
+        "token": "${GW_TOKEN}",
+        "altToken": "${GW_ALT_TOKEN}"
+      }
+    }
+  },
+
+  "$comment_postman_defaults": [
+    "Every Postman environment gets these first, then the profile's own 'postman'",
+    "block overrides them. A scenario therefore never has to ask 'is this variable",
+    "even defined here' - only 'is it true'."
+  ],
+  "postmanDefaults": {
+    "baseUrl": "${GW_BASE_URL}",
+    "printer": "${GW_PRINTER}",
+    "paperPrinter": "${GW_PAPER_PRINTER}",
+    "fixtureBase": "${FIXTURE_BASE}",
+    "allowlistBlockedUrl": "${ALLOWLIST_BLOCKED_URL}",
+    "presignTtlSeconds": "${PRESIGN_TTL_SECONDS}",
+    "vaultEnabled": "false",
+    "s3Enabled": "false",
+    "s3Fault": "none",
+    "allowPrivate": "false",
+    "allowlistOn": "false",
+    "fixturesUp": "false",
+    "tightLimits": "false",
+    "paper": "false",
+    "maxUploadBytes": "67108864",
+    "maxJsonBytes": "8192",
+    "fetchMaxBytes": "67108864",
+    "s3MaxBytes": "67108864"
+  }
+}

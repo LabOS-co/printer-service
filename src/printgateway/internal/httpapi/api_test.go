@@ -18,10 +18,6 @@ func newBareAPI() (*API, *capturingLogger) {
 }
 
 // containsSubstring reports whether any entry in errs contains substr.
-// error_handler.HandleError (called at the end of every fail invocation)
-// logs its own line too — the *public* text, by the time it sees the error —
-// alongside whatever fail itself logged, so these tests assert "this
-// specific text is somewhere in the log," not "exactly one line was logged."
 func containsSubstring(errs []string, substr string) bool {
 	for _, e := range errs {
 		if strings.Contains(e, substr) {
@@ -64,10 +60,6 @@ func TestFailHTTPErrorWithNoInternalLogsNothing(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", w.Code)
 	}
-	// fail itself has no Internal detail to log for this error, but
-	// error_handler.HandleError still logs its own line (the Public text) —
-	// that's a separate, pre-existing behavior this test isn't about; what
-	// matters here is that fail added nothing beyond that.
 	if errs := logger.snapshotErrors(); len(errs) != 1 || errs[0] != "printer is required" {
 		t.Errorf("expected only error_handler's own line, got %v", errs)
 	}
@@ -85,11 +77,6 @@ func TestFailNilErrorIsGuarded(t *testing.T) {
 	if w.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want 500", w.Code)
 	}
-	// "nil error" specifically, not just "caller bug" — an Opus review of
-	// this stage found both guard branches' messages contain "caller bug",
-	// so asserting only that substring couldn't tell this branch apart from
-	// TestFailTypedNilHTTPErrorIsGuarded's (a mutant swapping the two
-	// messages would pass both tests).
 	if !containsSubstring(logger.snapshotErrors(), "nil error") {
 		t.Errorf("expected a nil-error caller-bug LogError call, got %v", logger.snapshotErrors())
 	}
@@ -116,10 +103,8 @@ func TestFailTypedNilHTTPErrorIsGuarded(t *testing.T) {
 	}
 }
 
-// TestFailUnclassifiedErrorIsNeverSerialized is the structural guarantee
-// apperr.HTTPError exists for: a plain error (not an *apperr.HTTPError) must
-// never reach the client verbatim, even though no production call site
-// constructs one today.
+// TestFailUnclassifiedErrorIsNeverSerialized asserts a plain error (not an
+// *apperr.HTTPError) never reaches the client verbatim.
 func TestFailUnclassifiedErrorIsNeverSerialized(t *testing.T) {
 	t.Parallel()
 
@@ -140,11 +125,8 @@ func TestFailUnclassifiedErrorIsNeverSerialized(t *testing.T) {
 	}
 }
 
-// TestRequireTokenEmptyExpectedFailsClosed pins the comment in requireToken:
-// with no token configured (unreachable through main() since F2, but not
-// unreachable through direct API construction), an unauthenticated request
-// must still be refused, not authorized by crypto/subtle's zero-length
-// equality quirk.
+// TestRequireTokenEmptyExpectedFailsClosed asserts that with no token
+// configured, an unauthenticated request is still refused (fail closed).
 func TestRequireTokenEmptyExpectedFailsClosed(t *testing.T) {
 	t.Parallel()
 
@@ -156,7 +138,6 @@ func TestRequireTokenEmptyExpectedFailsClosed(t *testing.T) {
 	srv := httptest.NewServer(NewServer(a).Handler)
 	defer srv.Close()
 
-	// No Authorization header at all.
 	resp, err := http.Post(srv.URL+"/print", "application/json", strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatal(err)

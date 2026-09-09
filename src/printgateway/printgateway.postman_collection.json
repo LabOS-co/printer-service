@@ -6,7 +6,7 @@
   },
   "variable": [
     { "key": "baseUrl", "value": "http://127.0.0.1:8090" },
-    { "key": "token", "value": "W21AYM5zr0kOYt1vnfxBZ2W2KiqPIjYc" },
+    { "key": "token", "value": "local-dev-token-change-me" },
     { "key": "printer", "value": "brother-direct" }
   ],
   "item": [
