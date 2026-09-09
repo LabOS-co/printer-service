@@ -11,25 +11,15 @@ import (
 	"unicode/utf8"
 )
 
-// ippClientTimeout is httpClient's default Timeout, overridable per
-// subcommand via -timeout (see setClientTimeout). Bounds the whole
-// request/response round trip (dial through reading the body): without it,
-// a target that accepts the TCP connection but never answers - a wedged
-// cupsd, a dropped firewall rule - blocks the caller forever; for
-// `bench -wait-completion` that meant a worker never returned and the
-// whole run hung with no output at all, which is worse than the give-up
-// -poll-timeout is supposed to produce.
+// ippClientTimeout is httpClient's default Timeout, overridable via -timeout.
+// Without a timeout, a target that accepts the TCP connection but never
+// answers blocks the caller forever instead of giving up.
 const ippClientTimeout = 60 * time.Second
 
-// httpClient is shared across every sendIPP call instead of allocating one
-// per call (B4) - not for connection pooling (a nil Transport already
-// defaults to http.DefaultTransport, so a fresh *http.Client per call
-// reused the pool just as well), but so -timeout applies uniformly from one
-// place, including to bench's many concurrent goroutines. Safe for
-// concurrent use (http.Client's own contract); Timeout is set once via
-// setClientTimeout before any goroutine starts (every call site parses
-// flags and calls setClientTimeout before spawning workers), never mutated
-// concurrently with a request in flight.
+// httpClient is shared across every sendIPP call so -timeout applies
+// uniformly, including to bench's concurrent goroutines. Timeout must be set
+// via setClientTimeout before any worker goroutine starts - it is not safe to
+// mutate concurrently with a request in flight.
 var httpClient = &http.Client{Timeout: ippClientTimeout}
 
 // setClientTimeout applies a -timeout flag value (0 = keep the default) to
@@ -51,33 +41,14 @@ func setClientTimeout(d time.Duration) {
 // should be rejected rather than fully buffered into memory.
 const maxIPPResponseBytes = 16 << 20 // 16 MiB
 
-// maxIPPFieldLen is the largest name/value length IPP's own framing can
-// encode in one attribute: RFC 8010's length prefix is a uint16. Without
-// this guard, a name/value longer than this truncates only the LENGTH
-// PREFIX (uint16(len(s)) wraps silently) while the FULL string is still
-// written after it - desyncing every byte of the message that follows, not
-// just this one field's content. The only externally-influenced input that
-// can realistically reach this is a job name/title built from a long file
-// path or an explicit -job-name flag; every other caller here passes a
-// short, hardcoded attribute/keyword name.
+// maxIPPFieldLen is the largest name/value length IPP's uint16 length prefix
+// can encode; a longer value would silently wrap the prefix while still
+// writing the full string, desyncing the rest of the message.
 const maxIPPFieldLen = 65535
 
-// ippSafeString clamps s to at most maxIPPFieldLen bytes so the length
-// prefix written to the wire and the bytes actually written always agree.
-// kind/name identify the field in the warning printed to stderr only when
-// truncation actually happens - built lazily, in the truncation branch, not
-// on every call: this runs per attribute per request (bench.go calls it up
-// to hundreds of times per run), and building a label string on every
-// non-truncating call is a needless allocation in a benchmarking tool's own
-// worker loop.
-//
-// The clamp backs off to the nearest rune boundary at or below
-// maxIPPFieldLen rather than cutting at the raw byte index: IPP's own
-// attributes-charset declaration (buildRequest) promises utf-8, and a value
-// truncated mid-rune is invalid utf-8 in a message that says otherwise - a
-// strict server can reject the whole request over that, not just this one
-// field. Backing off can only ever shrink the cut, never grow it, so the
-// uint16 length prefix stays correct either way.
+// ippSafeString clamps s to at most maxIPPFieldLen bytes, backing off to the
+// nearest rune boundary so the truncated value stays valid utf-8 (required by
+// the attributes-charset declaration), and warns on stderr when it truncates.
 func ippSafeString(kind, name, s string) string {
 	if len(s) <= maxIPPFieldLen {
 		return s
@@ -90,12 +61,7 @@ func ippSafeString(kind, name, s string) string {
 	return s[:n]
 }
 
-// IPP value tags (RFC 8010). tagUnsupported (the out-of-band "unsupported"
-// value, not the 0x05 unsupported-attributes group delimiter), tagOctetString,
-// and tagTextWithoutLang are not referenced elsewhere yet - decodeValue's
-// default case already renders them correctly as raw strings, and
-// tagUnsupported is expected to be wired up when group structure is retained
-// (plan item B2).
+// IPP value tags (RFC 8010).
 const (
 	tagUnsupported     byte = 0x10
 	tagInteger         byte = 0x21
@@ -218,12 +184,10 @@ func buildRequest(operation uint16, requestID uint32, printerURI, requestingUser
 }
 
 // sendIPP posts an IPP request (optionally followed by document data) to the
-// given HTTP(S) endpoint and parses the response header + attributes.
-// documentSize is the exact byte count document will yield (0 when document
-// is nil): known up front by every caller (a *bytes.Buffer/[]byte length, or
-// an *os.File's Stat().Size()), which is what lets Content-Length be set
-// explicitly below instead of net/http falling back to chunked
-// transfer-encoding for a body it can't measure itself.
+// given HTTP(S) endpoint and parses the response header and attributes.
+// documentSize must be document's exact byte count (0 when document is nil)
+// so Content-Length can be set explicitly instead of falling back to chunked
+// transfer-encoding.
 func sendIPP(endpoint string, request *bytes.Buffer, document io.Reader, documentSize int64) (*ippResponse, error) {
 	var body io.Reader = request
 	if document != nil {
@@ -244,11 +208,7 @@ func sendIPP(endpoint string, request *bytes.Buffer, document io.Reader, documen
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		// A much smaller bound than the real response limit below: this is
-		// diagnostic text for a stderr message, not a document, and 16 MiB
-		// is unreasonably large for something %v-formatted straight into an
-		// error string.
-		const maxIPPErrorBodyBytes = 4 << 10
+		const maxIPPErrorBodyBytes = 4 << 10 // diagnostic text only, not a document
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, maxIPPErrorBodyBytes))
 		return nil, fmt.Errorf("unexpected HTTP status %s from %s: %s", resp.Status, endpoint, string(data))
 	}
@@ -284,14 +244,9 @@ func parseResponse(raw []byte) (*ippResponse, error) {
 		if tag == tagEndOfAttributes {
 			break
 		}
-		// delimiter tags mark the start of an attribute group (operation/job/
-		// printer/unsupported). Track which one is open so each attribute can
-		// carry it - in particular so an attribute under
-		// tagUnsupportedAttributes (the printer naming what it rejected) can be
-		// told apart from a normal printer/job attribute once parsed.
 		if tag <= 0x0F {
-			group = tag
-			lastName = "" // a new group starts a new attribute, per ippfix's reference parser
+			group = tag // track the open group so each attribute records which one it belongs to
+			lastName = ""
 			continue
 		}
 		if pos+2 > len(raw) {
@@ -305,7 +260,7 @@ func parseResponse(raw []byte) (*ippResponse, error) {
 		name := string(raw[pos : pos+nameLen])
 		pos += nameLen
 		if name == "" {
-			name = lastName // additional value for a multi-valued attribute
+			name = lastName // empty name = additional value of the previous multi-valued attribute (RFC 8010)
 		} else {
 			lastName = name
 		}
@@ -365,11 +320,9 @@ func decodeValue(tag byte, raw []byte) string {
 	return string(raw)
 }
 
-// statusName names an IPP status code. 0x0001/0x0002 are distinguished from
-// 0x0000 rather than collapsed into "successful-ok": the printer accepted the
-// job but ignored, substituted, or found conflicting job attributes - exactly
-// the failure mode (a silently dropped media/printer-resolution pin) this
-// project spent weeks diagnosing.
+// statusName names an IPP status code. 0x0001/0x0002 are kept distinct from
+// 0x0000: they mean the printer accepted the job but ignored, substituted, or
+// found conflicting attributes, which is not a clean success.
 func statusName(code uint16) string {
 	switch code {
 	case 0x0000:

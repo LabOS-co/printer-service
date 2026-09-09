@@ -1,26 +1,6 @@
-// ippfix is an IPP reverse proxy that sits between CUPS and a real printer
-// and sanitizes the printer's Get-Printer-Attributes response using a
-// template of known-good default values.
-//
-// The original POC proxy (C:\printerSearch\ippfix) hardcoded a single fix:
-// replace empty naturalLanguage-tagged attribute values with "en-us". That
-// worked, but it only defends against the one bug class we happened to find
-// on this printer, and stricter IPP validators (cups-filters 2.0.0) might
-// reject the response for other reasons we haven't hit yet.
-//
-// This version generalizes the idea: a template captures a full "known
-// good" snapshot of the printer's printer-attributes group (built once from
-// a real capture, with known-broken fields corrected). At request time,
-// every attribute in the printer-attributes group is checked against the
-// template:
-//   - if the printer's live value for that attribute is present and
-//     non-empty, it is kept as-is (the printer's real answer always wins);
-//   - if the live value is empty, or the attribute is missing entirely, the
-//     template's value is substituted instead.
-//
-// This means we always hand CUPS a complete, well-formed attribute set,
-// regardless of which specific fields this printer's firmware happens to
-// get wrong.
+// ippfix is an IPP reverse proxy between CUPS and a real printer that
+// sanitizes the printer's Get-Printer-Attributes response by overlaying a
+// template of known-good values over live but broken/missing fields.
 package main
 
 import (
@@ -36,19 +16,18 @@ import (
 	"strconv"
 )
 
-// IPP tags relevant here (RFC 8010).
+// IPP tags relevant here.
 const (
 	tagEndOfAttributes  byte = 0x03
 	tagPrinterAttrGroup byte = 0x04
 	tagOperationAttrs   byte = 0x01
 )
 
-// entry is one element of the flat, ordered token stream that makes up an
-// IPP message body after the 8-byte header: either a group delimiter
-// (tag <= 0x0F, name/value unused) or an attribute value.
+// entry is one token of an IPP message body: either a group delimiter
+// (tag <= 0x0F) or an attribute value.
 type entry struct {
 	tag         byte
-	nameOnWire  string // as encoded: empty for a continuation value of a multi-valued attribute
+	nameOnWire  string // empty for a continuation value of a multi-valued attribute
 	logicalName string // nameOnWire, or the owning attribute's name for continuation values
 	value       []byte
 }
@@ -157,11 +136,8 @@ func templateAttrToEntries(a templateAttr) []entry {
 	return entries
 }
 
-// tagAllowsEmptyValue reports whether a zero-length value is normal (not a
-// sign of a broken attribute) for this tag: the out-of-band value tags
-// (unsupported/unknown/no-value/etc., 0x10-0x1F) and the begCollection
-// (0x34) / endCollection (0x37) structural markers are always zero-length
-// by design, not evidence of a malformed response.
+// tagAllowsEmptyValue reports whether a zero-length value is normal for this
+// tag rather than a sign of a broken attribute.
 func tagAllowsEmptyValue(tag byte) bool {
 	if tag >= 0x10 && tag <= 0x1f {
 		return true
@@ -169,19 +145,16 @@ func tagAllowsEmptyValue(tag byte) bool {
 	return tag == 0x34 || tag == 0x37
 }
 
-// tagsRequiringNonEmpty are IPP value-tag types where RFC 8011 requires a
-// non-empty value; this printer's firmware violates that for at least one
-// naturalLanguage-tagged attribute. Treated generically by tag, not by a
-// specific attribute name, so any other attribute of the same tag type that
-// turns out broken is covered too.
+// This printer's firmware sends an empty value for a naturalLanguage-tagged
+// attribute, which strict IPP clients (cups-filters 2.0.0) reject; fixed
+// generically by tag so any other attribute of the same type is covered too.
 var tagsRequiringNonEmpty = map[byte]string{
 	0x48: "en-us", // naturalLanguage
 	0x47: "utf-8", // charset
 }
 
 // buildTemplateFromCapture extracts the printer-attributes group from a raw
-// Get-Printer-Attributes response and applies the known tag-level fixups,
-// producing the "golden" template.
+// Get-Printer-Attributes response and applies the known tag-level fixups.
 func buildTemplateFromCapture(body []byte) template {
 	if len(body) < 8 {
 		return template{}
@@ -214,14 +187,10 @@ func buildTemplateFromCapture(body []byte) template {
 	return tmpl
 }
 
-// fixEmptyRequiredTags applies the generic tag-level fix (empty
-// naturalLanguage/charset values get a sane default) to every attribute in
-// the message, regardless of which group it's in. This matters because the
-// empty attributes-natural-language value shows up in the RESPONSE's own
-// operation-attributes group (echoed back per RFC 8011), not just inside
-// the printer-attributes group that the by-name template overlay targets —
-// a strict client can reject the message over that alone, before it ever
-// gets to inspecting printer capabilities.
+// fixEmptyRequiredTags fixes empty naturalLanguage/charset values across the
+// whole message, not just the printer-attributes group: the broken value is
+// echoed into the response's operation-attributes group too, which a strict
+// client checks before it ever reaches printer capabilities.
 func fixEmptyRequiredTags(entries []entry) {
 	for i := range entries {
 		e := &entries[i]
@@ -234,13 +203,9 @@ func fixEmptyRequiredTags(entries []entry) {
 	}
 }
 
-// applyTemplate fixes empty naturalLanguage/charset values everywhere in the
-// message, then additionally walks the printer-attributes group and, for
-// each attribute there, keeps the live value if present/non-empty, or
-// substitutes the template's value otherwise. Attributes present in the
-// template but entirely absent from the live response are appended. The
-// by-name overlay only runs if a template was loaded; the tag-level fix
-// above always runs.
+// applyTemplate fixes empty naturalLanguage/charset values everywhere, then
+// overlays the printer-attributes group against tmpl: a live value is kept
+// if valid, otherwise the template's value is substituted or appended.
 func applyTemplate(body []byte, tmpl template) []byte {
 	if len(body) < 8 {
 		return body
@@ -294,14 +259,12 @@ func applyTemplate(body []byte, tmpl template) []byte {
 			continue
 		}
 
-		// collect the full run of entries for this attribute (name + any
-		// zero-length-name continuation values)
 		name := e.logicalName
-		j := i + 1
-		for j < len(entries) && entries[j].tag > 0x0f && entries[j].nameOnWire == "" && entries[j].logicalName == name {
-			j++
+		attrEnd := i + 1
+		for attrEnd < len(entries) && entries[attrEnd].tag > 0x0f && entries[attrEnd].nameOnWire == "" && entries[attrEnd].logicalName == name {
+			attrEnd++
 		}
-		run := entries[i:j]
+		run := entries[i:attrEnd]
 		seen[name] = true
 
 		valid := true
@@ -317,9 +280,9 @@ func applyTemplate(body []byte, tmpl template) []byte {
 		} else if def, ok := byName[name]; ok {
 			out = append(out, templateAttrToEntries(def)...)
 		} else {
-			out = append(out, run...) // nothing better to substitute
+			out = append(out, run...)
 		}
-		i = j
+		i = attrEnd
 	}
 	flushMissing()
 
@@ -396,8 +359,8 @@ func main() {
 	log.Fatal(http.ListenAndServe(*listen, nil))
 }
 
-// runGenTemplate sends a Get-Printer-Attributes request directly to the real
-// printer, builds a template from the response, and writes it as JSON.
+// runGenTemplate sends a Get-Printer-Attributes request to the real printer
+// and writes the resulting template as JSON to outPath.
 func runGenTemplate(target, outPath string) error {
 	uri := target + "/ipp/print"
 	buf := &bytes.Buffer{}

@@ -1,6 +1,5 @@
-// printersearch is a minimal IPP client used to print a PDF directly to a
-// network printer's built-in IPP endpoint, without going through the
-// Windows print spooler or any local rendering tool (no SumatraPDF, no GDI).
+// printersearch is a minimal IPP client that prints a PDF directly to a
+// printer's IPP endpoint, bypassing the Windows print spooler.
 package main
 
 import (
@@ -35,10 +34,7 @@ func main() {
 	}
 }
 
-// usage always goes to stderr: every call site reaches it only via a usage
-// mistake or an unrecognized subcommand, both already exiting 1 - and stdout
-// is exactly what `> out.txt` would swallow, hiding the one message meant to
-// explain the failure.
+// usage prints to stderr so it isn't swallowed by `> out.txt` redirection.
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage:")
 	fmt.Fprintln(os.Stderr, "  printersearch info   -host <ip> [-port 631] [-path /ipp/print] [-timeout 60s]")
@@ -63,9 +59,8 @@ func httpEndpoint(host string, port int, path string) string {
 	return fmt.Sprintf("http://%s:%d%s", host, port, path)
 }
 
-// printAttributes prints one line per attribute, flagging the ones the
-// printer placed under the unsupported-attributes group - the protocol's own
-// way of naming which requested attributes it rejected.
+// printAttributes prints one line per attribute, flagging any placed under
+// the unsupported-attributes group (IPP's way of naming rejected attributes).
 func printAttributes(attrs []ippAttribute) {
 	for _, a := range attrs {
 		marker := ""
@@ -76,20 +71,10 @@ func printAttributes(attrs []ippAttribute) {
 	}
 }
 
-// openDocument opens path and returns it alongside its exact size, for the
-// streaming sendIPP call in runPrint to declare as an explicit
-// Content-Length. That declaration is a hard contract once made: net/http
-// writes at most that many bytes to the wire (io.LimitReader in its own
-// transfer writer) and errors only afterward on a mismatch - so a size that
-// isn't knowable up front doesn't fail loud, it silently changes what
-// actually gets sent. A FIFO, /dev/stdin, a process-substitution path, or a
-// procfs file all report Size()==0 from Stat, which would put a
-// well-framed Print-Job carrying an EMPTY document on the wire; a regular
-// file being mutated concurrently would have the wire body silently
-// truncated to whatever size was true at Stat time. os.ReadFile (what this
-// replaced) had no such gap, since it read the actual bytes rather than
-// trusting a metadata field - hence rejecting anything that isn't a
-// regular file outright, rather than only degrading gracefully.
+// openDocument opens path and returns it with its exact size, for sendIPP to
+// declare as Content-Length. Only regular files are accepted: a FIFO or
+// procfs path reports a stale/zero Stat size, which would silently send the
+// wrong number of bytes instead of failing loudly.
 func openDocument(path string) (*os.File, int64) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -163,12 +148,6 @@ func runPrint(args []string) {
 		os.Exit(1)
 	}
 
-	// Streamed via os.Open rather than os.ReadFile (B4): the whole point of
-	// bench.go's own os.ReadFile is loading the payload once so disk I/O
-	// doesn't skew concurrently-measured latency (see bench.go's doc
-	// comment) - runPrint is the one-shot CLI path with no such measurement
-	// to protect, so there's no reason to hold the entire document in
-	// memory here.
 	doc, size := openDocument(*file)
 	defer doc.Close()
 
@@ -184,11 +163,9 @@ func runPrint(args []string) {
 		writeAttribute(buf, tagMimeMediaType, "document-format", "application/pdf")
 		writeAttribute(buf, tagNameWithoutLang, "job-name", name)
 
-		// Explicit job-attributes group: pin down media/color/quality/copies
-		// instead of relying on the printer's auto-detected defaults, since
-		// this printer's IPP capability response has a malformed
-		// attributes-natural-language field that confused CUPS's driverless
-		// autoconfiguration and produced a corrupt oversized raster job.
+		// Pin media/color/quality/copies explicitly: this printer's malformed
+		// attributes-natural-language field breaks CUPS driverless autoconfig
+		// and its auto-detected defaults, producing a corrupt oversized job.
 		buf.WriteByte(tagJobAttributes)
 		writeAttribute(buf, tagKeyword, "media", *media)
 		writeAttribute(buf, tagKeyword, "print-color-mode", *colorMode)
@@ -214,10 +191,8 @@ func runPrint(args []string) {
 	fmt.Printf("Status: %s (0x%04x)\n", statusName(resp.StatusCode), resp.StatusCode)
 	printAttributes(resp.Attributes)
 
-	// Only 0x0000 is a clean success. 0x0001/0x0002 mean the printer accepted
-	// the job but ignored, substituted, or found conflicting job attributes -
-	// the exact way a pinned media/printer-resolution attribute can be
-	// silently dropped and produce a corrupt print while looking like success.
+	// 0x0001/0x0002 mean the printer silently dropped or altered a requested
+	// attribute (e.g. media/printer-resolution) while still "succeeding".
 	if resp.StatusCode != 0x0000 {
 		fmt.Fprintf(os.Stderr, "FAILED: printer reported %s, not a clean success - check for [REJECTED BY PRINTER] attributes above.\n", statusName(resp.StatusCode))
 		os.Exit(1)

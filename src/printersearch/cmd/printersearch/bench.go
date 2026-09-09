@@ -24,16 +24,8 @@ type target struct {
 
 func (t target) label() string { return fmt.Sprintf("%d%s", t.port, t.path) }
 
-// completionOutcome enumerates what -wait-completion observed for one
-// successfully-accepted job. This used to be two independent bools
-// (completedOK/gaveUp), which left a third real outcome - the job was
-// accepted but its job-id couldn't be parsed from the response, so completion
-// could not even be attempted - with no bucket of its own: it silently
-// vanished from both the "measured" and "gave up" counts (P0-8 follow-up). An
-// enum makes the outcome set closed: every accepted job under
-// -wait-completion lands in exactly one of these, and report() can switch
-// on it exhaustively instead of relying on boolean combinations that don't
-// enumerate their own states.
+// completionOutcome is the closed set of outcomes -wait-completion can
+// observe for one accepted job.
 type completionOutcome int
 
 const (
@@ -43,16 +35,10 @@ const (
 	completionNoJobID                               // job accepted, but job-id could not be parsed from the response
 )
 
-// benchResult is one submitted job's outcome. `elapsed` is the time to
-// *accept* the job (Print-Job round trip only - this is what a queue-based
-// architecture returns to the client immediately). `completed`, when
-// `completion == completionMeasured`, is the additional time observed until
-// the job actually finished processing server-side (job-state reaches a
-// terminal value) - this is the fair number to compare against a synchronous
-// path like SumatraPDF -print-to, which blocks until rendering+dispatch is
-// done. Any other `completion` value means `completed` is not a latency
-// measurement and must never be folded into the completion latency stats
-// (P0-8): a give-up is "we don't know", not "it took this long."
+// benchResult is one submitted job's outcome. elapsed is the Print-Job
+// accept latency; completed is a real latency only when
+// completion == completionMeasured - a give-up or missing job-id must never
+// be folded into completion latency stats as if it were a measured duration.
 type benchResult struct {
 	target     target
 	elapsed    time.Duration
@@ -221,12 +207,9 @@ func findIntAttr(attrs []ippAttribute, name string) int32 {
 }
 
 // pollJobCompletion polls Get-Job-Attributes until job-state reaches a
-// terminal value (7=canceled, 8=aborted, 9=completed) or the timeout is
-// reached. The bool return distinguishes a real measurement from a give-up
-// (P0-8): the old single-Duration return made `return timeout` on the
-// give-up path indistinguishable from "the job actually took this long",
-// so a completely unresponsive target could report a fabricated
-// p50=p95=poll-timeout with fail=0 instead of the failure it is.
+// terminal value (7=canceled, 8=aborted, 9=completed) or timeout elapses.
+// The bool return tells a real measurement apart from a give-up, so a
+// give-up can't be mistaken for "the job took exactly poll-timeout".
 func pollJobCompletion(host string, port int, path string, jobID int32, interval, timeout time.Duration) (time.Duration, bool) {
 	endpoint := httpEndpoint(host, port, path)
 	uri := printerURI(host, port, path)
@@ -250,12 +233,9 @@ func pollJobCompletion(host string, port int, path string, jobID int32, interval
 }
 
 // targetStat accumulates one target's (or the overall) results.
-// successDurations/completedDurations hold ONLY successful/completed samples
-// (P0-7, P0-8): a failed request's accept-latency, and a give-up's wait time,
-// are counted (fail/gaveUp/noJobID) but never blended into the percentile
-// arrays, since a fast connection-refused failure or a poll-timeout give-up
-// is not a latency measurement and mixing it in silently drags (or flatters)
-// the reported tail depending on which way the contaminating values skew.
+// successDurations/completedDurations hold only successful/completed
+// samples; failures and give-ups are counted separately (fail/gaveUp/
+// noJobID) and never blended into the latency percentiles.
 type targetStat struct {
 	successDurations   []time.Duration
 	completedDurations []time.Duration
@@ -264,9 +244,8 @@ type targetStat struct {
 	noJobID            int
 }
 
-// statSummary is the percentile computation shared by both the human-readable
-// and -json report paths, so they can never silently diverge on the numbers
-// themselves (formatting/labeling still lives separately in each renderer).
+// statSummary is the percentile computation shared by the text and -json
+// report paths, so the two can never diverge on the numbers themselves.
 type statSummary struct {
 	hasSamples              bool
 	min, avg, p50, p95, max time.Duration
@@ -278,9 +257,8 @@ func summarize(durations []time.Duration) statSummary {
 	}
 	sorted := append([]time.Duration(nil), durations...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
-	// Nearest-rank (ceiling), not a floor-truncated index: with n<21 samples
-	// the old `int((n-1)*p)` could never select the slowest sample for p95,
-	// biasing the reported tail low - the direction that flatters the result.
+	// Nearest-rank (ceiling): a floor-truncated index can never select the
+	// slowest sample as p95 when n<21, biasing the reported tail low.
 	pct := func(p float64) time.Duration {
 		idx := int(math.Ceil(p*float64(len(sorted)))) - 1
 		if idx < 0 {
@@ -302,12 +280,9 @@ func summarize(durations []time.Duration) statSummary {
 	}
 }
 
-// throughputNote explains what the printed req/s figure actually measures.
-// Under -wait-completion each worker submits a job and then blocks polling it
-// to completion before picking up the next one, so wall time is dominated by
-// completion polling, not submission - reporting that as a clean "Print-Job
-// requests only" rate would repeat the exact mistake (a number whose label
-// doesn't match what it measures) this workstream exists to eliminate.
+// throughputNote labels what the printed req/s figure measures: under
+// -wait-completion, wall time includes completion polling, not just
+// submission, so it must not be mislabeled as a pure submission rate.
 func throughputNote(waitCompletion bool) string {
 	if waitCompletion {
 		return "end-to-end rate: wall time INCLUDES completion polling (-wait-completion is set) - NOT the Print-Job submission rate"
@@ -351,9 +326,7 @@ func report(results <-chan benchResult, total time.Duration, targets []target, j
 		}
 	}
 
-	// Throughput counts accepted Print-Job requests only (success + fail);
-	// -wait-completion polling traffic is not counted in the numerator - see
-	// throughputNote for why the denominator still isn't a clean number.
+	// Numerator is Print-Job requests only; -wait-completion polling traffic isn't counted.
 	throughput := float64(len(overall.successDurations)+overall.fail) / total.Seconds()
 	note := throughputNote(waitCompletion)
 
@@ -365,9 +338,6 @@ func report(results <-chan benchResult, total time.Duration, targets []target, j
 }
 
 func printTextReport(total time.Duration, throughput float64, throughputNote string, targets []target, byTarget map[string]*targetStat, overall *targetStat, waitCompletion bool) {
-	// count is always the number of samples backing the printed percentiles;
-	// fail/gaveup/nojobid are reported alongside as separate, explicit
-	// columns rather than blended into count or into the percentiles.
 	printAcceptStat := func(label string, fail int, durations []time.Duration) {
 		count := len(durations)
 		if count == 0 && fail == 0 {
@@ -381,12 +351,8 @@ func printTextReport(total time.Duration, throughput float64, throughputNote str
 		fmt.Printf("%-20s count=%-4d fail=%-3d min=%-8v avg=%-8v p50=%-8v p95=%-8v max=%-8v\n",
 			label, count, fail, s.min, s.avg, s.p50, s.p95, s.max)
 	}
-	// Unlike printAcceptStat, this never skips a target present in byTarget,
-	// even when count/gaveup/nojobid are all zero: under -wait-completion a
-	// target that never produced a single measured/gaveup/nojobid outcome
-	// (e.g. every job to it failed outright) still gets an explicit
-	// all-zero row instead of silently vanishing from the section (P0-8
-	// follow-up finding).
+	// Unlike printAcceptStat, always prints a row, even all-zero, so a target
+	// with no measured/gaveup/nojobid outcome doesn't silently vanish.
 	printCompletionStat := func(label string, gaveup, nojobid int, durations []time.Duration) {
 		count := len(durations)
 		s := summarize(durations)
@@ -424,10 +390,8 @@ func printTextReport(total time.Duration, throughput float64, throughputNote str
 	}
 }
 
-// latencyStats is the JSON shape of a statSummary; embedded (not nested) into
-// jsonAcceptStat/jsonCompletionStat so its fields marshal at the top level of
-// each. *_ms fields are nil (omitted) when there were no samples to
-// summarize - distinct from a genuine 0ms measurement.
+// latencyStats is the JSON shape of a statSummary. Fields are nil (omitted)
+// when there were no samples, distinct from a genuine 0ms measurement.
 type latencyStats struct {
 	MinMS *float64 `json:"min_ms,omitempty"`
 	AvgMS *float64 `json:"avg_ms,omitempty"`
@@ -444,14 +408,10 @@ func newLatencyStats(s statSummary) latencyStats {
 	return latencyStats{MinMS: ms(s.min), AvgMS: ms(s.avg), P50MS: ms(s.p50), P95MS: ms(s.p95), MaxMS: ms(s.max)}
 }
 
-// jsonAcceptStat/jsonCompletionStat are deliberately separate types, each
-// with its own constructor below, rather than one struct discriminated by a
-// string/enum field - that removes the possibility (present in an earlier
-// version of this fix) of a typo'd discriminator silently producing an empty
-// fail/gaveup/nojobid count with no error. Fail/GaveUp/NoJobID have no
-// `omitempty`: for a format whose stated purpose is diffing numbers across
-// runs, a real 0 must render as `0`, not as an absent key indistinguishable
-// from "this field doesn't apply here".
+// jsonAcceptStat/jsonCompletionStat are separate types (not one struct with a
+// discriminator field) so a typo'd discriminator can't silently produce an
+// empty count. No `omitempty` on the int fields: a real 0 must render as
+// `0`, not vanish, since this format's purpose is diffing numbers across runs.
 type jsonAcceptStat struct {
 	Count int `json:"count"`
 	Fail  int `json:"fail"`
