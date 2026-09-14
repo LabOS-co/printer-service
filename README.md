@@ -47,7 +47,9 @@ printersearch (Go IPP client) ────────raw IPP──────�
 # DEPLOY/IPPFIX vars and .gitignore's binary entries both assume.
 go build -o printersearch.exe .                           # root
 cd src/printersearch && go build -o printersearch ./cmd/printersearch
-cd src/printgateway && GOOS=linux GOARCH=amd64 go build -o printgateway-linux-amd64 ./cmd/printgateway
+cd src/printgateway
+LDFLAGS="-X github.com/version-go/ldflags.buildVersion=$(git describe --tags --always) -X github.com/version-go/ldflags.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ) -X github.com/version-go/ldflags.buildHash=$(git rev-parse --short HEAD)"
+GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS" -o printgateway-linux-amd64 ./cmd/printgateway
 cd src/ippfix && GOOS=linux GOARCH=amd64 go build -o ippfix ./cmd/ippfix
 ```
 

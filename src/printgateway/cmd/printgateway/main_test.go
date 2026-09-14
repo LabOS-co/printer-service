@@ -93,7 +93,7 @@ func TestRunReturnsErrorOnInvalidConfig(t *testing.T) {
 	err := run(context.Background(), func() {}, envMap(map[string]string{
 		config.AuthTokenEnv:   "t",
 		config.ReadTimeoutEnv: "not-a-duration",
-	}), noReadFile(t), &recordingLogger{})
+	}), noReadFile(t), &recordingLogger{}, false)
 	if err == nil {
 		t.Fatal("expected an error for a malformed PRINT_GATEWAY_READ_TIMEOUT, got nil")
 	}
@@ -105,7 +105,7 @@ func TestRunReturnsErrorOnInvalidConfig(t *testing.T) {
 func TestRunReturnsErrorWhenNoPrintTokenIsResolvable(t *testing.T) {
 	t.Parallel()
 
-	err := run(context.Background(), func() {}, envMap(nil), noReadFile(t), &recordingLogger{})
+	err := run(context.Background(), func() {}, envMap(nil), noReadFile(t), &recordingLogger{}, false)
 	if err == nil {
 		t.Fatal("expected an error when neither Vault nor PRINT_GATEWAY_TOKEN produce a token")
 	}
@@ -193,7 +193,7 @@ func TestRunGracefulShutdownReturnsNil(t *testing.T) {
 	go func() {
 		runErr <- run(ctx, stopSignals, envMap(envWithPort(t, addr, map[string]string{
 			config.AuthTokenEnv: "test-token",
-		})), noReadFile(t), logger)
+		})), noReadFile(t), logger, false)
 	}()
 
 	waitForDial(t, addr, 5*time.Second)
@@ -246,7 +246,7 @@ func TestRunReturnsErrorOnListenFailure(t *testing.T) {
 	err = run(context.Background(), func() {}, envMap(map[string]string{
 		config.AuthTokenEnv: "test-token",
 		config.PortEnv:      occupiedPort,
-	}), noReadFile(t), &recordingLogger{})
+	}), noReadFile(t), &recordingLogger{}, false)
 	if err == nil {
 		t.Fatalf("expected an error binding an already-occupied address %s, got nil", occupied)
 	}
@@ -274,7 +274,7 @@ func TestRunCoversS3AndPrivateTargetsWarningPaths(t *testing.T) {
 			config.S3SecretKeyEnv:         "secret-key",
 			config.S3RegionEnv:            "us-east-1",
 			config.AllowPrivateTargetsEnv: "true",
-		})), noReadFile(t), logger)
+		})), noReadFile(t), logger, false)
 	}()
 
 	waitForDial(t, addr, 5*time.Second)
@@ -438,6 +438,41 @@ func TestNewObjectStoreEmptyRegionWarnsButStillSucceeds(t *testing.T) {
 	}
 }
 
+// TestRunRegisterToConsulTrueDoesNotBlockStart proves registerToConsul=true takes the
+// system_api.Register-launching branch without delaying either the listener coming up or
+// graceful shutdown: Register's own http.Client has no timeout, so if it ran synchronously
+// (or the goroutine's completion were awaited) a stalled/unreachable Consul agent could hang
+// this test. It's not flaky against a real Consul agent: system_args.ShouldRegisterToConsul()
+// re-resolves its own -consul-register flag independently inside Register, which is unset in
+// the test binary, so Register's internal registration attempt is always skipped there — this
+// test only exercises the goroutine-launch and non-blocking behavior, not a live Consul call.
+func TestRunRegisterToConsulTrueDoesNotBlockStart(t *testing.T) {
+	t.Parallel()
+
+	addr := freeAddr(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	logger := &recordingLogger{}
+
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- run(ctx, func() {}, envMap(envWithPort(t, addr, map[string]string{
+			config.AuthTokenEnv: "test-token",
+		})), noReadFile(t), logger, true)
+	}()
+
+	waitForDial(t, addr, 5*time.Second)
+	cancel()
+
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("run returned an error with registerToConsul=true: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("run did not return after ctx was cancelled; registerToConsul=true must not block startup or shutdown")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Config-file layer (Stage 3)
 // ---------------------------------------------------------------------------
@@ -459,7 +494,7 @@ func TestRunReturnsErrorOnMissingConfigFile(t *testing.T) {
 	err := run(context.Background(), func() {}, envMap(map[string]string{
 		config.AuthTokenEnv:  "t",
 		config.ConfigPathEnv: missing,
-	}), mapReadFile(nil), &recordingLogger{})
+	}), mapReadFile(nil), &recordingLogger{}, false)
 
 	if err == nil {
 		t.Fatal("expected an error for a named-but-missing config file, got nil")
@@ -488,7 +523,7 @@ func TestRunStartsFromAConfigFile(t *testing.T) {
 		runErr <- run(ctx, func() {}, envMap(envWithPort(t, addr, map[string]string{
 			config.AuthTokenEnv:  "test-token",
 			config.ConfigPathEnv: configPath,
-		})), mapReadFile(map[string]string{configPath: fileBody}), logger)
+		})), mapReadFile(map[string]string{configPath: fileBody}), logger, false)
 	}()
 
 	waitForDial(t, addr, 5*time.Second)
@@ -524,7 +559,7 @@ func TestRunLogsFileSourcedSettingsWithTheirFileOrigin(t *testing.T) {
 		runErr <- run(ctx, func() {}, envMap(envWithPort(t, addr, map[string]string{
 			config.AuthTokenEnv:  "test-token",
 			config.ConfigPathEnv: configPath,
-		})), mapReadFile(map[string]string{configPath: fileBody}), logger)
+		})), mapReadFile(map[string]string{configPath: fileBody}), logger, false)
 	}()
 
 	waitForDial(t, addr, 5*time.Second)
@@ -582,7 +617,7 @@ func TestRunAllowPrivateTargetsStaysEnvOnly(t *testing.T) {
 			config.AuthTokenEnv:           "test-token",
 			config.ConfigPathEnv:          configPath,
 			config.AllowPrivateTargetsEnv: "true",
-		})), mapReadFile(map[string]string{configPath: fileBody}), logger)
+		})), mapReadFile(map[string]string{configPath: fileBody}), logger, false)
 	}()
 
 	waitForDial(t, addr, 5*time.Second)

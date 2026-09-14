@@ -122,21 +122,74 @@ are otherwise indistinguishable from the response alone.
 
 ## Health check
 
-`GET /status`, unauthenticated (no `X-Labos-Print-Token` needed) — the
-network-proxy in front of this service polls it as a liveness check, the
-same way it polls the VC++ labOS services' own `GET /status`
-(`ApplicationHealthCheck`/`StatusResourceHandler` in the main repo). Always
-`200 OK` with a plain-text body:
+`GET /status`, unauthenticated (no `X-Labos-Print-Token` needed) — mounted by
+`github.com/LabOS-co/go-packages/system_api.Register`, the same package every
+other Nomad-orchestrated labOS Go service uses, so Nomad's own health check
+and Consul/Traefik agree on one contract across services. Always `200 OK`
+with a JSON body:
 
-```
-Running. Label: printgateway
- Working set memory usage (MB): 12
- Virtual memory usage (MB): 71
+```json
+{"status":"Up and running :-)","version":"1.2.3","build":"2026-09-09T12:00:00Z","label":"abc1234"}
 ```
 
-Unlike the VC++ health check, there is currently no failure condition (no
-job-timeout or out-of-memory check) that would turn this into a `5xx` — it
-only reports that the process is up and serving.
+`version`/`build`/`label` read `"unknown"` unless the binary was built with
+`-ldflags` populating `github.com/version-go/ldflags`'s `buildVersion`/
+`buildTime`/`buildHash` — see "Building and running" below.
+
+There is currently no failure condition (no job-timeout or out-of-memory
+check) that would turn this into a `5xx` — it only reports that the process
+is up and serving.
+
+Separately, `main()` always calls `system_args.ShouldRegisterToConsul()` (not
+`system_api.Status`, which only reads `ldflags` package vars and never
+touches `system_args`) and passes the result into `run()`. When it's true —
+the **`-consul-register` command-line flag** is set — `run()` calls
+`system_api.Register` (against a throwaway router; the real `GET /status`
+route is already mounted above via `system_api.Status` directly) in its own
+goroutine once the listener is already being served, purely for its other
+effect: self-registering this service to a local Consul agent
+(`localhost:8500`, or `CONSUL_ADDR`/`-consul-addr` if that fails) on startup.
+**There is no `CONSUL_REGISTER` environment variable** — `system_args` never
+reads one, despite the name suggesting otherwise; only the flag works. This
+is a **local-dev convenience only** — under Nomad, `-consul-register` is
+simply never passed, so this branch never fires; real production
+registration is owned by the Nomad job spec, not this binary. The decision
+is resolved in `main()`, not `run()`: `system_args.parseArgs()` runs the
+global `flag.Parse()` against `os.Args` exactly once via `sync.Once`, and
+`run()` is what `main_test.go`'s tests call directly with a test binary's own
+`os.Args` — reaching `system_args` from there would parse `-test.*` flags it
+never registered and `os.Exit(2)` the whole test binary. The registration
+call itself is deliberately not in `httpapi.NewServer` either (every handler
+test calls that): `NewServer` stays a pure builder with no network I/O, and
+runs in its own goroutine off the startup path rather than blocking `run()`
+because `system_api`'s HTTP client has no timeout — a stalled Consul agent
+must not be able to delay serving or shutdown.
+
+There is currently no deregistration on shutdown, so a stopped local-dev
+instance stays registered and "critical" in Consul for the full 10-minute
+`DeregisterCriticalServiceAfter` window — accepted for this local-dev-only
+path rather than handled.
+
+**Do not combine `-consul-register` with `PRINT_GATEWAY_BIND_HOST=127.0.0.1`**
+(e.g. the `docker-compose.yml` local-dev setup): registration always
+advertises the machine's own outbound-route LAN address
+(`system_api`'s `getLocalIPAddress`), never `PRINT_GATEWAY_BIND_HOST`, so a
+loopback-only process registers a health-check URL nothing is actually
+listening on at that address — Consul then reports the service permanently
+critical. `-consul-register` only makes sense together with the `0.0.0.0`
+default bind host.
+
+Calling `system_args.ShouldRegisterToConsul()` unconditionally from `main()`
+also makes `system_args`' own flag surface (`-port`, `-p`, `-env`,
+`-gateway`, `-consul-addr`, `-consul-register`, `-publishers`, `-services`,
+`-version`/`-v`) live on the binary, and resolved early enough (before any
+resource — Vault token, listener — is acquired) that an unrecognized flag's
+`os.Exit(2)` fails startup cleanly instead of mid-`run()`. Accepted, not
+worked around, but every one of those flags except `-consul-register`/
+`-consul-addr` is otherwise **inert**: this service reads its own port from
+`PORT`/`PRINT_GATEWAY_PORT` (see "Access control" below), never from
+`-port`/`-p`, and nothing calls `system_args.DisplayVersion()`, so
+`-version`/`-v` prints nothing.
 
 ## Access control
 
@@ -757,10 +810,21 @@ This needs to run where CUPS is, i.e. inside the WSL Ubuntu install (see
 `docs/STATUS.md` for how to get that environment up). Build for Linux from
 Windows and copy the resulting binary over, or build directly inside WSL:
 
+`-ldflags` populates `/status`'s `version`/`build`/`label` fields (see
+"Health check" above) by setting `github.com/version-go/ldflags`'s otherwise-
+`"unknown"` package vars — omit it (as the plain commands below do) and
+`/status` still works, just reporting `"unknown"` for all three:
+
+```bash
+LDFLAGS="-X github.com/version-go/ldflags.buildVersion=$(git describe --tags --always) \
+  -X github.com/version-go/ldflags.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+  -X github.com/version-go/ldflags.buildHash=$(git rev-parse --short HEAD)"
+```
+
 ```bash
 # from Windows (cross-compile):
 cd src/printgateway
-GOOS=linux GOARCH=amd64 go build -o printgateway-linux-amd64 ./cmd/printgateway
+GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS" -o printgateway-linux-amd64 ./cmd/printgateway
 # copy printgateway-linux-amd64 into the WSL filesystem, then inside WSL:
 chmod +x printgateway-linux-amd64
 ./printgateway-linux-amd64                    # listens on 0.0.0.0:8090
@@ -771,13 +835,13 @@ PRINT_GATEWAY_BIND_HOST=127.0.0.1 ./printgateway-linux-amd64  # loopback-only, f
 ```bash
 # or, directly inside WSL, if a Go toolchain is installed there:
 cd src/printgateway
-go build -o printgateway ./cmd/printgateway
+go build -ldflags "$LDFLAGS" -o printgateway ./cmd/printgateway
 ./printgateway
 ```
 
 ## labOS shared library
 
-This service depends on five packages from the shared
+This service depends on six packages from the shared
 [`github.com/LabOS-co/go-packages`](https://github.com/LabOS-co/go-packages)
 monorepo (each package there is its own Go module, versioned with its own
 `<package>/vX.Y.Z` git tags):
@@ -829,6 +893,16 @@ monorepo (each package there is its own Go module, versioned with its own
   `require` to a real tag once that branch is merged and tagged — and note
   that whichever of these two branches merges first should let the other
   drop its worktree and rejoin the main checkout.
+- `github.com/LabOS-co/go-packages/system_api` — `internal/httpapi.NewServer`
+  calls `system_api.Status` directly to mount `GET /status`; `main.go`'s
+  `run()` separately calls `system_api.Register` (see "Health check" above)
+  purely for its opt-in Consul self-registration, once the listener is
+  confirmed up. Real tagged release, `v0.0.10`, no local `replace` needed —
+  but its own `go.mod` under-declares its `system_args` dependency at
+  `v0.0.5`, which lacks the `ShouldRegisterToConsul` function this package
+  actually calls; `go.mod` here pins `system_args` to `v0.0.11` explicitly
+  (`go mod tidy` will not remove this override on its own, but don't delete
+  it by hand either — the build breaks at `v0.0.5`).
 
 `logs.GetLogger()` (which resolves its logstash host/port from a full labOS
 `settings`-backed setup) is still not used, deliberately: this standalone WSL

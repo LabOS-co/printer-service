@@ -28,7 +28,14 @@ if ((BUILD)); then
   # the build cache on the WSL filesystem.
   export GOCACHE=/var/cache/go-build GOMODCACHE=/var/cache/go-mod
   mkdir -p "$GOCACHE" "$GOMODCACHE"
-  (cd "$GW_SRC" && GOOS=linux GOARCH=amd64 go build -o printgateway-linux-amd64 ./cmd/printgateway) \
+  # Populates /status's version/build/label (see src/printgateway/README.md's
+  # "Health check") the same way the plain `go build` commands elsewhere in
+  # the docs do — this is the one build that actually ships, so it must not
+  # be the one left reporting "unknown".
+  GW_LDFLAGS="-X github.com/version-go/ldflags.buildVersion=$(git -C "$REPO_DIR" describe --tags --always) \
+    -X github.com/version-go/ldflags.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+    -X github.com/version-go/ldflags.buildHash=$(git -C "$REPO_DIR" rev-parse --short HEAD)"
+  (cd "$GW_SRC" && GOOS=linux GOARCH=amd64 go build -ldflags "$GW_LDFLAGS" -o printgateway-linux-amd64 ./cmd/printgateway) \
     || die "gateway build failed"
   note "$(ls -l "$GW_SRC/printgateway-linux-amd64" | awk '{print $5" bytes  "$NF}')"
 

@@ -64,12 +64,23 @@ COPY internal/ ./internal/
 
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
+# VERSION/BUILD_TIME/COMMIT: populate /status's version/build/label fields
+# (see README's "Health check") via github.com/version-go/ldflags's package
+# vars. Each defaults to "unknown" — exactly ldflags' own zero-value — so an
+# `docker build` that doesn't pass them behaves identically to before this
+# existed, just with an uninformative /status.
+ARG VERSION=unknown
+ARG BUILD_TIME=unknown
+ARG COMMIT=unknown
 # CGO_ENABLED=0: every current dependency (the Vault client, the MinIO client,
 # error_handler/logs) is pure Go, so a static binary is possible and is what
 # lets the runtime stage below be debian-slim rather than needing glibc's full
 # dynamic-linking machinery matched exactly between stages.
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -mod=vendor -trimpath -ldflags="-s -w" \
+    go build -mod=vendor -trimpath -ldflags="-s -w \
+      -X github.com/version-go/ldflags.buildVersion=${VERSION} \
+      -X github.com/version-go/ldflags.buildTime=${BUILD_TIME} \
+      -X github.com/version-go/ldflags.buildHash=${COMMIT}" \
     -o /out/printgateway ./cmd/printgateway
 
 # --- runtime stage -------------------------------------------------------
@@ -116,25 +127,23 @@ USER printgateway
 # container and set PRINT_GATEWAY_CONFIG to that in-container path, e.g.
 #   docker run -v /host/path/printservice.config.json:/etc/printgateway/printservice.config.json:ro \
 #     -e PRINT_GATEWAY_CONFIG=/etc/printgateway/printservice.config.json ...
-# One interaction worth knowing: the CMD-as-positional-address convention
-# documented on EXPOSE below (`docker run ... printgateway :8090`) reaches
-# config.Load's argv parameter via docker-entrypoint.sh's closing `exec ...
-# "$@"`, and argv always outranks the config file's
-# resource/printgateway.addr — so a wrapper or compose file that passes a
-# bind address silently wins over it even with PRINT_GATEWAY_CONFIG set.
-# See README's "Configuration file" section for the full precedence rule.
+# config.Load no longer takes a CMD/argv address override — address comes
+# only from the PORT and PRINT_GATEWAY_BIND_HOST env vars (see README's
+# "Health check"/"Access control" sections), and resource/printgateway.addr
+# in a config file is a hard startup error rather than a fallback. A wrapper
+# or compose file must set those env vars, not pass a bind address as CMD.
 
 # Documentation only — does not itself publish the port. The default listen
-# address is 127.0.0.1:8090 (config.DefaultAddr); that is almost never what
-# you want inside a container, where 127.0.0.1 means "only this container's
-# own network namespace, unreachable even from another container on the same
-# compose network." Pass a bind address as the container CMD to override it,
-# e.g. `docker run ... printgateway :8090` to listen on all interfaces
-# inside the container — the container boundary itself (no published port,
-# or a port published only to 127.0.0.1 on the host) is what should enforce
-# "closed to everything but the calling system" in this deployment model, not
-# the app's own bind address. See docker-entrypoint.sh and the compose file
-# for how CUPS_HOST/the listen address are actually wired up.
+# address is 0.0.0.0:8090 (PRINT_GATEWAY_BIND_HOST's default), which is what
+# you want inside a container: Nomad/Consul/Traefik (or another container on
+# the same compose network) must be able to reach it from outside this
+# container's own network namespace. Set PRINT_GATEWAY_BIND_HOST=127.0.0.1 to
+# restrict it to this container only — the container boundary itself (no
+# published port, or a port published only to 127.0.0.1 on the host) is what
+# should enforce "closed to everything but the calling system" in this
+# deployment model, not the app's own bind address. See docker-entrypoint.sh
+# and the compose file for how CUPS_HOST/the listen address are actually
+# wired up.
 EXPOSE 8090/tcp
 
 # No Docker-level HEALTHCHECK here: the network-proxy in front of this

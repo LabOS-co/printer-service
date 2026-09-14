@@ -5,6 +5,8 @@ go 1.25.0
 require (
 	github.com/LabOS-co/go-packages/error_handler v1.2.4
 	github.com/LabOS-co/go-packages/logs v1.5.2
+	github.com/LabOS-co/go-packages/system_api v0.0.10
+	github.com/LabOS-co/go-packages/system_args v0.0.11
 	github.com/go-chi/chi/v5 v5.3.2
 )
 
@@ -35,6 +37,7 @@ require (
 	github.com/rs/xid v1.5.0 // indirect
 	github.com/ryanuber/go-glob v1.0.0 // indirect
 	github.com/samber/lo v1.39.0 // indirect
+	github.com/version-go/ldflags v0.0.0-20201113154248-6ea18db16ace // indirect
 	golang.org/x/crypto v0.53.0 // indirect
 	golang.org/x/exp v0.0.0-20220303212507-bbda1eaf7a17 // indirect
 	golang.org/x/net v0.56.0 // indirect
@@ -50,10 +53,10 @@ require (
 	github.com/LabOS-co/go-packages/shared v1.2.1 // indirect
 	github.com/TwiN/go-color v1.4.1 // indirect
 	github.com/bshuster-repo/logrus-logstash-hook v1.1.0 // indirect
-	github.com/go-ole/go-ole v1.2.6 // indirect
+	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/shirou/gopsutil v3.21.11+incompatible // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
-	github.com/yusufpapurcu/wmi v1.2.3 // indirect
+	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	golang.org/x/sys v0.46.0 // indirect
 	golang.org/x/text v0.38.0 // indirect
 )

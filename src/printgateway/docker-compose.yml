@@ -36,6 +36,18 @@ services:
   printgateway:
     build:
       context: .
+      # Populates /status's version/build/label (see README's "Health
+      # check"); Compose does not run shell substitutions itself, so pass
+      # these from the shell that invokes `docker compose build`, e.g.:
+      #   VERSION=$(git describe --tags --always) \
+      #   BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+      #   COMMIT=$(git rev-parse --short HEAD) \
+      #     docker compose build
+      # Omitting them keeps the Dockerfile's own "unknown" defaults.
+      args:
+        VERSION: ${VERSION:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+        COMMIT: ${COMMIT:-unknown}
     image: printgateway:latest
     restart: unless-stopped
     network_mode: host

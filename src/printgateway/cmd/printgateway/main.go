@@ -20,6 +20,9 @@ import (
 	"syscall"
 
 	"github.com/LabOS-co/go-packages/logs"
+	"github.com/LabOS-co/go-packages/system_api"
+	"github.com/LabOS-co/go-packages/system_args"
+	"github.com/go-chi/chi/v5"
 
 	"printgateway/internal/config"
 	"printgateway/internal/cups"
@@ -39,9 +42,32 @@ func main() {
 	// The discarded error here is safe: GetLoggerWithSettings does no I/O and always returns nil.
 	logger, _ := logs.GetLoggerWithSettings(logs.LogsSettings{Format: logs.FormatJSON}, config.ServiceName)
 
-	if err := run(ctx, stop, os.Getenv, os.ReadFile, logger); err != nil {
+	// ShouldRegisterToConsul resolved here, in the real process against the real os.Args, and
+	// passed down: system_args.parseArgs() runs the global flag.Parse() exactly once via
+	// sync.Once, so it must never be reached from run() itself — run() is also what
+	// main_test.go calls, and a test binary's os.Args is not ours to parse.
+	registerToConsul, err := resolveRegisterToConsul()
+	if err != nil {
+		logger.LogError(fmt.Sprintf("invalid configuration: %v", err), &logs.LogMetaData{Service: config.ServiceName})
 		os.Exit(1)
 	}
+
+	if err := run(ctx, stop, os.Getenv, os.ReadFile, logger, registerToConsul); err != nil {
+		os.Exit(1)
+	}
+}
+
+// resolveRegisterToConsul recovers from system_args.getEnvValue's panic on a malformed PORT/
+// LABOS_ENV/GATEWAY/CONSUL_ADDR value, turning it into the same clean, logged startup failure
+// config.Load already gives every other bad env var — rather than an unrecovered panic straight
+// to stderr before config.Load ever runs.
+func resolveRegisterToConsul() (register bool, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("system_args: %v", r)
+		}
+	}()
+	return system_args.ShouldRegisterToConsul(), nil
 }
 
 // run holds every step of startup, request serving, and shutdown; main() is a thin os.Exit
@@ -53,7 +79,10 @@ func main() {
 // disposition before Shutdown (letting a second signal force-kill) while a test drives that
 // branch with a plain context.WithCancel instead of a real OS signal — deriving the context
 // from signal.NotifyContext inside run itself would register a live signal handler per test.
-func run(ctx context.Context, stopSignals func(), getenv func(string) string, readFile func(string) ([]byte, error), logger logs.Logger) error {
+// registerToConsul is resolved by main() rather than read here for the same reason: reading it
+// via system_args would reach that package's global flag.Parse(), which must run at most once
+// against the real process's os.Args, never a test binary's.
+func run(ctx context.Context, stopSignals func(), getenv func(string) string, readFile func(string) ([]byte, error), logger logs.Logger, registerToConsul bool) error {
 	startupMeta := &logs.LogMetaData{Service: config.ServiceName}
 
 	cfg, err := config.Load(getenv, readFile)
@@ -144,6 +173,19 @@ func run(ctx context.Context, stopSignals func(), getenv func(string) string, re
 		logger.LogInfo(fmt.Sprintf("print gateway (prototype) listening on %s", ln.Addr()), startupMeta)
 		serveErr <- server.Serve(ln)
 	}()
+
+	// Local-dev-only Consul self-registration (see README's "Health check"). Always inert under
+	// Nomad, which never sets -consul-register and owns registration itself via the job spec.
+	// In its own goroutine, not blocking run(): system_api's http.Client has no timeout, and the
+	// listener is already serving above, so a stalled Consul agent must not be able to delay
+	// shutdown or make callers wait on a bound socket that isn't accepting yet.
+	//
+	// system_api.Register bundles this registration with mounting GET /status, which
+	// httpapi.NewServer already did with system_api.Status directly; a throwaway router absorbs
+	// the redundant mount here since system_api exports no registration-only entry point.
+	if registerToConsul {
+		go system_api.Register(chi.NewRouter(), config.ServiceName, cfg.Port, logger)
+	}
 
 	select {
 	case err := <-serveErr:

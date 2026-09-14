@@ -133,7 +133,7 @@ for whoever uses them with nothing server-side to trace it back to
 | P2 | `cups.service` active, socket/path activation **disabled** | `systemctl is-active cups; systemctl is-enabled cups.socket cups.path` | `systemctl disable --now cups.socket cups.path; systemctl enable --now cups` |
 | P3 | Queue `brother-direct` exists and is enabled | `lpstat -p brother-direct` | see `docs/STATUS.md` fifth phase |
 | P4 | Real printer reachable (192.168.252.210) | `printersearch info -host 192.168.252.210` | network/printer power |
-| P5 | Gateway binary current | `cd src/printgateway && GOOS=linux GOARCH=amd64 go build -o printgateway-linux-amd64 ./cmd/printgateway` | rebuild + `scripts/deploy.sh` |
+| P5 | Gateway binary current | `scripts/deploy.sh` (builds with `-ldflags` so `/status` reports a real version) | rebuild + `scripts/deploy.sh` |
 | P6 | `newman` available | `npx newman --version` | `npm i -g newman` |
 | P7 | Fixtures present | `ls tests/testdata` | see §5.4 |
 
