@@ -1,4 +1,4 @@
-# printer-server/src — status (last updated 2026-09-07)
+# printer-server/src — status (last updated 2026-09-14)
 
 Continuation of LAB-16894 under `src/` (this repo's working copy is at
 `C:\GitProjects\printer-server`). The original POC at the repo root is
@@ -584,3 +584,61 @@ implemented, reviewed, and complete as of this session, ready to commit.
 - No printer-catalog/onboarding automation yet (same open item as the
   original POC) — the 15-printer test fleet is hand-built, not a reusable
   onboarding pipeline.
+
+## Eleventh phase (2026-09-14): deployment runbook + Nomad job spec
+
+The tenth phase made `printgateway`'s code Nomad/Consul/Traefik-ready but
+left no actual runbook or job spec — anyone deploying it still had to
+reconstruct the steps from scattered "Deployment notes" paragraphs across
+`README.md`. Added `src/printgateway/DEPLOYMENT.md`: a single step-by-step
+guide covering local (docker compose), test/staging (plain `docker run` or
+the systemd unit via `install-services.sh`), and production, in that order,
+all starting from the same "build the image" step (`go mod vendor` +
+`docker build`, per the Dockerfile's own prerequisite comment about the two
+unpublished `go-packages` branches). Production gets a real,
+runnable-after-filling-in-the-"CHANGE ME"s job spec at
+`src/printgateway/deploy/printgateway.nomad` — `host` network mode (CUPS
+reachable via `localhost` on the same client, matching the assumption
+`docker-entrypoint.sh` already makes), a Consul `service`/`check` stanza for
+Traefik's Consul-Catalog discovery (tags carry the router rule), and both a
+Vault-backed and a plain-shared-secret token path shown side by side so a
+cluster without Vault integration isn't stuck. `README.md` gained a
+one-paragraph pointer at the top so `DEPLOYMENT.md` is the thing anyone
+deploying finds first, without duplicating the settings reference already
+there. No code changed in this phase — documentation and the job spec only.
+
+**Follow-up, same day:** asked directly whether the docs cover every env
+var/flag/config key — they didn't, fully. Cross-checked `README.md`'s
+settings tables against every env-var constant actually read by the code
+(`internal/config/config.go` and friends) and found two real gaps:
+`CUPS_HOST`/`CUPS_PORT` (read only by `docker-entrypoint.sh`, not the Go
+binary — easy to miss since it's a container concern, not a service
+setting) and `HOST_IP`/`HOST_NAME` (read by `go-packages/logs`, previously
+documented only in `printgateway.env.example`'s comments, not in
+`README.md` at all) were used but never explained in the README. Added a
+"Which CUPS server `lp` talks to" subsection (distinguishing the Docker-only
+env vars from the native-binary/systemd case, which has no such setting at
+all — it's plain `/etc/cups/client.conf`), added `HOST_IP`/`HOST_NAME` to
+the Logging section, and added a single consolidated "Every setting, at a
+glance" table at the top of `README.md` — one row per env var/flag/config
+key, each linked to its detail section — so nothing requires grepping the
+code to discover it exists.
+
+**Second follow-up, same day:** asked whether the `printservice.config.json`
+deployment story is clear for production specifically. It wasn't — Path B
+(Docker/systemd) and Path C (Nomad) in `DEPLOYMENT.md`, and the Nomad job
+spec itself, never mentioned the config-file feature at all, despite
+`README.md` documenting it as a real, fairly involved feature with its own
+precedence rules and a named "rendered from Vault at process start"
+deployment model for S3 credentials specifically. Added: a bind-mount
+example to Path B1 (Docker), a note to Path B2 that `install-services.sh`
+already installs the file automatically but leaves it inactive
+(`PRINT_GATEWAY_CONFIG` stays commented out) so its presence never silently
+changes behavior, and a new "C1.5 — Do you need `printservice.config.json`?"
+subsection in Path C giving an explicit default (skip it — the job spec's
+`env{}`/`vault{}` stanzas are enough on their own) plus the two concrete
+reasons to add it anyway. `printgateway.nomad` gained a commented-out
+`template{}` block showing the Nomad-native equivalent of that Vault-
+rendered-file model (Nomad's own `template{}` + `vault{}` integration
+instead of a separate Vault Agent), left inactive by default for the same
+reason `install-services.sh` leaves it inactive.

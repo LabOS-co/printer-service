@@ -8,6 +8,63 @@ request-in / paper-out path end to end, not the production Gateway
 described in `print-gateway-hld-phase1.docx`. It has none of that
 document's HA, queue, Audit, retry, or security layers yet.
 
+**Deploying this?** See `DEPLOYMENT.md` for the step-by-step runbook —
+local, test/staging, and production (Nomad + Consul + Traefik, including a
+ready-to-run job spec at `deploy/printgateway.nomad`). This README documents
+*what every setting does*; `DEPLOYMENT.md` documents *which steps to run*.
+
+## Every setting, at a glance
+
+One row per env var/flag/config-file key this service reads, so nothing has
+to be discovered by grepping the code. "Detail" links to the section with
+the full explanation, default, and interactions — read this table to know
+*what exists*, read the linked section before actually changing one.
+
+| Setting | Kind | Default | Detail |
+| :--- | :--- | :--- | :--- |
+| `PORT` / `PRINT_GATEWAY_PORT` | env | `8090` | "Access control" |
+| `PRINT_GATEWAY_BIND_HOST` | env | `0.0.0.0` | "Access control" |
+| `PRINT_GATEWAY_REQUIRE_AUTH` | env | `false` | "Access control" |
+| `PRINT_GATEWAY_TOKEN` | env / Vault / file | *(none)* | "Access control", "Secrets (Vault)" |
+| `PRINT_GATEWAY_CONFIG` | env | *(unset = feature off)* | "Configuration file" |
+| `PRINT_GATEWAY_ALLOW_PRIVATE_TARGETS` | env-only (never file) | `false` | "SSRF defense (`file_url`)" |
+| `PRINT_GATEWAY_FETCH_ALLOWED_HOSTS` | env / file | *(empty = no allowlist)* | "SSRF defense (`file_url`)" |
+| `PRINT_GATEWAY_FETCH_TIMEOUT` | env / file | `60s` | "Timeouts, limits, and shutdown" |
+| `PRINT_GATEWAY_FETCH_MAX_BYTES` | env / file | 64 MiB | "Timeouts, limits, and shutdown" |
+| `PRINT_GATEWAY_READ_HEADER_TIMEOUT` | env / file | `10s` | "Timeouts, limits, and shutdown" |
+| `PRINT_GATEWAY_READ_TIMEOUT` | env / file | `5m` | "Timeouts, limits, and shutdown" |
+| `PRINT_GATEWAY_WRITE_TIMEOUT` | env / file | `8m` | "Timeouts, limits, and shutdown" |
+| `PRINT_GATEWAY_IDLE_TIMEOUT` | env / file | `60s` | "Timeouts, limits, and shutdown" |
+| `PRINT_GATEWAY_MAX_HEADER_BYTES` | env / file | 64 KiB | "Timeouts, limits, and shutdown" |
+| `PRINT_GATEWAY_SHUTDOWN_GRACE` | env / file | `2m` | "Timeouts, limits, and shutdown" |
+| `PRINT_GATEWAY_SUBMIT_TIMEOUT` | env / file | `30s` | "Timeouts, limits, and shutdown" |
+| `PRINT_GATEWAY_MAX_UPLOAD_BYTES` | env / file | 64 MiB | "Timeouts, limits, and shutdown" |
+| `PRINT_GATEWAY_MAX_JSON_BYTES` | env / file | 8 KiB | "Timeouts, limits, and shutdown" |
+| `PRINT_GATEWAY_PRESIGN_TTL` | env / file | `15m` | "S3/MinIO object storage" |
+| `PRINT_GATEWAY_LOG_LEVEL` | env / file | `info` | "Logging" |
+| `LOG_SERVER` | env / Vault / file | *(unset = console-only)* | "Logging" |
+| `HOST_NAME` | env | *(unset)* | "Logging" |
+| `HOST_IP` | env | *(unset)* | "Logging" |
+| `PRINT_GATEWAY_S3_ENDPOINT` | env / file | *(empty = disabled)* | "S3/MinIO object storage" |
+| `PRINT_GATEWAY_S3_BUCKET` | env / file | *(empty = disabled)* | "S3/MinIO object storage" |
+| `PRINT_GATEWAY_S3_REGION` | env / file | *(empty, not recommended)* | "S3/MinIO object storage" |
+| `PRINT_GATEWAY_S3_INSECURE` | env / file | `false` | "S3/MinIO object storage" |
+| `PRINT_GATEWAY_S3_ACCESS_KEY` / `_SECRET_KEY` | env / Vault / file | *(none)* | "S3/MinIO object storage" |
+| `PRINT_GATEWAY_S3_TIMEOUT` | env / file | `60s` | "S3/MinIO object storage" |
+| `PRINT_GATEWAY_S3_MAX_BYTES` | env / file | 64 MiB | "S3/MinIO object storage" |
+| `VAULT_ADDR` / `SECRET_STORE_URL` | env | *(unset = Vault unused)* | "Secrets (Vault)" |
+| `VAULT_TOKEN` | env | *(none)* | "Secrets (Vault)" |
+| `SECRET_STORE_USERNAME` / `SECRET_STORE_PASSWORD` | env | *(none)* | "Secrets (Vault)" |
+| `LABOS_ENV` | env | *(unset = no path prefix)* | "Secrets (Vault)" |
+| `CUPS_HOST` / `CUPS_PORT` | **Docker entrypoint only**, not read by the Go binary | `localhost` / `631` | "Which CUPS server `lp` talks to" |
+| `-consul-register` / `-consul-addr` | CLI flag (`system_args`) | off / `localhost:8500` | "Health check" |
+| `-port`, `-p`, `-env`, `-gateway`, `-publishers`, `-services`, `-version`/`-v` | CLI flags (`system_args`), **live but inert** | n/a | "Health check" |
+
+**Never a setting of this service, on purpose:** `CONSUL_REGISTER` (does not
+exist — only the `-consul-register` flag works, despite the name suggesting
+an env var); `allowPrivateTargets`/Consul/Redis keys in the config file (see
+"Configuration file"'s "Never valid in the file, on purpose").
+
 ## How it prints
 
 It does the simplest thing that's consistent with everything already
@@ -26,6 +83,33 @@ whether a printer needs `ippfix` — CUPS's own queue configuration handles
 all of that already. If you want to print to a printer that doesn't have a
 queue yet, set one up the same way the existing ones were set up, then use
 that queue's name here.
+
+### Which CUPS server `lp` talks to
+
+`lp` (and every CUPS client tool) resolves its target server from
+`/etc/cups/client.conf`'s `ServerName` line, or `localhost:631` if that file
+doesn't set one — this service's own Go code never reads a "which CUPS host"
+setting itself; it only ever runs `lp -d <printer> ...` and lets libcups
+resolve the server the normal CUPS-client way.
+
+- **Running the Docker image**: `docker-entrypoint.sh` writes
+  `/etc/cups/client.conf` from two env vars on every container start —
+  `CUPS_HOST` (default `localhost`) and `CUPS_PORT` (default `631`). With
+  `--network host` (the default in `docker-compose.yml` and in
+  `deploy/printgateway.nomad`), `localhost` from inside the container already
+  *is* the host, so no override is needed when `cupsd` runs there too. Set
+  `CUPS_HOST` (and `CUPS_PORT` if not `631`) only when CUPS lives on a
+  different host, or when running with a bridge network (e.g.
+  `CUPS_HOST=host.docker.internal` on Docker Desktop — see "Deployment
+  notes" below). **These two are container-entrypoint variables, not
+  variables this Go binary parses** — they have no effect on a native
+  (non-Docker) run.
+- **Running the native binary** (systemd or a bare `./printgateway-linux-amd64`):
+  there is no `CUPS_HOST`/`CUPS_PORT` equivalent read by this service. CUPS
+  is resolved the plain CUPS-client way — `localhost:631` unless the host's
+  own `/etc/cups/client.conf` says otherwise. If `cupsd` isn't on the same
+  host, set that file's `ServerName` yourself; this service has no setting
+  for it.
 
 ## Request format — two options (per section 6 of the HLD doc)
 
@@ -698,6 +782,20 @@ from that:
   The startup log names which source won (`vault` or `env`) — **not yet
   updated to say `file`** when the config file is what actually supplied
   the value; see "Configuration file" below for that known gap.
+- **Host identification fields**, both read directly by `go-packages/logs`
+  (not by this service's own code, and neither has a config-file key — set
+  them however the deployment sets any other plain env var):
+  - `HOST_NAME` — set via the systemd unit's `Environment=HOST_NAME=%H`
+    specifier (no secret, safe to inline in the unit file itself — see
+    `printgateway.service`) or, in Docker/Nomad, typically the container/
+    allocation hostname.
+  - `HOST_IP` — no systemd specifier equivalent, so it belongs in
+    `printgateway.env`/the container's env, not the unit file. Left unset,
+    every shipped log record's host-IP field renders as the literal string
+    `"NO_VAL"` instead of failing — harmless, but makes per-host filtering
+    in Kibana useless.
+  - Both are inert until `LOG_SERVER`/Vault's `log-server` resolves to
+    something — see above.
 
 **Known limitations, accepted for this prototype:**
 
