@@ -105,7 +105,9 @@ func TestRunReturnsErrorOnInvalidConfig(t *testing.T) {
 func TestRunReturnsErrorWhenNoPrintTokenIsResolvable(t *testing.T) {
 	t.Parallel()
 
-	err := run(context.Background(), func() {}, envMap(nil), noReadFile(t), &recordingLogger{}, false)
+	err := run(context.Background(), func() {}, envMap(map[string]string{
+		config.RequireAuthEnv: "true",
+	}), noReadFile(t), &recordingLogger{}, false)
 	if err == nil {
 		t.Fatal("expected an error when neither Vault nor PRINT_GATEWAY_TOKEN produce a token")
 	}

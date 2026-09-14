@@ -229,6 +229,11 @@ type testAPIOpts struct {
 	maxJSON    int64
 	s3MaxBytes int64
 	timeouts   printgw.Timeouts
+
+	// requireAuth: nil defaults to true, matching production's mandatory-auth behavior before
+	// RequireAuth existed, so existing token-enforcement tests don't have to opt back in. Pass a
+	// non-nil false to test the auth-disabled path.
+	requireAuth *bool
 }
 
 // newTestAPI builds a real *API over a real printgw.Service, wired to fakes
@@ -253,10 +258,16 @@ func newTestAPI(opts testAPIOpts) (*API, *capturingLogger) {
 		opts.submitter = &fakeSubmitter{result: printgw.SubmitResult{Output: "request id is q-1 (1 file(s))\n"}}
 	}
 
+	requireAuth := true
+	if opts.requireAuth != nil {
+		requireAuth = *opts.requireAuth
+	}
+
 	logger := &capturingLogger{}
 	svc := printgw.NewService(opts.submitter, opts.fetcher, opts.objectStore, opts.timeouts, opts.s3MaxBytes)
 	cfg := config.Config{
 		AuthToken:      opts.authToken,
+		RequireAuth:    requireAuth,
 		MaxUploadBytes: opts.maxUpload,
 		MaxJSONBytes:   opts.maxJSON,
 		PresignTTL:     15 * time.Minute,

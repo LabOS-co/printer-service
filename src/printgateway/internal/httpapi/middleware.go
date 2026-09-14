@@ -90,8 +90,12 @@ func (a *API) requestContext(next http.Handler) http.Handler {
 }
 
 // requireToken rejects any request that does not carry the shared secret
-// the calling system was issued.
+// the calling system was issued. When cfg.RequireAuth is false, it's a
+// no-op: every request passes through unauthenticated.
 func (a *API) requireToken(next http.HandlerFunc) http.HandlerFunc {
+	if !a.cfg.RequireAuth {
+		return next
+	}
 	expected := a.cfg.AuthToken
 	return func(w http.ResponseWriter, r *http.Request) {
 		if expected == "" {

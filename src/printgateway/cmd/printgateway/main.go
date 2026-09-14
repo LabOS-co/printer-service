@@ -118,17 +118,24 @@ func run(ctx context.Context, stopSignals func(), getenv func(string) string, re
 		}
 	}
 
-	token, tokenSource, err := secrets.ResolveToken(cfg, logger, startupMeta)
-	if err != nil {
-		// Fail fast: a service that can't resolve a print token would otherwise log "listening"
-		// and look healthy while requireToken answers 503 to everything forever. Distinct message
-		// prefix from config.Load's "invalid configuration" above, since this can be a live outage
-		// (Vault unreachable) rather than a bad value.
-		logger.LogError(fmt.Sprintf("cannot start: %v", err), startupMeta)
-		return err
+	if cfg.RequireAuth {
+		token, tokenSource, err := secrets.ResolveToken(cfg, logger, startupMeta)
+		if err != nil {
+			// Fail fast: a service that can't resolve a print token would otherwise log "listening"
+			// and look healthy while requireToken answers 503 to everything forever. Distinct message
+			// prefix from config.Load's "invalid configuration" above, since this can be a live outage
+			// (Vault unreachable) rather than a bad value.
+			logger.LogError(fmt.Sprintf("cannot start: %v", err), startupMeta)
+			return err
+		}
+		cfg.AuthToken = token
+		logger.LogInfo(fmt.Sprintf("print token resolved from %s", tokenSource), startupMeta)
+	} else {
+		// LogError, not LogInfo: like AllowPrivateTargets=true, running with no auth is a
+		// deployment posture an operator must not miss in a warn/error-level log.
+		logger.LogError(fmt.Sprintf("%s=false: /print and /files/presign accept unauthenticated requests",
+			config.RequireAuthEnv), startupMeta)
 	}
-	cfg.AuthToken = token
-	logger.LogInfo(fmt.Sprintf("print token resolved from %s", tokenSource), startupMeta)
 
 	// LogError, not LogInfo: AllowPrivateTargets=true is a total SSRF-check bypass and must
 	// survive a warn/error PRINT_GATEWAY_LOG_LEVEL.

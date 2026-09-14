@@ -148,3 +148,29 @@ func TestRequireTokenEmptyExpectedFailsClosed(t *testing.T) {
 		t.Errorf("status = %d, want 503 (server not configured for auth, must fail closed)", resp.StatusCode)
 	}
 }
+
+// TestRequireTokenIsNoOpWhenAuthNotRequired asserts that with RequireAuth
+// false (this deployment's current default), a request with no token header
+// at all reaches the handler instead of being rejected.
+func TestRequireTokenIsNoOpWhenAuthNotRequired(t *testing.T) {
+	t.Parallel()
+
+	svc := printgw.NewService(&fakeSubmitter{}, nil, nil, printgw.Timeouts{Submit: 1}, 0)
+	logger := &capturingLogger{}
+	cfg := fullConfig(t)
+	cfg.RequireAuth = false
+	cfg.AuthToken = ""
+	a := New(cfg, logger, svc, nil)
+	srv := httptest.NewServer(NewServer(a).Handler)
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/print", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want the request to reach the handler unauthenticated (not 401/503)", resp.StatusCode)
+	}
+}

@@ -42,6 +42,12 @@ const (
 	// AuthTokenEnv carries the shared secret compared against the X-Labos-Print-Token header.
 	AuthTokenEnv = "PRINT_GATEWAY_TOKEN"
 
+	// RequireAuthEnv toggles whether a print token is required at all. Defaults to false (off) —
+	// this deployment doesn't issue tokens to callers yet — but stays a first-class switch so
+	// turning it on later is a config change, not a code change.
+	RequireAuthEnv     = "PRINT_GATEWAY_REQUIRE_AUTH"
+	DefaultRequireAuth = false
+
 	// ServiceName identifies this service in logs.LogMetaData.
 	ServiceName = "printgateway"
 
@@ -174,6 +180,11 @@ type Config struct {
 
 	// AuthToken starts as PRINT_GATEWAY_TOKEN; main.go overwrites it with secrets.ResolveToken's result.
 	AuthToken string
+
+	// RequireAuth gates whether requireToken enforces the print token at all, and whether main.go
+	// treats an unresolvable token as a startup error. false means /print and /files/presign accept
+	// any request unauthenticated.
+	RequireAuth bool
 
 	// Vault/secret_store connection details; SecretStoreURL == "" means the other three are unused.
 	SecretStoreURL      string
@@ -641,6 +652,8 @@ func Load(getenv func(string) string, readFile func(string) ([]byte, error)) (Co
 		BindHost:  bindHost,
 		AuthToken: getenv(AuthTokenEnv),
 
+		RequireAuth: DefaultRequireAuth,
+
 		SecretStoreURL:      secretStoreURL,
 		VaultToken:          getenv(VaultTokenEnv),
 		SecretStoreUsername: getenv(SecretStoreUsernameEnv),
@@ -733,6 +746,12 @@ func Load(getenv func(string) string, readFile func(string) ([]byte, error)) (Co
 		return Config{}, err
 	}
 	cfg.S3Insecure = s3Insecure
+
+	requireAuth, err := overrideBool(getenv, RequireAuthEnv, cfg.RequireAuth)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.RequireAuth = requireAuth
 
 	s3MaxBytes, err := overrideBytes64(getenv, S3MaxBytesEnv, cfg.S3MaxBytes)
 	if err != nil {

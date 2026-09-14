@@ -207,13 +207,17 @@ independent layers — the same model `HtmlToPdf` relies on, plus a token:
    file" below): like `PRINT_GATEWAY_ALLOW_PRIVATE_TARGETS`, the listen
    address must come from the environment a process was actually launched
    with, not a file that's easier to leave stale.
-2. **Shared token.** Every request must carry the header
-   `X-Labos-Print-Token`, matched in constant time against the resolved print
-   token (`PRINT_GATEWAY_TOKEN`, or Vault — see "Secrets (Vault)" below). A
-   missing or wrong token is `401`, and it is logged with the caller's
-   address. If no token can be resolved from any configured source, the
-   process refuses to start rather than serving unauthenticated or answering
-   `503` to everything forever — see "Fallback policy" below.
+2. **Shared token, opt-in.** `PRINT_GATEWAY_REQUIRE_AUTH` gates this whole
+   mechanism and defaults to `false` — this deployment doesn't issue tokens to
+   callers yet, so `/print` and `/files/presign` accept any request
+   unauthenticated. Set it to `true` once a token is actually provisioned:
+   every request must then carry the header `X-Labos-Print-Token`, matched in
+   constant time against the resolved print token (`PRINT_GATEWAY_TOKEN`, or
+   Vault — see "Secrets (Vault)" below). A missing or wrong token is `401`,
+   and it is logged with the caller's address. With auth required and no
+   token resolvable from any configured source, the process refuses to start
+   rather than serving unauthenticated or answering `503` to everything
+   forever — see "Fallback policy" below.
 
 The token never appears in this repository or in the labOS source. On the
 labOS side it comes from `gSecretManager` (`config/print_gateway`,
@@ -450,6 +454,10 @@ version, not an oversight.
   looks like the config file was ignored.
 
 ### Secrets (Vault)
+
+Everything below only matters when `PRINT_GATEWAY_REQUIRE_AUTH=true` — with
+it left at its `false` default, no token is resolved at startup and none of
+this fallback machinery runs.
 
 Setting `VAULT_ADDR` (Nomad's own injected address variable) or
 `SECRET_STORE_URL` switches the print token's source from plain

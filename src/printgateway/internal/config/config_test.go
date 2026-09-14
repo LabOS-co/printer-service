@@ -118,6 +118,7 @@ func TestLoadDefaults(t *testing.T) {
 		{"S3Timeout", cfg.S3Timeout, DefaultS3Timeout},
 		{"S3MaxBytes", cfg.S3MaxBytes, DefaultS3MaxBytes},
 		{"S3Insecure", cfg.S3Insecure, false},
+		{"RequireAuth", cfg.RequireAuth, DefaultRequireAuth},
 		{"PresignTTL", cfg.PresignTTL, DefaultPresignTTL},
 		{"LogLevel", cfg.LogLevel, DefaultLogLevel},
 	}
@@ -423,6 +424,7 @@ var boolSettings = []struct {
 }{
 	{AllowPrivateTargetsEnv, func(c Config) bool { return c.AllowPrivateTargets }},
 	{S3InsecureEnv, func(c Config) bool { return c.S3Insecure }},
+	{RequireAuthEnv, func(c Config) bool { return c.RequireAuth }},
 }
 
 func TestLoadBoolOverrides(t *testing.T) {

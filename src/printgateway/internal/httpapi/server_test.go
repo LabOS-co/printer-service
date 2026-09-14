@@ -30,6 +30,9 @@ func fullConfig(t *testing.T) config.Config {
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
 	}
+	// This helper builds config for tests that exercise requireToken's enforcement, so it
+	// must not silently rely on config.Load's off-by-default RequireAuth.
+	cfg.RequireAuth = true
 	return cfg
 }
 
