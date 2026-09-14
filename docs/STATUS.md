@@ -481,6 +481,93 @@ current, accurate shape; `docs/config-file-layer-plan.md`'s earlier sections (§
 in particular) are explicitly marked stale rather than rewritten in place, to keep the change
 history legible.
 
+## Tenth phase (2026-09-09 through 2026-09-14): printgateway made Nomad/Consul/Traefik-ready
+
+`printgateway` is going to run under Nomad, which allocates its listen port dynamically and
+expects to health-check the process and register it with Consul (Traefik then routes to it via
+Consul's catalog). Before this phase it had none of that: its bind address came only from a
+positional CLI arg (`args[1]`, default `127.0.0.1:8090`, loopback-only by design), its router was
+the stdlib `http.ServeMux`, and `/status` was a hand-written plain-text endpoint mirroring the
+VC++ services' `ApplicationHealthCheck` convention rather than a JSON contract. The shared
+`go-packages` monorepo already has `system_api.Register` for exactly this pattern (mounts a
+`/status` JSON health endpoint, optionally self-registers to Consul for local/dev use) and
+`system_args` for reading the Nomad-allocated port — this phase wires both in, as four milestones,
+each independently Opus-reviewed before the next started (per the plan document
+`shimmying-bubbling-nest.md`). Scoped and approved locally via `EnterPlanMode`; no Jira ticket of
+its own (umbrella LAB-16894).
+
+**M1 — config: `PORT`/`PRINT_GATEWAY_BIND_HOST` replace the positional address arg** (committed
+`86a9897`). Removed the `args[1]` → `Addr`/`AddrSource=argv` path and the `Addr` row from the JSON
+config file. Added `PortEnv = "PORT"` (matching Nomad's and `system_args`' own env var name, so an
+operator setting `PORT` behaves identically whether or not local-dev Consul registration is
+enabled), reusing the existing `8090` default rather than `system_args`' unrelated `8082`. Added
+`PRINT_GATEWAY_BIND_HOST`, defaulting to `0.0.0.0` — required for Nomad/Consul/Traefik to reach the
+process from outside its allocating host's network namespace — with the env var as the escape
+hatch back to `127.0.0.1` for a loopback-only manual run. `Addr()` now builds via
+`net.JoinHostPort(bindHost, port)`, not `fmt.Sprintf`, so an IPv6 bind host is bracketed correctly.
+
+**M2 — router: stdlib `http.ServeMux` → `chi.NewRouter()`** (committed `ac521e6`). Needed because
+`system_api.Register` (M3) requires a concrete `*chi.Mux`, not a bare `http.Handler`. Since
+`handlerChain` already took `http.Handler` and `chi.Mux` implements it, the swap was a two-line
+change in `NewServer` with zero ripple through the middleware chain; `/print` and
+`/files/presign` stayed wrapped in `a.requireToken` exactly as before. Code-Reviewer (opus)
+approved with nits (staging the vendored `go-chi/chi` dir explicitly, import grouping — both
+fixed; chi's lack of path canonicalization — accepted as-is).
+
+**M3 — `/status`: switch to `system_api`'s JSON contract.** Removed the custom
+`statusHandler`/its test entirely. `NewServer` now mounts `system_api.Status` directly at
+`GET /status` (JSON `status`/`version`/`build`/`label`), and added `a.methodNotAllowed`/
+`a.notFound` so chi's own bare-405/plain-text-404 defaults still come back through the same
+labOS error envelope every other failure uses (`Allow` header included on the 405, per
+RFC 9110 §15.5.6). `version`/`build`/`label` are populated by wiring `-ldflags` (via
+`github.com/version-go/ldflags`'s `buildVersion`/`buildTime`/`buildHash` vars) into every build
+command that ships the binary — `CLAUDE.md`/`README.md`'s "Build and run", the `Dockerfile`
+(new `VERSION`/`BUILD_TIME`/`COMMIT` build args, each defaulting to `"unknown"`, ldflags' own
+zero value), `docker-compose.yml` (passed through from the invoking shell's env, since Compose
+does not run shell substitutions itself), and `tests/scripts/deploy.sh` (the one build that
+actually ships in the integration-test rig, so it must not be the one left reporting
+`"unknown"`). `src/printgateway/README.md`'s "Health check" section documents the JSON shape and
+states explicitly that Consul self-registration is a local-dev convenience only — production
+registration is owned by the Nomad job spec, never this binary.
+
+**M4 — wire it together in `main.go`.** The resolved port (`cfg.Port`, now numeric rather than
+only available baked into `cfg.Addr()`'s string) threads into the server; `system_args`'s own
+`-consul-register` flag (there is **no** `CONSUL_REGISTER` env var, despite the name suggesting
+one) gates a call to `system_api.Register` against a throwaway router, in its own goroutine,
+started only once the listener is already serving — `system_api`'s HTTP client has no timeout,
+so a stalled Consul agent must never be able to delay startup or shutdown. Under Nomad,
+`-consul-register` is simply never passed, so this branch never fires; the only thing that
+always happens is `system_api.Status` answering `/status`, which is what Nomad's own health check
+hits.
+
+**Code-Reviewer (opus) findings on M3/M4, all fixed:** a startup-panic bug —
+`system_args.ShouldRegisterToConsul()` (and the rest of `system_args`' `getEnvValue`) panics on a
+malformed `PORT`/`LABOS_ENV`/`GATEWAY`/`CONSUL_ADDR` value instead of returning an error, which
+would have taken the whole process down with an unrecovered panic before `config.Load` even ran.
+Fixed by wrapping the call in `main.go`'s new `resolveRegisterToConsul()`, which recovers and
+turns it into the same clean, logged startup failure every other bad env var already gets.
+Several lower-severity findings were fixed alongside (see the plan document for the full list).
+**Product Manager** found and confirmed fixed: a stale `Dockerfile` comment still describing the
+pre-M1 CMD-argv address override (rewritten to describe the current `PORT`/
+`PRINT_GATEWAY_BIND_HOST`-only model), and confirmed the same PORT-malformed-value panic is now
+recovered gracefully via `resolveRegisterToConsul`. **Unit Test Agent** added coverage for the new
+404 envelope, the 405 `Allow` header, and `registerToConsul=true`'s non-blocking-goroutine
+behavior (`src/printgateway/internal/httpapi/status_test.go`,
+`TestRunRegisterToConsulTrueDoesNotBlockStart` in `main_test.go`) — the latter proves the
+goroutine launches and does not delay listener startup or graceful shutdown, without depending on
+a live Consul agent (`system_args.ShouldRegisterToConsul()` re-resolves its own flag independently
+inside `Register`, unset in the test binary, so no live registration attempt happens either way).
+
+One hard constraint carried through all four milestones: `system_args.parseArgs()` runs the
+*global* `flag.Parse()` against `os.Args` exactly once, via `sync.Once`. `run()` is what
+`main_test.go` calls directly with a **test binary's** `os.Args` (which carries `-test.*` flags
+`system_args` never registered) — so `system_args` is called only from `main()` itself, never from
+`run()` or `config.Load`, and `registerToConsul` is resolved in `main()` and passed into `run()`
+as a plain `bool` parameter instead.
+
+M1 and M2 landed as their own commits (`86a9897`, `ac521e6`) in an earlier session; M3 and M4 are
+implemented, reviewed, and complete as of this session, ready to commit.
+
 ## Open items / not yet done
 
 - **Superseded by the seventh phase above**: `src/printgateway` is now a hardened prototype Print
