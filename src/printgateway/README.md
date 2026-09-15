@@ -304,9 +304,17 @@ independent layers — the same model `HtmlToPdf` relies on, plus a token:
    forever — see "Fallback policy" below.
 
 The token never appears in this repository or in the labOS source. On the
-labOS side it comes from `gSecretManager` (`config/print_gateway`,
-key `auth-token`); here it comes from the environment, or from Vault when
-configured — see "Secrets (Vault)" below.
+labOS side it comes from `gSecretManager` (`config/pdf_printer`, keys
+`host` and `print-token` — `EnvironmentConfigurationOld::GetPdfPrinterParams`),
+with a fallback to the `Autolims.cfg` keys `PDF_PRINTER_ADDRESS` /
+`PDF_PRINTER_TOKEN` when that Vault path has no value for either key (or
+Vault itself is unreachable). **This is a different Vault path from the one
+this server reads its own token from** (`config/print_gateway`, key
+`auth-token` — see "Secrets (Vault)" below) — the two sides do not share a
+single KV entry; whoever provisions Vault must put the same token string
+under both paths for the shared-secret check to actually match. Here it
+comes from the environment, or from Vault when configured — see "Secrets
+(Vault)" below.
 
 ### Configuration file
 
@@ -545,11 +553,25 @@ this fallback machinery runs.
 
 Setting `VAULT_ADDR` (Nomad's own injected address variable) or
 `SECRET_STORE_URL` switches the print token's source from plain
-`PRINT_GATEWAY_TOKEN` to Vault, read at the same path/key the labOS side
-already uses (`<LABOS_ENV>/config/print_gateway`, key `auth-token` — the
-`LABOS_ENV` prefix is only added when that variable is set). This mirrors
-`gSecretManager`'s convention deliberately, so a Vault-backed deployment
-needs no new path convention on either side.
+`PRINT_GATEWAY_TOKEN` to Vault, read at `<LABOS_ENV>/config/print_gateway`,
+key `auth-token` (the `LABOS_ENV` prefix is only added when that variable is
+set; see `internal/secrets/secrets.go`'s `printTokenPath`).
+
+**This is not the same Vault path the labOS side reads.** The original
+intent was for both sides to share one KV entry, but the actual labOS
+implementation (`EnvironmentConfigurationOld::GetPdfPrinterParams`, LAB-16894
+/ CL 1021434) resolves the gateway host and the token it sends from
+`config/pdf_printer` instead — keys `host` and `print-token` — falling back
+to the `Autolims.cfg` keys `PDF_PRINTER_ADDRESS` / `PDF_PRINTER_TOKEN` for
+whichever of the two Vault keys comes back blank (or if Vault is
+unreachable). If the host is still blank after both sources, the PDF-print
+resource is left unconfigured and `HtmlPrinter` falls back to the
+pre-existing local spooler path unchanged. Until this is reconciled to a
+single shared path (or someone deliberately mirrors the token value into
+both `config/print_gateway`'s `auth-token` and `config/pdf_printer`'s
+`print-token`), a Vault-backed deployment with `PRINT_GATEWAY_REQUIRE_AUTH=true`
+needs the same token string seeded under both KV paths for the client's
+`X-Labos-Print-Token` header to actually match what this server expects.
 
 | Env var | Meaning |
 | :--- | :--- |

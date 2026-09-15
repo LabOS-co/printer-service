@@ -24,31 +24,27 @@ type fakeObject struct {
 
 func (fakeObject) Close() error { return nil }
 
-// fakeClient implements cloud_storage.CloudStorageStreamingClient. MinIO
-// only calls GetObject/PresignGetURL/PresignPutURL, so every other method
+// fakeClient implements cloud_storage.CloudStorageClient. MinIO only calls
+// GetDownloadObject/PresignGetURL/PresignPutURL, so every other method
 // panics if invoked.
 type fakeClient struct {
 	getObjectResult cloud_storage.CloudStorageObject
 	getObjectSize   int64
 	getObjectErr    error
-	getObjectCtx    context.Context
 	getObjectKey    string
 
 	presignGetURL string
 	presignGetErr error
-	presignGetCtx context.Context
 	presignGetKey string
 	presignGetTTL time.Duration
 
 	presignPutURL string
 	presignPutErr error
-	presignPutCtx context.Context
 	presignPutKey string
 	presignPutTTL time.Duration
 }
 
-func (f *fakeClient) GetObject(ctx context.Context, key string) (cloud_storage.CloudStorageObject, int64, error) {
-	f.getObjectCtx = ctx
+func (f *fakeClient) GetDownloadObject(key string) (cloud_storage.CloudStorageObject, int64, error) {
 	f.getObjectKey = key
 	if f.getObjectErr != nil {
 		return nil, 0, f.getObjectErr
@@ -56,8 +52,7 @@ func (f *fakeClient) GetObject(ctx context.Context, key string) (cloud_storage.C
 	return f.getObjectResult, f.getObjectSize, nil
 }
 
-func (f *fakeClient) PresignGetURL(ctx context.Context, key string, expiry time.Duration) (string, error) {
-	f.presignGetCtx = ctx
+func (f *fakeClient) PresignGetURL(key string, expiry time.Duration) (string, error) {
 	f.presignGetKey = key
 	f.presignGetTTL = expiry
 	if f.presignGetErr != nil {
@@ -66,8 +61,7 @@ func (f *fakeClient) PresignGetURL(ctx context.Context, key string, expiry time.
 	return f.presignGetURL, nil
 }
 
-func (f *fakeClient) PresignPutURL(ctx context.Context, key string, expiry time.Duration) (string, error) {
-	f.presignPutCtx = ctx
+func (f *fakeClient) PresignPutURL(key string, expiry time.Duration) (string, error) {
 	f.presignPutKey = key
 	f.presignPutTTL = expiry
 	if f.presignPutErr != nil {
@@ -95,11 +89,6 @@ func (f *fakeClient) GetFileNamesByPrefixAndCondition(prefix string, condition f
 	return nil, nil
 }
 
-func (f *fakeClient) GetDownloadObject(fileName string) (cloud_storage.CloudStorageObject, int64, error) {
-	f.unimplemented("GetDownloadObject")
-	return nil, 0, nil
-}
-
 func (f *fakeClient) UploadFile(fileName, filePath string) (string, error) {
 	f.unimplemented("UploadFile")
 	return "", nil
@@ -115,22 +104,7 @@ func (f *fakeClient) DeleteFile(fileName string) error {
 	return nil
 }
 
-func (f *fakeClient) PutObject(ctx context.Context, key string, r io.Reader, size int64) (string, error) {
-	f.unimplemented("PutObject")
-	return "", nil
-}
-
-func (f *fakeClient) StatObject(ctx context.Context, key string) (int64, error) {
-	f.unimplemented("StatObject")
-	return 0, nil
-}
-
-func (f *fakeClient) DeleteObject(ctx context.Context, key string) error {
-	f.unimplemented("DeleteObject")
-	return nil
-}
-
-var _ cloud_storage.CloudStorageStreamingClient = (*fakeClient)(nil)
+var _ cloud_storage.CloudStorageClient = (*fakeClient)(nil)
 
 // ctxKey builds a distinguishable ctx, so a test can prove the caller's ctx
 // was passed through rather than replaced with a fresh context.Background().
@@ -147,8 +121,7 @@ func TestGetSuccess(t *testing.T) {
 	client := &fakeClient{getObjectResult: obj, getObjectSize: 42}
 	m := &MinIO{client: client}
 
-	ctx := probeCtx()
-	got, size, err := m.Get(ctx, "some/key")
+	got, size, err := m.Get(probeCtx(), "some/key")
 	if err != nil {
 		t.Fatalf("Get returned error: %v", err)
 	}
@@ -161,8 +134,23 @@ func TestGetSuccess(t *testing.T) {
 	if client.getObjectKey != "some/key" {
 		t.Errorf("client saw key %q, want %q", client.getObjectKey, "some/key")
 	}
-	if client.getObjectCtx != ctx {
-		t.Error("ctx was not passed through unchanged")
+}
+
+func TestGetCanceledContext(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	client := &fakeClient{}
+	m := &MinIO{client: client}
+
+	_, _, err := m.Get(ctx, "some/key")
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want context.Canceled", err)
+	}
+	if client.getObjectKey != "" {
+		t.Error("client was called despite an already-canceled ctx")
 	}
 }
 
@@ -226,8 +214,7 @@ func TestPresignGetSuccess(t *testing.T) {
 	client := &fakeClient{presignGetURL: "https://example.com/signed-get"}
 	m := &MinIO{client: client}
 
-	ctx := probeCtx()
-	url, err := m.PresignGet(ctx, "some/key", 5*time.Minute)
+	url, err := m.PresignGet(probeCtx(), "some/key", 5*time.Minute)
 	if err != nil {
 		t.Fatalf("PresignGet returned error: %v", err)
 	}
@@ -239,9 +226,6 @@ func TestPresignGetSuccess(t *testing.T) {
 	}
 	if client.presignGetTTL != 5*time.Minute {
 		t.Errorf("client saw ttl %v, want %v", client.presignGetTTL, 5*time.Minute)
-	}
-	if client.presignGetCtx != ctx {
-		t.Error("ctx was not passed through unchanged")
 	}
 }
 
@@ -275,8 +259,7 @@ func TestPresignPutSuccess(t *testing.T) {
 	client := &fakeClient{presignPutURL: "https://example.com/signed-put"}
 	m := &MinIO{client: client}
 
-	ctx := probeCtx()
-	url, err := m.PresignPut(ctx, "some/key", time.Hour)
+	url, err := m.PresignPut(probeCtx(), "some/key", time.Hour)
 	if err != nil {
 		t.Fatalf("PresignPut returned error: %v", err)
 	}
@@ -288,9 +271,6 @@ func TestPresignPutSuccess(t *testing.T) {
 	}
 	if client.presignPutTTL != time.Hour {
 		t.Errorf("client saw ttl %v, want %v", client.presignPutTTL, time.Hour)
-	}
-	if client.presignPutCtx != ctx {
-		t.Error("ctx was not passed through unchanged")
 	}
 }
 

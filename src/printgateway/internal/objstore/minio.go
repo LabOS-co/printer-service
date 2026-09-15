@@ -19,7 +19,7 @@ import (
 
 // MinIO implements printgw.ObjectStore over cloud_storage.NewS3.
 type MinIO struct {
-	client cloud_storage.CloudStorageStreamingClient
+	client cloud_storage.CloudStorageClient
 }
 
 // New builds a MinIO-backed ObjectStore. url/bucket/accessKey/secretKey are
@@ -45,10 +45,14 @@ func New(url, bucket, accessKey, secretKey, region string, insecure bool, logger
 }
 
 // Get returns key's content and its exact size. A missing key is reported
-// as *apperr.HTTPError{Status: 404}. The returned io.ReadCloser stays bound
-// to ctx for its entire read lifetime.
+// as *apperr.HTTPError{Status: 404}. cloud_storage.CloudStorageClient's
+// GetDownloadObject has no ctx of its own, so ctx is not honored mid-read -
+// only checked here before starting the download.
 func (m *MinIO) Get(ctx context.Context, key string) (io.ReadCloser, int64, error) {
-	object, size, err := m.client.GetObject(ctx, key)
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
+	object, size, err := m.client.GetDownloadObject(key)
 	if err != nil {
 		if errors.Is(err, cloud_storage.ErrNotFound) {
 			return nil, 0, &apperr.HTTPError{
@@ -67,8 +71,12 @@ func (m *MinIO) Get(ctx context.Context, key string) (io.ReadCloser, int64, erro
 }
 
 // PresignGet returns a time-limited URL a third party can GET directly.
+// cloud_storage.CloudStorageClient's PresignGetURL has no ctx of its own.
 func (m *MinIO) PresignGet(ctx context.Context, key string, ttl time.Duration) (string, error) {
-	url, err := m.client.PresignGetURL(ctx, key, ttl)
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	url, err := m.client.PresignGetURL(key, ttl)
 	if err != nil {
 		return "", &apperr.HTTPError{
 			Status:   http.StatusBadGateway,
@@ -80,8 +88,12 @@ func (m *MinIO) PresignGet(ctx context.Context, key string, ttl time.Duration) (
 }
 
 // PresignPut returns a time-limited URL a third party can PUT directly.
+// cloud_storage.CloudStorageClient's PresignPutURL has no ctx of its own.
 func (m *MinIO) PresignPut(ctx context.Context, key string, ttl time.Duration) (string, error) {
-	url, err := m.client.PresignPutURL(ctx, key, ttl)
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	url, err := m.client.PresignPutURL(key, ttl)
 	if err != nil {
 		return "", &apperr.HTTPError{
 			Status:   http.StatusBadGateway,

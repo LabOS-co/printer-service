@@ -3,10 +3,7 @@ package cloud_storage
 import (
 	"context"
 	"fmt"
-	"io"
-	"mime"
-	"net/http"
-	"path"
+	"net/url"
 	"strings"
 	"time"
 
@@ -24,24 +21,12 @@ type s3Client struct {
 	logMetaData *logs.LogMetaData
 }
 
-func NewS3(settings *CloudStorageSettings) (CloudStorageStreamingClient, error) {
+func NewS3(settings *CloudStorageSettings) (CloudStorageClient, error) {
 	if settings == nil {
 		return nil, fmt.Errorf("missing settings object. S3 client cannot be initialized")
 	}
-	// Checked before the Credentials.Id/.Secret reads below, which would
-	// otherwise nil-deref on a settings object that skips Credentials
-	// entirely, instead of reaching the "missing ... id or secret" error
-	// two lines down.
-	if settings.Credentials == nil {
-		return nil, fmt.Errorf("missing credentials. S3 client cannot be initialized")
-	}
 	if settings.Url == "" || settings.BucketName == "" || settings.Credentials.Id == "" || settings.Credentials.Secret == "" {
 		return nil, fmt.Errorf("missing url, bucketName, id or secret. S3 client cannot be initialized")
-	}
-	// Checked before the first LogInfo call below, which would otherwise
-	// nil-deref on a settings object built without a Logger.
-	if settings.Logger == nil {
-		return nil, fmt.Errorf("missing logger. S3 client cannot be initialized")
 	}
 
 	settings.Logger.LogInfo(fmt.Sprintf(
@@ -51,8 +36,7 @@ func NewS3(settings *CloudStorageSettings) (CloudStorageStreamingClient, error) 
 	if settings.Insecure {
 		// LogInfo, not a silent default: Insecure disables TLS, and a
 		// production deployment left this way by accident is a real
-		// exposure worth surfacing on every single startup, not just
-		// documenting in a struct comment nobody reads at deploy time.
+		// exposure worth surfacing on every single startup.
 		settings.Logger.LogInfo(fmt.Sprintf(
 			"S3 client for '%s' configured with Insecure=true (plain http, no TLS)", settings.Url),
 			settings.LogMetaData,
@@ -110,13 +94,14 @@ func (s3 *s3Client) GetDownloadObject(fileName string) (CloudStorageObject, int6
 	// Get the reader for the file itself
 	object, err := s3.client.GetObject(s3.ctx, s3.bucketName, fileName, minio.GetObjectOptions{})
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to get object '%s': %s", fileName, err)
+		return nil, 0, fmt.Errorf("failed to get object '%s': %w", fileName, wrapNotFound(err))
 	}
 
 	// Get the metadata of the object to get the file size
 	info, err := object.Stat()
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to get object '%s' metadata: %s", fileName, err)
+		_ = object.Close()
+		return nil, 0, fmt.Errorf("failed to get object '%s' metadata: %w", fileName, wrapNotFound(err))
 	}
 
 	s3.logger.LogInfo(fmt.Sprintf("Got file '%s' from cloud storage successfully", fileName), s3.logMetaData)
@@ -159,139 +144,31 @@ func (s3 *s3Client) DeleteFile(fileName string) error {
 	return nil
 }
 
-// PutObject uploads directly from r, honoring ctx cancellation — unlike
-// UploadFile, no local file path is required. Content-Type is auto-detected
-// from key's extension, matching UploadFile/FPutObject's own behavior;
-// path.Ext (not filepath.Ext) because key is an S3 key, always "/"-separated
-// regardless of the host OS, not a local filesystem path.
-func (s3 *s3Client) PutObject(ctx context.Context, key string, r io.Reader, size int64) (string, error) {
-	s3.logger.LogInfo(fmt.Sprintf("Uploading object '%s' to cloud storage", key), s3.logMetaData)
-
-	contentType := mime.TypeByExtension(path.Ext(key))
-	if contentType == "" {
-		contentType = "application/octet-stream"
-	}
-
-	info, err := s3.client.PutObject(ctx, s3.bucketName, key, r, size, minio.PutObjectOptions{ContentType: contentType})
-	if err != nil {
-		return "", fmt.Errorf("failed to upload object '%s': %w", key, err)
-	}
-
-	s3.logger.LogInfo(fmt.Sprintf("Object '%s' uploaded to cloud storage successfully", key), s3.logMetaData)
-	return info.ETag, nil
-}
-
-// GetObject is GetDownloadObject with ctx cancellation.
-//
-// Don't forget to close the object after using it.
-func (s3 *s3Client) GetObject(ctx context.Context, key string) (CloudStorageObject, int64, error) {
-	s3.logger.LogInfo(fmt.Sprintf("Getting object '%s' from cloud storage", key), s3.logMetaData)
-
-	// GetObject itself does no I/O and so cannot fail on a missing key —
-	// minio-go resolves that lazily, on the first Read or (as here) Stat.
-	object, err := s3.client.GetObject(ctx, s3.bucketName, key, minio.GetObjectOptions{})
-	if err != nil {
-		return nil, 0, fmt.Errorf("failed to get object '%s': %w", key, wrapNotFound(err))
-	}
-
-	info, err := object.Stat()
-	if err != nil {
-		// minio-go's internal feeder goroutine for this object only exits
-		// via Close() — its request loop has no ctx.Done() case. If Stat
-		// failed because ctx was already done (a routine race: the caller's
-		// HTTP client disconnected between GetObject and Stat), the
-		// goroutine never received a request and is still blocked waiting
-		// for one. Dropping object here without closing it leaks that
-		// goroutine, and its channels, permanently.
-		_ = object.Close()
-		return nil, 0, fmt.Errorf("failed to get object '%s' metadata: %w", key, wrapNotFound(err))
-	}
-
-	s3.logger.LogInfo(fmt.Sprintf("Got object '%s' from cloud storage successfully", key), s3.logMetaData)
-	return object, info.Size, nil
-}
-
-// StatObject reports key's size without downloading it.
-func (s3 *s3Client) StatObject(ctx context.Context, key string) (int64, error) {
-	s3.logger.LogInfo(fmt.Sprintf("Statting object '%s' in cloud storage", key), s3.logMetaData)
-
-	info, err := s3.client.StatObject(ctx, s3.bucketName, key, minio.StatObjectOptions{})
-	if err != nil {
-		return 0, fmt.Errorf("failed to stat object '%s': %w", key, wrapNotFound(err))
-	}
-
-	s3.logger.LogInfo(fmt.Sprintf("Statted object '%s' in cloud storage successfully, size=%d", key, info.Size), s3.logMetaData)
-	return info.Size, nil
-}
-
-// DeleteObject is DeleteFile with ctx cancellation. Unlike GetObject and
-// StatObject, a missing key is never classified as ErrNotFound here: S3
-// answers success for a DELETE on an object that was never there (minio-go's
-// own RemoveObject documents this), so the only error this can return is a
-// genuine failure — most commonly a missing bucket, which is not what a
-// caller checking errors.Is(err, ErrNotFound) means by "not found".
-func (s3 *s3Client) DeleteObject(ctx context.Context, key string) error {
-	s3.logger.LogInfo(fmt.Sprintf("Deleting object '%s' from cloud storage", key), s3.logMetaData)
-
-	if err := s3.client.RemoveObject(ctx, s3.bucketName, key, minio.RemoveObjectOptions{}); err != nil {
-		return fmt.Errorf("failed to delete object '%s': %w", key, err)
-	}
-
-	s3.logger.LogInfo(fmt.Sprintf("Object '%s' deleted from cloud storage successfully", key), s3.logMetaData)
-	return nil
-}
-
 // PresignGetURL returns a time-limited URL a third party can GET directly.
-// Never wraps ErrNotFound: presigning never consults the object itself
-// (see the interface doc comment) — the only error reachable here is a
-// bucket-location lookup failure, most commonly a missing bucket, which is
-// not what a caller checking errors.Is(err, ErrNotFound) means by
-// "not found". Never log u itself: the URL embeds a signature that is
-// usable as a bearer credential for its lifetime.
-func (s3 *s3Client) PresignGetURL(ctx context.Context, key string, expiry time.Duration) (string, error) {
-	s3.logger.LogInfo(fmt.Sprintf("Presigning GET for object '%s', expiry=%s", key, expiry), s3.logMetaData)
-
-	u, err := s3.client.PresignedGetObject(ctx, s3.bucketName, key, expiry, nil)
+func (s3 *s3Client) PresignGetURL(key string, expiry time.Duration) (string, error) {
+	u, err := s3.client.PresignedGetObject(s3.ctx, s3.bucketName, key, expiry, url.Values{})
 	if err != nil {
-		return "", fmt.Errorf("failed to presign GET for object '%s': %w", key, err)
+		return "", fmt.Errorf("failed to presign GET for object '%s': %s", key, err)
 	}
-
-	s3.logger.LogInfo(fmt.Sprintf("Presigned GET for object '%s' successfully", key), s3.logMetaData)
 	return u.String(), nil
 }
 
 // PresignPutURL returns a time-limited URL a third party can PUT directly.
-// Same ErrNotFound and logging notes as PresignGetURL.
-func (s3 *s3Client) PresignPutURL(ctx context.Context, key string, expiry time.Duration) (string, error) {
-	s3.logger.LogInfo(fmt.Sprintf("Presigning PUT for object '%s', expiry=%s", key, expiry), s3.logMetaData)
-
-	u, err := s3.client.PresignedPutObject(ctx, s3.bucketName, key, expiry)
+func (s3 *s3Client) PresignPutURL(key string, expiry time.Duration) (string, error) {
+	u, err := s3.client.PresignedPutObject(s3.ctx, s3.bucketName, key, expiry)
 	if err != nil {
-		return "", fmt.Errorf("failed to presign PUT for object '%s': %w", key, err)
+		return "", fmt.Errorf("failed to presign PUT for object '%s': %s", key, err)
 	}
-
-	s3.logger.LogInfo(fmt.Sprintf("Presigned PUT for object '%s' successfully", key), s3.logMetaData)
 	return u.String(), nil
 }
 
 // PRIVATE //
 
-// wrapNotFound classifies err by HTTP status rather than a provider-specific
-// error code (MinIO's "NoSuchKey" vs. another S3-compatible backend's own
-// vocabulary), so ErrNotFound holds across every backend this package
-// targets. A non-404 error is returned unchanged. Only meaningful where a
-// 404 genuinely means "this key doesn't exist" — GetObject and StatObject;
-// see DeleteObject's and the presign methods' own doc comments for why they
-// deliberately don't use this.
-//
-// %w wraps err itself, not just this function's own message: ToErrorResponse
-// is a plain type switch, not errors.As, so it only recognizes err when it's
-// the concrete minio.ErrorResponse value, not one wrapped further beneath
-// %w — chaining it here (rather than %s'ing it to text) is what keeps a
-// caller's own errors.As(err, &minio.ErrorResponse{}) working afterward.
+// wrapNotFound wraps err in ErrNotFound when minio-go reports the object
+// itself is missing (as opposed to a transport/auth/other failure).
 func wrapNotFound(err error) error {
-	if minio.ToErrorResponse(err).StatusCode == http.StatusNotFound {
-		return fmt.Errorf("%w: %w", ErrNotFound, err)
+	if minio.ToErrorResponse(err).Code == "NoSuchKey" {
+		return fmt.Errorf("%w: %s", ErrNotFound, err)
 	}
 	return err
 }

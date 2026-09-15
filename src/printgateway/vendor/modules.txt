@@ -10,7 +10,7 @@ github.com/LabOS-co/go-packages/error_handler
 # github.com/LabOS-co/go-packages/logs v1.5.2
 ## explicit; go 1.25.0
 github.com/LabOS-co/go-packages/logs
-# github.com/LabOS-co/go-packages/secret_store v1.2.4 => ../../../go-packages-secret_store-wt/secret_store
+# github.com/LabOS-co/go-packages/secret_store v1.3.4
 ## explicit; go 1.22.0
 github.com/LabOS-co/go-packages/secret_store
 # github.com/LabOS-co/go-packages/shared v1.2.1
@@ -192,4 +192,3 @@ gopkg.in/square/go-jose.v2/cipher
 gopkg.in/square/go-jose.v2/json
 gopkg.in/square/go-jose.v2/jwt
 # github.com/LabOS-co/go-packages/cloud_storage => ../../../go-packages/cloud_storage
-# github.com/LabOS-co/go-packages/secret_store => ../../../go-packages-secret_store-wt/secret_store

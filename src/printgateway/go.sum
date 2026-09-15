@@ -4,6 +4,8 @@ github.com/LabOS-co/go-packages/error_handler v1.2.4 h1:V3kfUngH6dPGNfy7kcjSeZcq
 github.com/LabOS-co/go-packages/error_handler v1.2.4/go.mod h1:FIwcMMrnM3XZdA8BJSuZFras1tbHOgeTM2BPpAApuEo=
 github.com/LabOS-co/go-packages/logs v1.5.2 h1:yc0+ZapJh6l9wzBELX44DDyys8M2z0cskREmEatT4ew=
 github.com/LabOS-co/go-packages/logs v1.5.2/go.mod h1:PWunGVL9gjGasGq/1A9VKbn7A6epJ99Hira444XtK8c=
+github.com/LabOS-co/go-packages/secret_store v1.3.4 h1:nbcu8X76FRta4D3f8CRA3+heTFxkWM7y+xJQ+s+gQpc=
+github.com/LabOS-co/go-packages/secret_store v1.3.4/go.mod h1:AHpAp+8lQI2CAtd9NNK4UvtHpD1z/vKbjtEJgcUE6AI=
 github.com/LabOS-co/go-packages/shared v1.2.1 h1:AstPSxM4DiCYXZk7jOI6xc+aj65k5Aia/Xhsh1LhWVA=
 github.com/LabOS-co/go-packages/shared v1.2.1/go.mod h1:px2er4GdPCi1Sw952wz1VgAF3snSYMCUQBZROIHt+Gs=
 github.com/LabOS-co/go-packages/system_api v0.0.10 h1:8V5OhjRBN5pbrQGR1otpSBs1ekALhTIhAxw1+FdLsPQ=

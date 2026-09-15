@@ -49,7 +49,7 @@ require (
 require (
 	github.com/LabOS-co/go-packages/cloud_storage v1.0.4
 	github.com/LabOS-co/go-packages/encryption v1.1.1
-	github.com/LabOS-co/go-packages/secret_store v1.2.4
+	github.com/LabOS-co/go-packages/secret_store v1.3.4
 	github.com/LabOS-co/go-packages/shared v1.2.1 // indirect
 	github.com/TwiN/go-color v1.4.1 // indirect
 	github.com/bshuster-repo/logrus-logstash-hook v1.1.0 // indirect
@@ -61,15 +61,11 @@ require (
 	golang.org/x/text v0.38.0 // indirect
 )
 
-// cloud_storage's presign/streaming methods (CloudStorageStreamingClient)
-// aren't tagged yet — see go-packages' feature/cloud_storage/LAB-16894—
-// Add_presign_and_streaming_support branch. Same pattern as secret_store
-// below: remove this and bump the require above to a real tag once that
-// branch is merged/tagged.
+// cloud_storage's PresignGetURL/PresignPutURL aren't tagged yet - see
+// go-packages' feature/cloud_storage/LAB-16894-presign-minimal branch (built
+// off main, adding only the two presign methods plus the Region/Insecure
+// settings fields and not-found classification this module needs - not the
+// larger, unmerged feature/cloud_storage/LAB-16894—Add_presign_and_streaming_support
+// branch). Remove this and bump the require above to a real tag once
+// presign is merged/tagged on main.
 replace github.com/LabOS-co/go-packages/cloud_storage => ../../../go-packages/cloud_storage
-
-// Points at a separate git worktree (not ../../../go-packages/secret_store)
-// because the main go-packages checkout now sits on the cloud_storage
-// feature branch for the replace above, and a single working directory
-// can't be on two branches at once.
-replace github.com/LabOS-co/go-packages/secret_store => ../../../go-packages-secret_store-wt/secret_store

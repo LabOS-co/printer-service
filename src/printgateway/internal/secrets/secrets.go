@@ -3,6 +3,7 @@
 package secrets
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -14,6 +15,53 @@ import (
 
 	"printgateway/internal/config"
 )
+
+// errSecretNotFound marks a definite "the store answered, and the secret
+// genuinely isn't there" - the only condition ResolveToken/ResolveLogServer/
+// ResolveS3Credentials treat as "fall back to env", as opposed to a
+// transport/auth/malformed-response error, which means the store is broken
+// rather than merely empty.
+var errSecretNotFound = errors.New("secret not found")
+
+// getSecretString resolves a single string value at key within the secret at
+// path, unwrapping secret_store's KV v2 response shape: VaultClient.
+// GetSecretValue returns a secret's fields nested one level under "data"
+// (the sibling "metadata" key, carrying version/created_time info, is not
+// part of what this returns) - this is the one place that unwrap happens
+// rather than every caller having to know about it. A present "data" key
+// whose value is nil (Vault's shape for a soft-deleted secret version) is
+// treated as a miss, not a malformed response.
+func getSecretString(client secret_store.SecretStoreClient, path, key string) (string, error) {
+	raw, err := client.GetSecretValue(path)
+	if err != nil {
+		return "", err
+	}
+	if raw == nil {
+		return "", fmt.Errorf("path %s: %w", path, errSecretNotFound)
+	}
+
+	fields := raw
+	if wrapped, hasDataKey := raw["data"]; hasDataKey {
+		if wrapped == nil {
+			return "", fmt.Errorf("path %s: %w", path, errSecretNotFound)
+		}
+		f, ok := wrapped.(map[string]any)
+		if !ok {
+			return "", fmt.Errorf("path %s: unexpected secret store response shape", path)
+		}
+		fields = f
+	}
+
+	value, ok := fields[key]
+	if !ok {
+		return "", fmt.Errorf("key %q at path %s: %w", key, path, errSecretNotFound)
+	}
+	str, ok := value.(string)
+	if !ok {
+		return "", fmt.Errorf("key %q at path %s is not a string", key, path)
+	}
+	return str, nil
+}
 
 // printTokenPath/printTokenKey mirror the path/key the labOS side already reads
 // via gSecretManager, so a Vault-backed deployment needs no new convention there.
@@ -90,7 +138,7 @@ func ResolveToken(cfg config.Config, logger logs.Logger, meta *logs.LogMetaData)
 	}
 
 	path := vaultPath(cfg.LabosEnv, printTokenPath)
-	value, err := secret_store.GetSecretString(client, path, printTokenKey)
+	value, err := getSecretString(client, path, printTokenKey)
 	if err != nil {
 		logger.LogError(fmt.Sprintf("vault read %s (key %s) failed: %v; falling back to %s",
 			path, printTokenKey, err, config.AuthTokenEnv), meta)
@@ -142,7 +190,7 @@ func ResolveLogServer(cfg config.Config, logger logs.Logger, meta *logs.LogMetaD
 				err, cfg.Source(config.LogServerEnv)), meta)
 		} else {
 			path := vaultPath(cfg.LabosEnv, logServerPath)
-			value, err := secret_store.GetSecretString(client, path, logServerKey)
+			value, err := getSecretString(client, path, logServerKey)
 			if err != nil {
 				// LogInfo, not LogError: unlike the print token, this key is optional and
 				// usually just unset — not worth an ERROR line on every startup.
@@ -207,8 +255,8 @@ func ResolveS3Credentials(cfg config.Config, logger logs.Logger, meta *logs.LogM
 			logger.LogError(fmt.Sprintf("vault client init failed: %v; S3 credentials fall back to %s/%s",
 				err, cfg.Source(config.S3AccessKeyEnv), cfg.Source(config.S3SecretKeyEnv)), meta)
 		} else {
-			ak, akErr := secret_store.GetSecretString(client, vaultPath(cfg.LabosEnv, s3AccessKeyPath), s3AccessKeyKey)
-			sk, skErr := secret_store.GetSecretString(client, vaultPath(cfg.LabosEnv, s3SecretKeyPath), s3SecretKeyKey)
+			ak, akErr := getSecretString(client, vaultPath(cfg.LabosEnv, s3AccessKeyPath), s3AccessKeyKey)
+			sk, skErr := getSecretString(client, vaultPath(cfg.LabosEnv, s3SecretKeyPath), s3SecretKeyKey)
 			switch {
 			case akErr != nil:
 				logger.LogInfo(fmt.Sprintf("vault read of S3 access key unavailable: %v; S3 credentials fall back to %s/%s",
