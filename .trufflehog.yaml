@@ -1,0 +1,109 @@
+detectors:
+  - name: labos-aws-access-key-pair
+    keywords:
+      - AWS_ACCESS_KEY_ID
+      - AWS_SECRET_ACCESS_KEY
+      - aws_access_key_id
+      - aws_secret_access_key
+    primary_regex_name: secret
+    regex:
+      id: '(?i)(?:aws_access_key_id|access_key_id)\s*[:=]\s*["'']?(A(?:KIA|SIA|BIA|CCA)[A-Z0-9]{16})'
+      secret: '(?i)(?:aws_secret_access_key|secret_access_key)\s*[:=]\s*["'']?([A-Za-z0-9/+=]{40})'
+    exclude_words:
+      - EXAMPLE
+      - example
+
+  - name: labos-aws-secret-access-key
+    keywords:
+      - AWS_SECRET_ACCESS_KEY
+      - aws_secret_access_key
+      - secretAccessKey
+    regex:
+      secret: '(?i)(?:aws_secret_access_key|secret_access_key|secretAccessKey)\s*[:=]\s*["'']?([A-Za-z0-9/+=]{40})'
+    exclude_words:
+      - EXAMPLE
+      - example
+
+  - name: labos-minio-s3-secret
+    keywords:
+      - S3_SECRET_KEY
+      - MINIO_SECRET_KEY
+      - secretAccessKey
+      - secret_key
+    regex:
+      secret: '(?i)(?:s3_secret_key|minio_secret_key|secretAccessKey|secret_key)\s*[:=]\s*["'']?([A-Za-z0-9/+=._-]{8,})'
+    entropy: 2.5
+    exclude_words:
+      - rootypass
+      - miniosecret
+      - changeme
+      - password
+
+  - name: labos-vault-token
+    keywords:
+      - VAULT_TOKEN
+      - vault_token
+      - hvs.
+      - hvb.
+      - hvr.
+    regex:
+      token: '(?i)(?:vault[_-]?token|VAULT_TOKEN)\s*[:=]\s*["'']?((?:hvs|hvb|hvr)\.[A-Za-z0-9_-]{20,}|s\.[A-Za-z0-9]{20,})'
+
+  - name: labos-consul-acl-token
+    keywords:
+      - CONSUL_HTTP_TOKEN
+      - consul_token
+      - consul_acl_token
+    regex:
+      token: '(?i)(?:consul_http_token|consul[_-]?(?:acl[_-]?)?token)\s*[:=]\s*["'']?([A-Za-z0-9._=-]{20,}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})'
+    entropy: 2.5
+
+  - name: labos-db-password-variable
+    keywords:
+      - DB_PASSWORD
+      - DATABASE_PASSWORD
+      - POSTGRES_PASSWORD
+      - MYSQL_PASSWORD
+      - MSSQL_PASSWORD
+      - SA_PASSWORD
+    regex:
+      password: '(?i)(?:db_password|database_password|postgres_password|mysql_password|mssql_password|sa_password)\s*[:=]\s*["'']?([^"''\s;]{8,})'
+    entropy: 2.5
+    exclude_words:
+      - password
+      - changeme
+      - example
+      - root
+
+  - name: labos-jdbc-password
+    keywords:
+      - "jdbc:"
+      - "password="
+      - "Password="
+    regex:
+      password: '(?i)jdbc:[^\s"'']{0,300}(?:password|pwd)=([^;"''\s&]{8,})'
+    entropy: 2.5
+
+  - name: labos-connection-string-password
+    keywords:
+      - "Server="
+      - "Data Source="
+      - "Password="
+      - "User Id="
+    regex:
+      password: '(?i)(?:server|data source|host)=[^;\n]{1,120};[^\n]{0,300}(?:password|pwd)=([^;"''\s]{8,})'
+    entropy: 2.5
+
+  - name: labos-generic-high-entropy-secret-assignment
+    keywords:
+      - client_secret
+      - CLIENT_SECRET
+      - api_key
+      - API_KEY
+    regex:
+      secret: '(?i)(?:client_secret|api_key)\s*[:=]\s*["'']?([A-Za-z0-9/+=._-]{24,})'
+    entropy: 3.2
+    exclude_words:
+      - example
+      - fake
+      - test
