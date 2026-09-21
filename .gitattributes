@@ -11,3 +11,18 @@
 *.bin binary
 *.png binary
 *.exe binary
+
+# LAB-13733 scan-gate
+* text=auto
+
+.gitattributes text eol=lf
+*.sh text eol=lf
+*.bash text eol=lf
+*.ps1 text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf
+
+# Template hook has no .sh suffix; force LF so WSL/macOS Git can exec it.
+git-template/hooks/post-checkout text eol=lf
+.scan-gate/git-template/hooks/post-checkout text eol=lf

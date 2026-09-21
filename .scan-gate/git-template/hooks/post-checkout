@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# LabOS scan-gate: optional hook install after clone / branch checkout (init.templateDir).
+# Must never fail git clone/checkout (always exit 0).
+#
+# Husky repos (LaaS): install tools if possible, but NEVER run the consumer
+# install-hooks.sh — older copies of that script call `pre-commit install` and
+# would overwrite Husky.
+
+branch_checkout="${3:-0}"
+
+if [ "$branch_checkout" != "1" ]; then
+  exit 0
+fi
+
+if [ "${CI:-}" = "true" ] || [ -n "${JENKINS_URL:-}" ] || [ "${GITHUB_ACTIONS:-}" = "true" ] || [ "${LABOS_SCAN_GATE_SKIP:-}" = "1" ]; then
+  exit 0
+fi
+
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+cd "$repo_root" || exit 0
+
+if [ ! -d ".scan-gate" ]; then
+  exit 0
+fi
+
+labos_scan_gate_warn() {
+  {
+    echo ""
+    echo "================================================================"
+    echo " LABOS scan-gate: hook setup failed (git clone/checkout succeeded)."
+    echo " From any LabOS repo root that has .scan-gate/:"
+    echo "   bash .scan-gate/repository-bootstrap.sh"
+    echo " Then re-clone, or from this repo root:"
+    echo "   .scan-gate/install-hooks.sh"
+    echo " Set LABOS_SCAN_GATE_SKIP=1 to suppress this hook."
+    echo "================================================================"
+  } >&2
+}
+
+install_failed=0
+
+if [ -f ".scan-gate/ensure-tools.sh" ]; then
+  if ! bash ".scan-gate/ensure-tools.sh"; then
+    install_failed=1
+  fi
+fi
+
+if [ -d ".husky" ]; then
+  echo "LABOS scan-gate: Husky repo detected — skipping pre-commit install (Husky owns hooks)."
+  if [ "$install_failed" -ne 0 ]; then
+    labos_scan_gate_warn
+  fi
+  exit 0
+fi
+
+if [ ! -f ".scan-gate/install-hooks.sh" ]; then
+  exit 0
+fi
+
+if [ "$install_failed" -eq 0 ]; then
+  if ! bash ".scan-gate/install-hooks.sh"; then
+    install_failed=1
+  fi
+fi
+
+if [ "$install_failed" -ne 0 ]; then
+  labos_scan_gate_warn
+fi
+
+exit 0

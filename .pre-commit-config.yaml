@@ -1,0 +1,27 @@
+default_install_hook_types: [pre-commit, pre-push]
+
+repos:
+  - repo: local
+    hooks:
+      - id: trufflehog-staged
+        name: TruffleHog secrets scan (staged files)
+        description: Detect secrets in staged files with built-in and LabOS custom rules.
+        entry: .scan-gate/trufflehog-staged.sh
+        language: system
+        stages: [pre-commit]
+
+      - id: trufflehog-push-range
+        name: TruffleHog secrets scan (push range)
+        description: Detect secrets in commits being pushed.
+        entry: .scan-gate/trufflehog-pre-push.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-added-large-files
+        args: [--maxkb=10240]
+        stages: [pre-commit]
