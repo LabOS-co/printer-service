@@ -22,6 +22,7 @@ the full explanation, default, and interactions — read this table to know
 
 | Setting | Kind | Default | Detail |
 | :--- | :--- | :--- | :--- |
+| `Autolims.cfg`: `PDF_PRINTER_ADDRESS` / `PDF_PRINTER_TOKEN` | **labOS/AutoLims side, not read by this binary** | *(none)* | "Access control" |
 | `PORT` / `PRINT_GATEWAY_PORT` | env | `8090` | "Access control" |
 | `PRINT_GATEWAY_BIND_HOST` | env | `0.0.0.0` | "Access control" |
 | `PRINT_GATEWAY_REQUIRE_AUTH` | env | `false` | "Access control" |
