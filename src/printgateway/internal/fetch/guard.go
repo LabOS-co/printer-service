@@ -14,17 +14,15 @@ import (
 // reopen the 127.0.0.1:631 (CUPS admin port) attack it exists to block.
 var allowedPorts = map[string]bool{"80": true, "443": true}
 
-// errBlockedTarget and errRedirectNotAllowed are sentinels so Fetch can tell
-// a policy rejection (400) apart from a genuine network failure (502)
-// without string-matching an error message.
+// errBlockedTarget and errRedirectNotAllowed are sentinels so Fetch can tell a policy rejection
+// (400) from a genuine network failure (502) without string-matching an error message.
 var (
 	errBlockedTarget      = errors.New("file_url resolved to a disallowed address")
 	errRedirectNotAllowed = errors.New("file_url must be a direct link: redirects are not followed")
 )
 
-// validateURL checks the parts of rawURL knowable before any DNS lookup or
-// dial: scheme, embedded credentials, and that a host is named. Port policy
-// lives in portAllowed instead, since it depends on allowPrivate.
+// validateURL checks the parts of rawURL knowable before any DNS lookup or dial: scheme,
+// embedded credentials, and that a host is named. Port policy lives in portAllowed instead.
 func validateURL(rawURL string) (*url.URL, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -55,18 +53,15 @@ func portAllowed(port string, allowPrivate bool) bool {
 	return allowPrivate || allowedPorts[port]
 }
 
-// hostAllowed enforces the optional host-suffix allowlist of pre-approved
-// sources. An empty allowlist means "any public host" — the
-// private/loopback/link-local block below still applies regardless.
+// hostAllowed enforces the optional host-suffix allowlist of pre-approved sources; an empty
+// allowlist means "any public host" (the private/loopback/link-local block still applies).
 func hostAllowed(host string, allowlist []string) bool {
 	if len(allowlist) == 0 {
 		return true
 	}
 	host = strings.ToLower(host)
 	for _, suffix := range allowlist {
-		// Lower here too rather than rely on config.splitHostList's own
-		// normalization: NewSafeFetcher is exported and takes a plain []string.
-		suffix = strings.ToLower(suffix)
+		suffix = strings.ToLower(suffix) // NewSafeFetcher is exported; don't assume config normalized these.
 		if host == suffix || strings.HasSuffix(host, "."+suffix) {
 			return true
 		}
@@ -74,10 +69,9 @@ func hostAllowed(host string, allowlist []string) bool {
 	return false
 }
 
-// blockedPrefixes covers ranges netip.Addr's own IsPrivate/IsLoopback/
-// IsLinkLocalUnicast/IsMulticast/IsUnspecified miss: CGNAT/IANA special-use
-// IPv4 ranges, plus IPv6 schemes that embed an IPv4 address (which the
-// IPv6-shaped stdlib predicates don't look inside).
+// blockedPrefixes covers ranges netip.Addr's own IsPrivate/IsLoopback/IsLinkLocalUnicast/
+// IsMulticast/IsUnspecified miss: CGNAT/IANA special-use IPv4 ranges, plus IPv6 schemes that
+// embed an IPv4 address.
 var blockedPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("0.0.0.0/8"),     // "this network"
 	netip.MustParsePrefix("100.64.0.0/10"), // CGNAT
@@ -97,12 +91,10 @@ var broadcastAddr = netip.MustParseAddr("255.255.255.255")
 
 // isBlockedAddr is the anti-SSRF address check itself.
 func isBlockedAddr(ip netip.Addr) bool {
-	// Unmap: netip.Prefix.Contains returns false across address families, so
-	// an IPv4-mapped IPv6 literal would otherwise skip IPv4-only prefixes
-	// like 100.64.0.0/10.
+	// Unmap: Prefix.Contains returns false across address families, so an IPv4-mapped IPv6
+	// literal would otherwise skip IPv4-only prefixes like 100.64.0.0/10.
 	ip = ip.Unmap()
-	// Strip any zone: netip.Prefix.Contains always returns false for a zoned
-	// address, so e.g. "%eth0" would otherwise bypass every blockedPrefixes entry.
+	// Strip any zone: Prefix.Contains always returns false for a zoned address, e.g. "%eth0".
 	ip = ip.WithZone("")
 	if !ip.IsValid() {
 		return true // fail closed on anything we can't classify
@@ -123,10 +115,8 @@ func isBlockedAddr(ip netip.Addr) bool {
 	return false
 }
 
-// newDialControl returns the net.Dialer.Control func that is the real
-// anti-rebinding gate: it runs after DNS resolution, on the literal IP about
-// to be connect(2)'d, catching a target that resolved public at validateURL
-// time but private by dial time.
+// newDialControl returns the net.Dialer.Control func that is the real anti-rebinding gate: it
+// runs after DNS resolution, on the literal IP about to be connect(2)'d.
 func newDialControl(allowPrivate bool) func(network, address string, c syscall.RawConn) error {
 	return func(network, address string, _ syscall.RawConn) error {
 		if allowPrivate {
@@ -137,8 +127,7 @@ func newDialControl(allowPrivate bool) func(network, address string, c syscall.R
 		if err != nil {
 			return fmt.Errorf("%w: %v", errBlockedTarget, err)
 		}
-		// allowedPorts directly, not portAllowed: allowPrivate already
-		// returned above, so this line is always the production check.
+		// allowedPorts directly, not portAllowed: allowPrivate already returned above.
 		if !allowedPorts[port] {
 			return fmt.Errorf("%w: port %s not allowed", errBlockedTarget, port)
 		}

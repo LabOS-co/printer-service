@@ -17,9 +17,8 @@ import (
 	"printgateway/internal/apperr"
 )
 
-// SafeFetcher downloads a document from a caller-supplied URL, refusing any
-// target that isn't a direct http(s) link on port 80/443 to a public
-// address. See guard.go for the checks themselves.
+// SafeFetcher downloads a document from a caller-supplied URL, refusing any target that isn't
+// a direct http(s) link on port 80/443 to a public address; see guard.go for the checks.
 type SafeFetcher struct {
 	client       *http.Client
 	allowPrivate bool
@@ -27,14 +26,12 @@ type SafeFetcher struct {
 	maxBytes     int64
 }
 
-// NewSafeFetcher builds a fetcher. allowPrivateTargets lifts the
-// loopback/private/link-local block (false in production, true only for
-// tests dialing httptest.Server). allowedHosts is the optional host-suffix
-// allowlist (empty means any public host); maxBytes bounds the response size.
+// NewSafeFetcher builds a fetcher. allowPrivateTargets lifts the loopback/private/link-local
+// block (true only for tests dialing httptest.Server); allowedHosts is the optional host-suffix
+// allowlist (empty means any public host), and maxBytes bounds the response size.
 func NewSafeFetcher(allowPrivateTargets bool, allowedHosts []string, maxBytes int64) *SafeFetcher {
 	dialer := &net.Dialer{Control: newDialControl(allowPrivateTargets)}
-	// DisableKeepAlives forces a fresh dial, and so a fresh Control check,
-	// per request — defense in depth against a reused connection bypassing it.
+	// DisableKeepAlives forces a fresh dial (and fresh Control check) per request.
 	transport := &http.Transport{
 		DialContext:       dialer.DialContext,
 		DisableKeepAlives: true,
@@ -72,15 +69,13 @@ func (f *SafeFetcher) Fetch(ctx context.Context, rawURL string, dst io.Writer) (
 		return 0, &apperr.HTTPError{Status: http.StatusForbidden, Public: "file_url host is not allowed", Internal: err}
 	}
 
-	// Belt-and-suspenders re-check of the actually-connected address, in
-	// case Control is ever mis-wired in a future refactor. cancel() alone
-	// isn't sufficient: net/http can still return (resp, nil) after GotConn
-	// fires, so blocked is also checked unconditionally after Do returns.
+	// Belt-and-suspenders re-check of the actually-connected address, in case Control is ever
+	// mis-wired: cancel() alone isn't enough since net/http can still return (resp, nil) after
+	// GotConn fires, so blocked is also checked unconditionally after Do returns.
 	dialCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	// blocked is read/written with no lock: safe only because this
-	// Transport never negotiates HTTP/2, so GotConn always fires
-	// synchronously on this goroutine. Enabling HTTP/2 here would race it.
+	// blocked is read/written with no lock: safe only because this Transport never negotiates
+	// HTTP/2, so GotConn always fires synchronously on this goroutine.
 	var blocked netip.Addr
 	trace := &httptrace.ClientTrace{
 		GotConn: func(info httptrace.GotConnInfo) {
@@ -118,8 +113,7 @@ func (f *SafeFetcher) Fetch(ctx context.Context, rawURL string, dst io.Writer) (
 	}
 	defer resp.Body.Close()
 
-	// Success-path recheck: Do can return a non-nil resp even after GotConn
-	// flagged and cancelled it (see above).
+	// Success-path recheck: Do can return a non-nil resp even after GotConn flagged and cancelled it.
 	if blocked.IsValid() {
 		return 0, &apperr.HTTPError{Status: http.StatusBadRequest, Public: errBlockedTarget.Error(), Internal: fmt.Errorf("post-connect check blocked %s (dial control did not)", blocked)}
 	}
@@ -131,10 +125,8 @@ func (f *SafeFetcher) Fetch(ctx context.Context, rawURL string, dst io.Writer) (
 		return 0, &apperr.HTTPError{Status: http.StatusRequestEntityTooLarge, Public: "file_url response is too large", Internal: fmt.Errorf("content-length %d exceeds max %d bytes", resp.ContentLength, f.maxBytes)}
 	}
 
-	// LimitReader regardless of Content-Length, since a chunked or lying
-	// body can't be trusted to stop on its own. Clamp maxBytes+1 to avoid
-	// int64 overflow, which would otherwise wrap to a negative limit and
-	// make io.LimitReader return an immediate (blank-page) EOF.
+	// LimitReader regardless of Content-Length, since a chunked or lying body can't be trusted
+	// to stop on its own. Clamp maxBytes+1 to avoid int64 overflow wrapping to a negative limit.
 	limit := f.maxBytes
 	if limit > math.MaxInt64-1 {
 		limit = math.MaxInt64 - 1

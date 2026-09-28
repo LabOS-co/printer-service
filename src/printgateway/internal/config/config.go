@@ -19,21 +19,15 @@ import (
 const (
 	// DefaultPort is used when neither PortAliasEnv nor PortEnv is set.
 	DefaultPort = 8090
-	// PortEnv names the TCP port to listen on. Under Nomad this is the dynamically allocated port,
-	// injected as PORT — matches go-packages/system_args' own env var name so both agree on the
-	// same value. Deliberately env-only, not settable from the JSON config file: like
-	// AllowPrivateTargetsEnv, an operator must not be able to silently move the bind port via a
-	// config file that's harder to audit than the environment a process was launched with.
+	// PortEnv names the TCP port to listen on (under Nomad, the dynamically allocated port,
+	// injected as PORT). Env-only, not file-settable, so the bind port stays auditable.
 	PortEnv = "PORT"
-	// PortAliasEnv overrides PortEnv when set, the same precedence VaultAddrEnv/SecretStoreURLEnv
-	// already use below. PORT is unnamespaced and among the most commonly pre-set variables in a
-	// shell or base image; PRINT_GATEWAY_PORT lets an operator pin this service's port deliberately
-	// without depending on nothing else in the environment ever exporting a bare PORT.
+	// PortAliasEnv overrides PortEnv when set: PORT is commonly pre-set in a shell or base
+	// image, so PRINT_GATEWAY_PORT lets an operator pin this service's port deliberately.
 	PortAliasEnv = "PRINT_GATEWAY_PORT"
 
-	// DefaultBindHost binds every interface. Nomad allocates the port dynamically and Consul/Traefik
-	// must reach it from outside the allocating host's own network namespace, so loopback-only can
-	// no longer be the default the way it was when the address was a fixed, manually-chosen one.
+	// DefaultBindHost binds every interface, since Consul/Traefik must reach the dynamically
+	// allocated Nomad port from outside the allocating host's own network namespace.
 	DefaultBindHost = "0.0.0.0"
 	// BindHostEnv overrides the bind host — set to "127.0.0.1" to restore loopback-only listening
 	// for a manual local run. Env-only for the same reason as PortEnv.
@@ -63,9 +57,8 @@ const (
 	DefaultReadTimeout       = 5 * time.Minute
 
 	// DefaultWriteTimeout must exceed ReadTimeout+max(FetchTimeout,S3Timeout)+SubmitTimeout: net/http
-	// arms the write deadline at header-parse time, so it has to cover the whole request, not just
-	// the response write — too low and a slow request is read, printed, and only then fails on the
-	// write, so the caller retries and the document prints twice.
+	// arms the write deadline at header-parse time, so too low a value lets a slow request get
+	// read, printed, and only then fail on the write — causing a retry and a duplicate print.
 	DefaultWriteTimeout = 8 * time.Minute
 
 	DefaultIdleTimeout    = 60 * time.Second
@@ -119,8 +112,7 @@ const (
 )
 
 // S3/MinIO object storage settings, all optional: an empty S3Endpoint means object storage isn't
-// configured, and a missing or broken config degrades the s3_key/presign paths to 503 rather than
-// failing startup, since multipart upload remains the primary intake path.
+// configured, and a broken config degrades s3_key/presign to 503 instead of failing startup.
 const (
 	S3EndpointEnv = "PRINT_GATEWAY_S3_ENDPOINT"
 	S3BucketEnv   = "PRINT_GATEWAY_S3_BUCKET"
@@ -128,18 +120,18 @@ const (
 
 	S3InsecureEnv = "PRINT_GATEWAY_S3_INSECURE"
 
-	// S3AccessKeyEnv/S3SecretKeyEnv are the env/file-fallback credentials; secrets.ResolveS3Credentials prefers Vault first.
+	// S3AccessKeyEnv/S3SecretKeyEnv are the env/file-fallback credentials; Vault is preferred first.
 	S3AccessKeyEnv = "PRINT_GATEWAY_S3_ACCESS_KEY"
 	S3SecretKeyEnv = "PRINT_GATEWAY_S3_SECRET_KEY"
 
 	DefaultS3Timeout = 60 * time.Second
 	S3TimeoutEnv     = "PRINT_GATEWAY_S3_TIMEOUT"
 
-	// DefaultS3MaxBytes bounds an s3_key download the same way DefaultFetchMaxBytes bounds a file_url download.
+	// DefaultS3MaxBytes bounds an s3_key download the same way DefaultFetchMaxBytes bounds file_url.
 	DefaultS3MaxBytes int64 = 64 << 20 // 64 MiB
 	S3MaxBytesEnv           = "PRINT_GATEWAY_S3_MAX_BYTES"
 
-	// DefaultPresignTTL is both the default and the cap: a caller-requested ttl longer than this is clamped, not rejected.
+	// DefaultPresignTTL is both the default and the cap: a longer caller-requested ttl is clamped.
 	DefaultPresignTTL = 15 * time.Minute
 	PresignTTLEnv     = "PRINT_GATEWAY_PRESIGN_TTL"
 )
@@ -181,9 +173,8 @@ type Config struct {
 	// AuthToken starts as PRINT_GATEWAY_TOKEN; main.go overwrites it with secrets.ResolveToken's result.
 	AuthToken string
 
-	// RequireAuth gates whether requireToken enforces the print token at all, and whether main.go
-	// treats an unresolvable token as a startup error. false means /print and /files/presign accept
-	// any request unauthenticated.
+	// RequireAuth gates whether requireToken enforces the print token, and whether an unresolvable
+	// token is fatal at startup. false means /print and /files/presign accept any request unauthenticated.
 	RequireAuth bool
 
 	// Vault/secret_store connection details; SecretStoreURL == "" means the other three are unused.
@@ -241,9 +232,9 @@ type Config struct {
 	// LogLevel names the logrus level main.go asks the logger for.
 	LogLevel string
 
-	// sources records, per env-var name, where that setting actually came from — populated only
-	// when a config file supplies it. Unexported and write-once: Config is copied by value into
-	// several packages that would otherwise alias the same map through an exported field.
+	// sources records, per env-var name, where that setting came from; populated only when a
+	// config file supplies it. Unexported: Config is copied by value into several packages
+	// that would otherwise alias this map through an exported field.
 	sources map[string]string
 
 	// ConfigFilePath is the path a config file was actually read from, or "" if none was.
@@ -281,14 +272,9 @@ func (c Config) FileSourcedKeys() []string {
 	return keys
 }
 
-// fileConfig mirrors the JSON config document (printservice.config.json), following the labOS-wide
-// "resource/*" convention other services already use. Every scalar is a pointer so nil
-// unambiguously means "not present in the file" (a JSON null decodes the same as an absent key).
-//
-// Two fields deviate from that rule, each documented on the field itself: Fetch.AllowedHosts (an
-// empty JSON array must mean "explicitly no allowlist", which a plain []string can't distinguish
-// from "not mentioned"), and the Limits fields, which stay *int64 so an oversized value fails with
-// this package's own wording rather than a generic encoding/json overflow message.
+// fileConfig mirrors the JSON config document (printservice.config.json); every scalar is a
+// pointer so nil means "not present" (JSON null decodes the same as an absent key).
+// Fetch.AllowedHosts and the Limits fields deviate: see their own field comments.
 type fileConfig struct {
 	Log          fileLog          `json:"resource/log"`
 	FileStorage  fileFileStorage  `json:"resource/file_storage"`
@@ -304,10 +290,10 @@ type fileLog struct {
 	Port *string `json:"port"`
 }
 
-// fileFileStorage is the shared S3/MinIO connection — host and credentials only. Which
-// bucket/region to use is this service's own concern and lives under "resource/printgateway.objectStore" instead.
+// fileFileStorage is the shared S3/MinIO connection — host and credentials only. Bucket/region
+// live under "resource/printgateway.objectStore" instead.
 type fileFileStorage struct {
-	// Host: an explicit "" is meaningful (disables object storage from the file) and suppresses PRINT_GATEWAY_S3_ENDPOINT.
+	// Host: an explicit "" disables object storage from the file, suppressing PRINT_GATEWAY_S3_ENDPOINT.
 	Host *string `json:"host"`
 	// S3User/S3Password: unlike every other secret this package knows about, these two ARE valid in
 	// the file — for a deployment model where the file itself is rendered from Vault at process
@@ -369,11 +355,8 @@ type fileObjectStore struct {
 }
 
 // decodeFileConfig decodes exactly one JSON object from data into a fileConfig, rejecting an
-// unknown field and any trailing content.
-//
-// Field-name matching stays case-insensitive under DisallowUnknownFields, and a duplicate *group*
-// key (e.g. two "timeouts" objects) merges into one struct rather than either being discarded —
-// only a duplicate *leaf* key is ordinary last-wins encoding/json behavior.
+// unknown field and any trailing content. A duplicate *group* key (e.g. two "timeouts" objects)
+// merges; only a duplicate *leaf* key is ordinary last-wins encoding/json behavior.
 func decodeFileConfig(data []byte) (fileConfig, error) {
 	// Checked explicitly so an empty/whitespace-only file (e.g. an unmounted bind mount) gets a
 	// diagnosable message instead of a bare "EOF" from the decoder.
@@ -438,7 +421,7 @@ func fileBytesInt(n int64, src string) (int, error) {
 	if n > math.MaxInt {
 		return 0, fmt.Errorf("%s: invalid byte size %d, want a positive integer number of bytes", src, n)
 	}
-	return validateBytesInt(int(n), src)
+	return validateBytes(int(n), src)
 }
 
 // loadConfigFile reads and decodes the file named by ConfigPathEnv. A missing, unreadable, or
@@ -455,16 +438,9 @@ func loadConfigFile(path string, readFile func(string) ([]byte, error)) (fileCon
 	return fc, nil
 }
 
-// mergeFileConfig overlays fc onto cfg (which already holds the env/default resolution) and
-// returns the sources map recording, per env-var name, the "<path>:<jsonPath>" label of every
-// setting the file actually supplied. File beats env unconditionally for every setting it names —
-// precedence is file -> env -> default. Port/BindHost are not among them: like AllowPrivateTargetsEnv,
-// they are enforced env-only at the type level — BindHost has no field in fileConfig at all, so
-// naming it fails as an unknown field; Addr keeps a field purely to reject it with an actionable
-// message (below), since it named the same setting under its pre-Nomad meaning.
-//
-// Every env override is validated by Load before this function runs, so a malformed env var is
-// still a startup error even for a setting the file goes on to supersede.
+// mergeFileConfig overlays fc onto cfg and returns the sources map (env-var name to
+// "<path>:<jsonPath>") for every setting the file supplied; file beats env unconditionally.
+// Port/BindHost stay env-only, and Addr exists only to reject the legacy key.
 func mergeFileConfig(cfg *Config, fc fileConfig, path string) (map[string]string, error) {
 	label := func(jsonPath string) string { return path + ":" + jsonPath }
 	sources := make(map[string]string)
@@ -528,7 +504,7 @@ func mergeFileConfig(cfg *Config, fc fileConfig, path string) (map[string]string
 		if r.raw == nil {
 			continue
 		}
-		n, err := validateBytes64(*r.raw, label(r.jsonPath))
+		n, err := validateBytes(*r.raw, label(r.jsonPath))
 		if err != nil {
 			return nil, err
 		}
@@ -582,9 +558,9 @@ func mergeFileConfig(cfg *Config, fc fileConfig, path string) (map[string]string
 		sources[S3SecretKeyEnv] = label("resource/file_storage.s3-password")
 	}
 
-	// resource/log splits into host/port fields where Config.LogServer is a single "host:port"
-	// string, so it's combined here rather than through the generic stringRows table above.
-	// LogServerEnv is suppressed only when BOTH sides resolve empty.
+	// resource/log splits into host/port where Config.LogServer is one "host:port" string, so
+	// it's combined here rather than through the stringRows table above. Suppressed only when
+	// both sides resolve empty.
 	if fc.Log.Host != nil || fc.Log.Port != nil {
 		var host, port string
 		if fc.Log.Host != nil {
@@ -618,9 +594,9 @@ func mergeFileConfig(cfg *Config, fc fileConfig, path string) (map[string]string
 	return sources, nil
 }
 
-// Load builds Config from the environment and — when ConfigPathEnv names one — a JSON config file
-// that wins over the environment. It fails on a present-but-malformed override from either source,
-// naming the offending variable or JSON path.
+// Load builds Config from the environment and, when ConfigPathEnv names one, a JSON config file
+// that wins over it. Fails on a malformed override from either source, naming the offending
+// variable or JSON path.
 func Load(getenv func(string) string, readFile func(string) ([]byte, error)) (Config, error) {
 	port := DefaultPort
 	portRaw, portSrc := getenv(PortEnv), PortEnv
@@ -711,47 +687,42 @@ func Load(getenv func(string) string, readFile func(string) ([]byte, error)) (Co
 		*d.dst = v
 	}
 
+	// Order matters: the first malformed env var is the one reported.
 	n, err := overrideBytes(getenv, MaxHeaderBytesEnv, cfg.MaxHeaderBytes)
 	if err != nil {
 		return Config{}, err
 	}
 	cfg.MaxHeaderBytes = n
 
-	fn, err := overrideBytes64(getenv, FetchMaxBytesEnv, cfg.FetchMaxBytes)
-	if err != nil {
-		return Config{}, err
+	for _, r := range []struct {
+		name string
+		dst  *int64
+	}{
+		{FetchMaxBytesEnv, &cfg.FetchMaxBytes},
+		{MaxUploadBytesEnv, &cfg.MaxUploadBytes},
+		{MaxJSONBytesEnv, &cfg.MaxJSONBytes},
+	} {
+		v, err := overrideBytes64(getenv, r.name, *r.dst)
+		if err != nil {
+			return Config{}, err
+		}
+		*r.dst = v
 	}
-	cfg.FetchMaxBytes = fn
 
-	upn, err := overrideBytes64(getenv, MaxUploadBytesEnv, cfg.MaxUploadBytes)
-	if err != nil {
-		return Config{}, err
+	for _, r := range []struct {
+		name string
+		dst  *bool
+	}{
+		{AllowPrivateTargetsEnv, &cfg.AllowPrivateTargets},
+		{S3InsecureEnv, &cfg.S3Insecure},
+		{RequireAuthEnv, &cfg.RequireAuth},
+	} {
+		v, err := overrideBool(getenv, r.name, *r.dst)
+		if err != nil {
+			return Config{}, err
+		}
+		*r.dst = v
 	}
-	cfg.MaxUploadBytes = upn
-
-	jn, err := overrideBytes64(getenv, MaxJSONBytesEnv, cfg.MaxJSONBytes)
-	if err != nil {
-		return Config{}, err
-	}
-	cfg.MaxJSONBytes = jn
-
-	allowPrivate, err := overrideBool(getenv, AllowPrivateTargetsEnv, cfg.AllowPrivateTargets)
-	if err != nil {
-		return Config{}, err
-	}
-	cfg.AllowPrivateTargets = allowPrivate
-
-	s3Insecure, err := overrideBool(getenv, S3InsecureEnv, cfg.S3Insecure)
-	if err != nil {
-		return Config{}, err
-	}
-	cfg.S3Insecure = s3Insecure
-
-	requireAuth, err := overrideBool(getenv, RequireAuthEnv, cfg.RequireAuth)
-	if err != nil {
-		return Config{}, err
-	}
-	cfg.RequireAuth = requireAuth
 
 	s3MaxBytes, err := overrideBytes64(getenv, S3MaxBytesEnv, cfg.S3MaxBytes)
 	if err != nil {
@@ -781,9 +752,9 @@ func Load(getenv func(string) string, readFile func(string) ([]byte, error)) (Co
 	return cfg, nil
 }
 
-// validate enforces the relationships between values that are each individually plausible and
-// only wrong in combination — a class of mistake net/http never reports, since it just applies
-// whichever deadline expires first.
+// validate enforces relationships between values that are each plausible alone but wrong in
+// combination — a class of mistake net/http never reports; it just applies whichever deadline
+// fires first.
 func validate(cfg Config) error {
 	// A header deadline that outlives the read deadline can never be the one that fires.
 	if cfg.ReadHeaderTimeout > cfg.ReadTimeout {
@@ -791,10 +762,10 @@ func validate(cfg Config) error {
 			cfg.Source(ReadHeaderTimeoutEnv), cfg.ReadHeaderTimeout, cfg.Source(ReadTimeoutEnv), cfg.ReadTimeout)
 	}
 
-	// The write deadline is armed at header-parse time, so it must cover the body read, any
-	// file_url/s3_key download, and lp submission, not just the response write, or a slow request
-	// gets printed and then fails on the write, causing a retry and a duplicate print. max, not
-	// sum, of FetchTimeout/S3Timeout: a single request only ever exercises one of them.
+	// The write deadline arms at header-parse time, so it must also cover the body read, download,
+	// and lp submission, not just the response write, or a slow request prints and then fails on
+	// the write, causing a duplicate print on retry. max, not sum: a request only ever exercises
+	// one of FetchTimeout/S3Timeout.
 	fetchOrS3 := max(cfg.FetchTimeout, cfg.S3Timeout)
 	if writeBudget := cfg.ReadTimeout + fetchOrS3 + cfg.SubmitTimeout; cfg.WriteTimeout <= writeBudget {
 		return fmt.Errorf("%s (%s) must exceed %s+max(%s,%s)+%s (%s): the write deadline is armed when request headers are parsed, so it must cover reading the body, downloading file_url/s3_key, and running lp, as well as sending the response",
@@ -844,42 +815,30 @@ func parsePort(raw, src string) (int, error) {
 	return n, nil
 }
 
-func overrideBytes(getenv func(string) string, name string, def int) (int, error) {
+// overrideBytesEnv reads name as a positive byte size via parse, or returns def when unset.
+func overrideBytesEnv[N int | int64](getenv func(string) string, name string, def N, parse func(string) (N, error)) (N, error) {
 	raw := getenv(name)
 	if raw == "" {
 		return def, nil
 	}
-	n, err := strconv.Atoi(raw)
+	n, err := parse(raw)
 	if err != nil || n <= 0 {
 		return 0, fmt.Errorf("%s: invalid byte size %q, want a positive integer number of bytes", name, raw)
 	}
 	return n, nil
 }
 
-// validateBytesInt is the positivity check overrideBytes applies to its parsed value, exposed
-// standalone for a source (e.g. the config file) with no raw string to re-run through strconv.
-func validateBytesInt(n int, src string) (int, error) {
-	if n <= 0 {
-		return 0, fmt.Errorf("%s: invalid byte size %d, want a positive integer number of bytes", src, n)
-	}
-	return n, nil
+func overrideBytes(getenv func(string) string, name string, def int) (int, error) {
+	return overrideBytesEnv(getenv, name, def, strconv.Atoi)
 }
 
 // overrideBytes64 is overrideBytes for a field too large for a plain int on a 32-bit build.
 func overrideBytes64(getenv func(string) string, name string, def int64) (int64, error) {
-	raw := getenv(name)
-	if raw == "" {
-		return def, nil
-	}
-	n, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil || n <= 0 {
-		return 0, fmt.Errorf("%s: invalid byte size %q, want a positive integer number of bytes", name, raw)
-	}
-	return n, nil
+	return overrideBytesEnv(getenv, name, def, func(raw string) (int64, error) { return strconv.ParseInt(raw, 10, 64) })
 }
 
-// validateBytes64 is validateBytesInt for an already-parsed int64.
-func validateBytes64(n int64, src string) (int64, error) {
+// validateBytes is the positivity check for an already-parsed byte size (e.g. from the config file).
+func validateBytes[N int | int64](n N, src string) (N, error) {
 	if n <= 0 {
 		return 0, fmt.Errorf("%s: invalid byte size %d, want a positive integer number of bytes", src, n)
 	}
@@ -917,11 +876,10 @@ func splitHostList(raw string) ([]string, error) {
 	return normalizeHostList(strings.Split(raw, ","), FetchAllowedHostsEnv)
 }
 
-// normalizeHostList is splitHostList's validate-only half: given already-split entries, it
-// rejects anything that is not a bare hostname. fetch.hostAllowed matches on a label boundary
-// (host == suffix, or host ends in "."+suffix), so a scheme/port/userinfo/path fragment, or a
-// leading/trailing dot, could never match there and must be rejected here instead of silently
-// producing a 403 with no explanation.
+// normalizeHostList is splitHostList's validate-only half: it rejects anything that is not a
+// bare hostname. fetch.hostAllowed matches on a label boundary, so a scheme/port/userinfo/path
+// fragment, or a leading/trailing dot, must be rejected here rather than silently producing an
+// unexplained 403.
 func normalizeHostList(entries []string, src string) ([]string, error) {
 	var hosts []string
 	for _, h := range entries {

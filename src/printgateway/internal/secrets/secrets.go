@@ -16,21 +16,13 @@ import (
 	"printgateway/internal/config"
 )
 
-// errSecretNotFound marks a definite "the store answered, and the secret
-// genuinely isn't there" - the only condition ResolveToken/ResolveLogServer/
-// ResolveS3Credentials treat as "fall back to env", as opposed to a
-// transport/auth/malformed-response error, which means the store is broken
-// rather than merely empty.
+// errSecretNotFound marks a definite "the store answered, the secret isn't there" - the only
+// condition the Resolve* functions treat as "fall back to env", not a broken store.
 var errSecretNotFound = errors.New("secret not found")
 
-// getSecretString resolves a single string value at key within the secret at
-// path, unwrapping secret_store's KV v2 response shape: VaultClient.
-// GetSecretValue returns a secret's fields nested one level under "data"
-// (the sibling "metadata" key, carrying version/created_time info, is not
-// part of what this returns) - this is the one place that unwrap happens
-// rather than every caller having to know about it. A present "data" key
-// whose value is nil (Vault's shape for a soft-deleted secret version) is
-// treated as a miss, not a malformed response.
+// getSecretString resolves a single string value at key within the secret at path, unwrapping
+// secret_store's KV v2 response shape so no caller has to know about it. A "data" key whose
+// value is nil (a soft-deleted secret version) is treated as a miss, not malformed.
 func getSecretString(client secret_store.SecretStoreClient, path, key string) (string, error) {
 	raw, err := client.GetSecretValue(path)
 	if err != nil {
@@ -93,8 +85,7 @@ var vaultClient = defaultVaultClient
 func defaultVaultClient(cfg config.Config, logger logs.Logger, meta *logs.LogMetaData) (secret_store.SecretStoreClient, error) {
 	password := cfg.SecretStorePassword
 	if password != "" {
-		// SECRET_STORE_PASSWORD is expected encrypted, matching
-		// go-packages/settings.go's getSecretStoreSettings.
+		// SECRET_STORE_PASSWORD is expected encrypted, matching go-packages/settings.go.
 		decrypted, err := encryption.Decrypt(password)
 		if err != nil {
 			return nil, fmt.Errorf("can't decrypt %s: %w", config.SecretStorePasswordEnv, err)
@@ -110,19 +101,9 @@ func defaultVaultClient(cfg config.Config, logger logs.Logger, meta *logs.LogMet
 	}, logger, meta)
 }
 
-// ResolveToken resolves the shared print token (X-Labos-Print-Token). If Vault is
-// not configured, it returns cfg.AuthToken; if that is empty too, it errors rather
-// than starting up to answer 503 to every request forever.
-//
-// If Vault is configured, it falls back to cfg.AuthToken on ANY failure (client
-// construction, an unreachable server, a malformed response, or a genuinely
-// missing secret) rather than only on a definite miss — a misconfigured or down
-// Vault must degrade this prototype to env, not take the service down. Every
-// fallback is logged (never the token value).
-//
-// Returns (token, source, nil) on success, where source names which input won
-// ("vault", "env", or "env (vault fallback)"). Returns an error only when no
-// source produced a usable token.
+// ResolveToken resolves the shared print token, trying Vault first and falling back to
+// cfg.AuthToken on any failure, so a misconfigured or down Vault degrades to env rather than
+// taking the service down. Returns (token, source, nil), or an error if nothing produced one.
 func ResolveToken(cfg config.Config, logger logs.Logger, meta *logs.LogMetaData) (token, source string, err error) {
 	if cfg.SecretStoreURL == "" {
 		if strings.TrimSpace(cfg.AuthToken) == "" {
@@ -177,11 +158,8 @@ func vaultPath(labosEnv, path string) string {
 }
 
 // ResolveLogServer resolves the logstash address (host, port) main.go hands to
-// logger.SetLogstashLogger. Never fatal: any failure just leaves the service on
-// console-only logging, logged once.
-//
-// Returns ("", 0, "") when nothing usable was found. source names which input won
-// ("vault" or "env") when host is non-empty.
+// logger.SetLogstashLogger. Never fatal: any failure just leaves the service on console-only
+// logging, logged once. Returns ("", 0, "") when nothing usable was found.
 func ResolveLogServer(cfg config.Config, logger logs.Logger, meta *logs.LogMetaData) (host string, port int, source string) {
 	if cfg.SecretStoreURL != "" {
 		client, err := vaultClient(cfg, logger, meta)
@@ -243,11 +221,9 @@ func parseHostPort(raw string) (host string, port int, err error) {
 	return h, n, nil
 }
 
-// ResolveS3Credentials resolves the S3/MinIO access key and secret key. Never
-// fatal: a missing or broken source just means main.go skips constructing objstore
-// and the s3_key/presign endpoints answer 503.
-//
-// Returns ("", "", "") when neither Vault nor the environment produced both values.
+// ResolveS3Credentials resolves the S3/MinIO access key and secret key. Never fatal: a missing
+// or broken source just means main.go skips constructing objstore and the s3_key/presign
+// endpoints answer 503. Returns ("", "", "") when neither source produced both values.
 func ResolveS3Credentials(cfg config.Config, logger logs.Logger, meta *logs.LogMetaData) (accessKey, secretKey, source string) {
 	if cfg.SecretStoreURL != "" {
 		client, err := vaultClient(cfg, logger, meta)

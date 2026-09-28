@@ -19,14 +19,9 @@ import (
 // defaultCopies is used when a caller does not supply one.
 const defaultCopies = 1
 
-// maxCopies bounds copies per request, since they consume a physical shared
-// resource (paper/toner). Also enforced independently by printgw.Service
-// for callers that bypass these HTTP handlers.
-const maxCopies = 100
-
-// printHandler accepts a print request as either multipart/form-data (file
-// attached directly) or application/json ({"printer","file_url"} or
-// {"printer","s3_key"}, fetched server-side).
+// printHandler accepts a print request as either multipart/form-data (file attached
+// directly) or application/json ({"printer","file_url"} or {"printer","s3_key"}, fetched
+// server-side).
 func (a *API) printHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		a.fail(w, r, &apperr.HTTPError{Status: http.StatusMethodNotAllowed, Public: "use POST"})
@@ -48,9 +43,8 @@ func (a *API) printHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// isMultipart reports whether contentType names a multipart/form-data
-// request. Also used by the maxBytes middleware, which must agree with this
-// dispatch on which requests get the larger upload limit.
+// isMultipart reports whether contentType names a multipart/form-data request. Also used
+// by the maxBytes middleware, which must agree with this dispatch on the upload limit.
 func isMultipart(contentType string) bool {
 	mediaType, _, err := mime.ParseMediaType(contentType)
 	if err != nil {
@@ -62,8 +56,7 @@ func isMultipart(contentType string) bool {
 // handleMultipart handles option 1: the caller attaches the file itself.
 // Multipart fields: "printer" (text), "file" (the file part).
 func (a *API) handleMultipart(w http.ResponseWriter, r *http.Request) {
-	// In-memory threshold only; the hard body-size cap (MaxUploadBytes) is
-	// already enforced by the maxBytes middleware.
+	// In-memory threshold only; the hard cap (MaxUploadBytes) is enforced by the maxBytes middleware.
 	if err := r.ParseMultipartForm(config.DefaultMultipartMemoryBytes); err != nil {
 		a.fail(w, r, bodyErr(err, "invalid multipart body"))
 		return
@@ -97,11 +90,9 @@ func (a *API) handleMultipart(w http.ResponseWriter, r *http.Request) {
 	a.writeSuccess(w, r, printer, result)
 }
 
-// multipartFormValue returns the first value for key from the parsed
-// multipart body only (never r.URL.Query(), which r.FormValue would merge
-// in — letting a query string silently override the "copies" form field),
-// plus whether key was present, so callers can distinguish "absent" from
-// "present but empty".
+// multipartFormValue returns the first value for key from the parsed multipart body only
+// (never r.URL.Query(), which r.FormValue would merge in, letting a query string silently
+// override the "copies" form field), plus whether key was present.
 func multipartFormValue(r *http.Request, key string) (value string, present bool) {
 	if r.MultipartForm == nil {
 		return "", false
@@ -123,21 +114,10 @@ func parseCopiesFormValue(raw string, present bool) (int, *apperr.HTTPError) {
 	if err != nil {
 		return 0, &apperr.HTTPError{Status: http.StatusBadRequest, Public: "copies must be a positive integer"}
 	}
-	if cerr := validateCopiesRange(copies); cerr != nil {
+	if cerr := printgw.ValidateCopies(copies); cerr != nil {
 		return 0, cerr
 	}
 	return copies, nil
-}
-
-// validateCopiesRange enforces >=1/<=maxCopies, shared by both intake paths.
-func validateCopiesRange(copies int) *apperr.HTTPError {
-	if copies < 1 || copies > maxCopies {
-		return &apperr.HTTPError{
-			Status: http.StatusBadRequest,
-			Public: fmt.Sprintf("copies must be between 1 and %d", maxCopies),
-		}
-	}
-	return nil
 }
 
 type urlPrintRequest struct {
@@ -145,17 +125,15 @@ type urlPrintRequest struct {
 	FileURL string `json:"file_url"` // e.g. a presigned S3/MinIO URL, or any HTTP(S) URL
 	S3Key   string `json:"s3_key"`   // a key in the configured object store bucket
 
-	// Copies is a pointer so an omitted field (defaults to defaultCopies) is
-	// distinguishable from an explicit 0/negative (rejected below). JSON
-	// null is deliberately treated as omitted too, not rejected — encoding/json
-	// can't tell the two apart on a *int anyway (see
-	// TestPrintHandlerJSONCopiesNullIsAbsentDefault).
+	// Copies is a pointer so an omitted field (defaults to defaultCopies) is distinguishable
+	// from an explicit 0/negative (rejected below). JSON null is treated as omitted too,
+	// since encoding/json can't tell the two apart on a *int anyway.
 	Copies *int `json:"copies"`
 }
 
-// handleURLReference handles option 2: the caller sends only a reference —
-// a URL the server fetches (file_url, SSRF-guarded) or a key in the
-// configured object store (s3_key). Exactly one of the two must be set.
+// handleURLReference handles option 2: the caller sends only a reference — a URL the server
+// fetches (file_url, SSRF-guarded) or a key in the configured object store (s3_key). Exactly
+// one of the two must be set.
 func (a *API) handleURLReference(w http.ResponseWriter, r *http.Request) {
 	var req urlPrintRequest
 	if err := decodeStrictJSON(r, &req); err != nil {
@@ -176,7 +154,7 @@ func (a *API) handleURLReference(w http.ResponseWriter, r *http.Request) {
 	}
 	copies := defaultCopies
 	if req.Copies != nil {
-		if cerr := validateCopiesRange(*req.Copies); cerr != nil {
+		if cerr := printgw.ValidateCopies(*req.Copies); cerr != nil {
 			a.fail(w, r, cerr)
 			return
 		}
@@ -199,25 +177,22 @@ func (a *API) handleURLReference(w http.ResponseWriter, r *http.Request) {
 	a.writeSuccess(w, r, req.Printer, result)
 }
 
-// validObjectKey rejects a key that could escape the configured bucket via
-// path traversal (e.g. "../other-bucket/x"). Rejects outright rather than
-// normalizing via path.Clean, so what the caller sent and what reaches the
-// store never diverge.
+// validObjectKey rejects a key that could escape the configured bucket via path traversal
+// (e.g. "../other-bucket/x"), rather than normalizing it, so what the caller sent and what
+// reaches the store never diverge.
 func validObjectKey(key string) bool {
 	return path.Clean("/"+key) == "/"+key
 }
 
-// decodeStrictJSON decodes exactly one JSON value from r.Body into v,
-// rejecting an unknown field (catches typo'd field names) and any trailing
-// content after that value (catches concatenated bodies).
+// decodeStrictJSON decodes exactly one JSON value from r.Body into v, rejecting an unknown
+// field (typo'd names) and any trailing content after that value (concatenated bodies).
 func decodeStrictJSON(r *http.Request, v any) error {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
 		return err
 	}
-	// A second Decode call is used rather than Decoder.More, which only
-	// answers "more in this array/object", not "more at the top level".
+	// A second Decode call, not Decoder.More: More only answers "more in this array/object".
 	var extra json.RawMessage
 	switch err := dec.Decode(&extra); {
 	case errors.Is(err, io.EOF):
@@ -234,8 +209,7 @@ func decodeStrictJSON(r *http.Request, v any) error {
 func bodyErr(err error, what string) *apperr.HTTPError {
 	var maxBytesErr *http.MaxBytesError
 	if errors.As(err, &maxBytesErr) {
-		// Distinguish "body too large" (413, names the limit) from an
-		// ordinary malformed body (400) — both would otherwise look the same.
+		// Distinguish "body too large" (413, names the limit) from an ordinary malformed body (400).
 		return &apperr.HTTPError{
 			Status: http.StatusRequestEntityTooLarge,
 			Public: fmt.Sprintf("request body exceeds the %d byte limit", maxBytesErr.Limit),
@@ -243,8 +217,7 @@ func bodyErr(err error, what string) *apperr.HTTPError {
 	}
 	var typeErr *json.UnmarshalTypeError
 	if errors.As(err, &typeErr) {
-		// Rebuild the message from Field/Value/Type: the error's own
-		// Error() string names the internal Go struct, not just the JSON tag.
+		// Rebuild from Field/Value/Type: Error() names the internal Go struct, not the JSON tag.
 		return &apperr.HTTPError{
 			Status: http.StatusBadRequest,
 			Public: fmt.Sprintf("%s: field %q must be a %s, got %s", what, typeErr.Field, typeErr.Type, typeErr.Value),

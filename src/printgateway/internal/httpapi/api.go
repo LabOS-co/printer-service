@@ -20,8 +20,7 @@ type API struct {
 	logger logs.Logger
 	svc    *printgw.Service
 
-	// objectStore is nil when S3 is not configured; presigning doesn't go
-	// through svc, so it's held here rather than only inside it.
+	// objectStore is nil when S3 is not configured; presigning doesn't go through svc.
 	objectStore Presigner
 }
 
@@ -34,10 +33,9 @@ func New(cfg config.Config, logger logs.Logger, svc *printgw.Service, objectStor
 	}
 }
 
-// requestMeta builds a per-request LogMetaData/ErrorHandler pair, correlated
-// by request id. Built fresh on every call rather than cached on API: error_handler
-// binds metadata at construction, so sharing one instance would race across
-// concurrent requests.
+// requestMeta builds a per-request LogMetaData/ErrorHandler pair, correlated by request id.
+// Built fresh on every call, not cached on API, because error_handler binds metadata at
+// construction and sharing one instance would race across concurrent requests.
 func (a *API) requestMeta(r *http.Request) (*logs.LogMetaData, error_handler.ErrorHandler) {
 	md := &logs.LogMetaData{Service: config.ServiceName, JobId: requestIDFrom(r.Context())}
 	return md, error_handler.NewErrorHandler(a.logger, md)
@@ -47,13 +45,9 @@ func (a *API) requestMeta(r *http.Request) (*logs.LogMetaData, error_handler.Err
 // incorrectly (nil error, or a typed-nil *apperr.HTTPError).
 var errFailCalledImproperly = &apperr.HTTPError{Status: http.StatusInternalServerError, Public: "internal server error"}
 
-// fail translates err into an HTTP response, logging any *apperr.HTTPError's
-// Internal detail here and never serializing it to the client.
-//
-// err must be normalized to errFailCalledImproperly (or have Internal
-// stripped) before reaching eh.HandleError below: error_handler puts
-// Err.Error() directly into the response body, so an unclassified error
-// would otherwise leak filesystem paths or subprocess output to the caller.
+// fail translates err into an HTTP response, logging any *apperr.HTTPError's Internal detail
+// and never serializing it to the client. Anything but a non-nil *apperr.HTTPError is replaced
+// by errFailCalledImproperly first, since error_handler puts Err.Error() (Public only) in the body.
 func (a *API) fail(w http.ResponseWriter, r *http.Request, err error) {
 	md, eh := a.requestMeta(r)
 

@@ -38,12 +38,9 @@ func newRequestID() string {
 	return "req-" + rand.Text()
 }
 
-// sanitizeRequestID accepts a caller-supplied id only if it is printable
-// ASCII of plausible length, so it can never become a log-injection vector.
-// Rejects the full 0x00-0x1f/0x7f-0xff range rather than enumerating
-// specific bytes: that range also covers C1 controls, Unicode line
-// separators, and invalid UTF-8 that a naive rune-wise control-char check
-// would let through.
+// sanitizeRequestID accepts a caller-supplied id only if it is printable ASCII of plausible
+// length, so it can never become a log-injection vector. Rejects the whole 0x00-0x1f/0x7f-0xff
+// range rather than enumerating bytes, since that also catches invalid UTF-8.
 func sanitizeRequestID(id string) string {
 	if id == "" || len(id) > maxRequestIDLen {
 		return ""
@@ -75,8 +72,7 @@ func (a *API) requestContext(next http.Handler) http.Handler {
 		id := sanitizeRequestID(raw)
 		if id == "" {
 			id = newRequestID()
-			// Log a rejected caller-supplied id rather than silently
-			// relabelling it, so a broken cross-service trace is visible.
+			// Log a rejected caller-supplied id rather than silently relabelling it.
 			if raw != "" {
 				md, _ := a.requestMeta(r)
 				md.JobId = id
@@ -99,9 +95,8 @@ func (a *API) requireToken(next http.HandlerFunc) http.HandlerFunc {
 	expected := a.cfg.AuthToken
 	return func(w http.ResponseWriter, r *http.Request) {
 		if expected == "" {
-			// Must fail closed here: ConstantTimeCompare returns 1 for two
-			// zero-length slices, so without this branch an empty
-			// AuthToken would authorize any request with no token header.
+			// Must fail closed: ConstantTimeCompare returns 1 for two zero-length slices,
+			// so without this branch an empty AuthToken would authorize any unheadered request.
 			a.fail(w, r, &apperr.HTTPError{
 				Status: http.StatusServiceUnavailable,
 				Public: "server is not configured for authentication",
@@ -124,15 +119,9 @@ func (a *API) requireToken(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// panicRecovery recovers a panic from the handler chain below it and logs
-// it with request correlation before responding 500; the client never sees
-// the stack trace, only the same generic response a.fail sends for any
-// other error.
-//
-// Deliberately nested INSIDE accessLog, not outside: this lets a.fail's 500
-// go through accessLog's statusRecorder so the completion log's Status
-// matches what the client actually got, at the cost of not recovering a
-// panic in requestContext/maxBytes/accessLog itself.
+// panicRecovery recovers a panic from the handler chain below it, logs it, and responds 500
+// without leaking the stack trace. Nested inside accessLog, not outside, so a.fail's 500 still
+// goes through accessLog's statusRecorder for a matching completion-log Status.
 func (a *API) panicRecovery(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
@@ -187,12 +176,9 @@ func (rec *statusRecorder) Write(b []byte) (int, error) {
 	return rec.ResponseWriter.Write(b)
 }
 
-// accessLog calls logs.Logger.LogAPICompletion exactly once per request,
-// with the status actually sent, sitting outside requireToken and
-// panicRecovery so both a 401 and a recovered panic still get logged with
-// a duration.
-//
-// Bookkeeping runs in a defer so it still executes if next.ServeHTTP panics.
+// accessLog calls LogAPICompletion exactly once per request with the status actually sent,
+// outside requireToken and panicRecovery so a 401 or a recovered panic still gets logged.
+// Runs in a defer so it still executes if next.ServeHTTP panics.
 func (a *API) accessLog(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -211,15 +197,10 @@ func (a *API) accessLog(next http.Handler) http.Handler {
 	})
 }
 
-// maxBytes bounds every inbound request body via http.MaxBytesReader, sized
-// by Content-Type (multipart uploads get the larger limit, everything else
-// the tighter JSON one).
-//
-// Must wrap accessLog, not be nested inside it: MaxBytesReader detects an
-// oversized request via an unexported interface type-asserted against the
-// ResponseWriter it's given, which statusRecorder (accessLog's wrapper)
-// doesn't satisfy — nesting the other way silently breaks the
-// connection-close-on-overflow behavior.
+// maxBytes bounds every inbound request body via http.MaxBytesReader, sized by Content-Type
+// (multipart gets the larger limit, everything else the tighter JSON one). Must wrap accessLog,
+// not nest inside it: MaxBytesReader type-asserts the ResponseWriter against an interface that
+// statusRecorder doesn't satisfy, breaking the close-on-overflow behavior if nested the other way.
 func (a *API) maxBytes(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		limit := a.cfg.MaxJSONBytes

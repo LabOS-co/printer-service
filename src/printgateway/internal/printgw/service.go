@@ -24,9 +24,8 @@ type Service struct {
 	s3MaxBytes  int64
 }
 
-// Timeouts bounds Service's operations. A named struct rather than adjacent
-// time.Duration parameters, so a same-typed argument swap at a call site fails to
-// compile instead of silently mispairing a timeout with the wrong operation.
+// Timeouts bounds Service's operations. A named struct rather than adjacent time.Duration
+// parameters, so a same-typed argument swap at a call site fails to compile.
 type Timeouts struct {
 	Submit time.Duration // bounds the Submit call; see ports.go
 	Fetch  time.Duration // bounds the Fetch call; see ports.go
@@ -39,13 +38,11 @@ func NewService(submitter Submitter, fetcher Fetcher, objectStore ObjectStore, t
 	return &Service{submitter: submitter, fetcher: fetcher, objectStore: objectStore, timeouts: timeouts, s3MaxBytes: s3MaxBytes}
 }
 
-// maxCopies mirrors httpapi.maxCopies. Copies governs consumption of a physical,
-// shared resource (paper/toner), so it is enforced again here rather than trusting
-// the HTTP edge to be every caller's only path into this package.
+// maxCopies bounds copies per request, since they consume a physical shared resource (paper/toner).
 const maxCopies = 100
 
-// validateCopies enforces copies is in [1, maxCopies].
-func validateCopies(copies int) error {
+// ValidateCopies enforces copies in [1, maxCopies]; shared by httpapi and Service's own checks.
+func ValidateCopies(copies int) *apperr.HTTPError {
 	if copies < 1 || copies > maxCopies {
 		return &apperr.HTTPError{
 			Status: http.StatusBadRequest,
@@ -55,9 +52,16 @@ func validateCopies(copies int) error {
 	return nil
 }
 
-// submit bounds ctx to Timeouts.Submit and hands job to the Submitter, re-wrapping
-// any error that isn't already a classified *apperr.HTTPError so no raw internal
-// detail (a temp path, a subprocess's stderr) reaches httpapi's response body.
+// validateCopies adapts ValidateCopies to the plain error type Service's callers want.
+func validateCopies(copies int) error {
+	if err := ValidateCopies(copies); err != nil {
+		return err
+	}
+	return nil
+}
+
+// submit bounds ctx to Timeouts.Submit and hands job to the Submitter, re-wrapping any error
+// that isn't already a classified *apperr.HTTPError so no raw internal detail reaches the client.
 func (s *Service) submit(ctx context.Context, job SubmitJob) (SubmitResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, s.timeouts.Submit)
 	defer cancel()
@@ -117,8 +121,7 @@ func (s *Service) PrintURL(ctx context.Context, printer, rawURL string, copies i
 
 	spoolPath, cleanup, err := spoolTo("print-download-*.pdf", func(w io.Writer) error {
 		if _, err := s.fetch(ctx, rawURL, w); err != nil {
-			// fetch.SafeFetcher classifies its own failures already; pass a classified
-			// error through as-is instead of collapsing it to 502.
+			// fetch.SafeFetcher classifies its own failures; pass through instead of collapsing to 502.
 			var httpErr *apperr.HTTPError
 			if errors.As(err, &httpErr) {
 				return err
@@ -164,18 +167,16 @@ func (s *Service) PrintS3Key(ctx context.Context, printer, key string, copies in
 	return s.submit(ctx, SubmitJob{Printer: printer, Path: spoolPath, Title: sanitizeName(key), Copies: copies})
 }
 
-// getObject bounds ctx to Timeouts.S3, fetches key, and rejects it if it exceeds
-// s3MaxBytes — checked both against the store's reported size up front and against
-// the actual bytes copied, since a store's reported size is a contract on the
-// ObjectStore interface, not something provably true of every implementation.
+// getObject bounds ctx to Timeouts.S3, fetches key, and rejects it if it exceeds s3MaxBytes,
+// checked both against the store's reported size and against the actual bytes copied, since
+// the reported size is only an interface contract.
 func (s *Service) getObject(ctx context.Context, key string, dst io.Writer) error {
 	ctx, cancel := context.WithTimeout(ctx, s.timeouts.S3)
 	defer cancel()
 
 	rc, size, err := s.objectStore.Get(ctx, key)
 	if err != nil {
-		// objstore.MinIO classifies its own failures already; pass a classified
-		// error through as-is, same reasoning as PrintURL's fetch handling above.
+		// objstore.MinIO classifies its own failures; same reasoning as PrintURL's fetch handling above.
 		var httpErr *apperr.HTTPError
 		if errors.As(err, &httpErr) {
 			return err
