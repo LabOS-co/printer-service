@@ -65,7 +65,7 @@ func TestSubmitSuccessHoldsInvariants(t *testing.T) {
 	content := []byte("this is the spooled document body\n")
 	path := writeSpoolFile(t, content)
 
-	sub := NewLPSubmitter()
+	sub := NewLPSubmitter("A4")
 	result, err := sub.Submit(context.Background(), printgw.SubmitJob{
 		Printer: "ok",
 		Path:    path,
@@ -89,7 +89,7 @@ func TestSubmitSuccessHoldsInvariants(t *testing.T) {
 		got[key] = value
 	}
 
-	if want := "-d|ok|-t|job-title-42"; got["ARGV"] != want {
+	if want := "-d|ok|-t|job-title-42|-o|media=A4"; got["ARGV"] != want {
 		t.Errorf("argv = %q, want %q — a leaked spool path or extra flag would show up here", got["ARGV"], want)
 	}
 
@@ -133,10 +133,10 @@ func TestSubmitCopiesFlag(t *testing.T) {
 		copies   int
 		wantArgv string
 	}{
-		{name: "zero (unset) omits -n", copies: 0, wantArgv: "-d|ok|-t|t"},
-		{name: "one omits -n", copies: 1, wantArgv: "-d|ok|-t|t"},
-		{name: "two appends -n 2", copies: 2, wantArgv: "-d|ok|-t|t|-n|2"},
-		{name: "five appends -n 5", copies: 5, wantArgv: "-d|ok|-t|t|-n|5"},
+		{name: "zero (unset) omits -n", copies: 0, wantArgv: "-d|ok|-t|t|-o|media=A4"},
+		{name: "one omits -n", copies: 1, wantArgv: "-d|ok|-t|t|-o|media=A4"},
+		{name: "two appends -n 2", copies: 2, wantArgv: "-d|ok|-t|t|-o|media=A4|-n|2"},
+		{name: "five appends -n 5", copies: 5, wantArgv: "-d|ok|-t|t|-o|media=A4|-n|5"},
 	}
 
 	for _, tc := range cases {
@@ -144,7 +144,7 @@ func TestSubmitCopiesFlag(t *testing.T) {
 			t.Parallel()
 
 			path := writeSpoolFile(t, []byte("doc"))
-			sub := NewLPSubmitter()
+			sub := NewLPSubmitter("A4")
 			result, err := sub.Submit(context.Background(), printgw.SubmitJob{
 				Printer: "ok",
 				Path:    path,
@@ -172,7 +172,7 @@ func TestSubmitCopiesFlag(t *testing.T) {
 func TestSubmitOpenFailure(t *testing.T) {
 	t.Parallel()
 
-	sub := NewLPSubmitter()
+	sub := NewLPSubmitter("A4")
 	_, err := sub.Submit(context.Background(), printgw.SubmitJob{
 		Printer: "ok",
 		Path:    filepath.Join(t.TempDir(), "does-not-exist.pdf"),
@@ -198,7 +198,7 @@ func TestSubmitLPFailure(t *testing.T) {
 	t.Parallel()
 
 	path := writeSpoolFile(t, []byte("doc"))
-	sub := NewLPSubmitter()
+	sub := NewLPSubmitter("A4")
 	_, err := sub.Submit(context.Background(), printgw.SubmitJob{Printer: "fail", Path: path, Title: "t"})
 
 	var httpErr *apperr.HTTPError
@@ -266,7 +266,7 @@ func TestSubmitTimeoutKillsTheChild(t *testing.T) {
 			}
 			done := make(chan result, 1)
 			go func() {
-				_, err := NewLPSubmitter().Submit(ctx, printgw.SubmitJob{Printer: "hang", Path: path, Title: "t"})
+				_, err := NewLPSubmitter("A4").Submit(ctx, printgw.SubmitJob{Printer: "hang", Path: path, Title: "t"})
 				done <- result{err}
 			}()
 

@@ -1,6 +1,7 @@
 {
   "resource/printgateway": {
     "logLevel": "info",
+    "paperSize": "A4",
     "timeouts": {
       "readHeader": "10s",
       "read": "5m",

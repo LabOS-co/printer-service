@@ -10,6 +10,7 @@ import (
 	"math"
 	"net"
 	"reflect"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -92,6 +93,14 @@ const (
 const DefaultSubmitTimeout = 30 * time.Second
 
 const SubmitTimeoutEnv = "PRINT_GATEWAY_SUBMIT_TIMEOUT"
+
+// DefaultPaperSize is the CUPS media keyword lp is given when neither PaperSizeEnv nor the config
+// file overrides it. The printer queue's PPD must support the resulting value, or CUPS falls back
+// to the queue's own default media.
+const DefaultPaperSize = "A4"
+
+// PaperSizeEnv overrides DefaultPaperSize.
+const PaperSizeEnv = "PRINT_GATEWAY_PAPER_SIZE"
 
 // Fetch (file_url download) settings — SSRF defense.
 const (
@@ -199,6 +208,9 @@ type Config struct {
 
 	// SubmitTimeout bounds a single lp invocation.
 	SubmitTimeout time.Duration
+
+	// PaperSize is the CUPS media name passed to lp as -o media=.
+	PaperSize string
 
 	// FetchTimeout bounds a single file_url download.
 	FetchTimeout time.Duration
@@ -311,7 +323,10 @@ type filePrintgateway struct {
 	Addr *string `json:"addr"`
 	// LogLevel: unlike every other file-sourced string, an explicit "" here is a startup error, not
 	// a suppression — see mergeFileConfig.
-	LogLevel    *string         `json:"logLevel"`
+	LogLevel *string `json:"logLevel"`
+	// PaperSize: same non-empty-and-valid rule as LogLevel, enforced by validatePaperSize - an
+	// explicit "" here is a startup error, not a suppression.
+	PaperSize   *string         `json:"paperSize"`
 	Timeouts    fileTimeouts    `json:"timeouts"`
 	Limits      fileLimits      `json:"limits"`
 	Fetch       fileFetch       `json:"fetch"`
@@ -459,6 +474,15 @@ func mergeFileConfig(cfg *Config, fc fileConfig, path string) (map[string]string
 		}
 		cfg.LogLevel = *pg.LogLevel
 		sources[LogLevelEnv] = label("resource/printgateway.logLevel")
+	}
+
+	if pg.PaperSize != nil {
+		paperSize, err := validatePaperSize(*pg.PaperSize, label("resource/printgateway.paperSize"))
+		if err != nil {
+			return nil, err
+		}
+		cfg.PaperSize = paperSize
+		sources[PaperSizeEnv] = label("resource/printgateway.paperSize")
 	}
 
 	durationRows := []struct {
@@ -623,6 +647,11 @@ func Load(getenv func(string) string, readFile func(string) ([]byte, error)) (Co
 		return Config{}, err
 	}
 
+	paperSize, err := overridePaperSize(getenv, PaperSizeEnv, DefaultPaperSize)
+	if err != nil {
+		return Config{}, err
+	}
+
 	cfg := Config{
 		Port:      port,
 		BindHost:  bindHost,
@@ -645,6 +674,7 @@ func Load(getenv func(string) string, readFile func(string) ([]byte, error)) (Co
 		MaxJSONBytes:      DefaultMaxJSONBytes,
 		ShutdownGrace:     DefaultShutdownGrace,
 		SubmitTimeout:     DefaultSubmitTimeout,
+		PaperSize:         paperSize,
 
 		FetchTimeout:        DefaultFetchTimeout,
 		FetchMaxBytes:       DefaultFetchMaxBytes,
@@ -813,6 +843,28 @@ func parsePort(raw, src string) (int, error) {
 		return 0, fmt.Errorf("%s: invalid port %q, want an integer between 1 and 65535", src, raw)
 	}
 	return n, nil
+}
+
+// paperSizeRe matches a bare CUPS media keyword (e.g. "A4", "Letter", "iso_a4_210x297mm") and
+// rejects anything that could inject extra CUPS options through lp's -o media= argument.
+var paperSizeRe = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+
+// validatePaperSize is the parse-and-validate half of a CUPS media keyword, shared by the env and
+// config-file layers. src labels the error with whichever source actually supplied raw.
+func validatePaperSize(raw, src string) (string, error) {
+	if !paperSizeRe.MatchString(raw) {
+		return "", fmt.Errorf("%s: invalid paper size %q, want a bare CUPS media keyword (letters, digits, '_', '.', '-' only)", src, raw)
+	}
+	return raw, nil
+}
+
+// overridePaperSize reads name as a validated CUPS media keyword, or returns def when unset.
+func overridePaperSize(getenv func(string) string, name, def string) (string, error) {
+	raw := getenv(name)
+	if raw == "" {
+		return def, nil
+	}
+	return validatePaperSize(raw, name)
 }
 
 // overrideBytesEnv reads name as a positive byte size via parse, or returns def when unset.

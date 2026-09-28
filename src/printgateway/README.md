@@ -43,6 +43,7 @@ the full explanation, default, and interactions — read this table to know
 | `PRINT_GATEWAY_MAX_JSON_BYTES` | env / file | 8 KiB | "Timeouts, limits, and shutdown" |
 | `PRINT_GATEWAY_PRESIGN_TTL` | env / file | `15m` | "S3/MinIO object storage" |
 | `PRINT_GATEWAY_LOG_LEVEL` | env / file | `info` | "Logging" |
+| `PRINT_GATEWAY_PAPER_SIZE` | env / file | `A4` | "Paper size" |
 | `LOG_SERVER` | env / Vault / file | *(unset = console-only)* | "Logging" |
 | `HOST_NAME` | env | *(unset)* | "Logging" |
 | `HOST_IP` | env | *(unset)* | "Logging" |
@@ -352,6 +353,7 @@ than a bare "unknown field" error.
   "resource/file_storage": { "host": "s3.eu-west-1.amazonaws.com", "s3-user": "...", "s3-password": "..." },
   "resource/printgateway": {
     "logLevel": "info",
+    "paperSize": "A4",
     "timeouts":    { "readHeader": "10s", "read": "5m", "write": "8m",
                      "idle": "60s", "shutdownGrace": "2m", "submit": "30s" },
     "limits":      { "maxHeaderBytes": 65536, "maxUploadBytes": 67108864, "maxJsonBytes": 8192 },
@@ -843,6 +845,30 @@ from that:
   call. Two concurrent failing requests can log through this at the same
   time. Not fixable from this repo — tracked as an upstream `go-packages`
   issue, not this service's bug.
+
+### Paper size
+
+`PRINT_GATEWAY_PAPER_SIZE` (default `A4`), config file key
+`resource/printgateway.paperSize`, is the CUPS media keyword (e.g. `A4`,
+`Letter`, `iso_a4_210x297mm`) passed to every `lp` invocation as
+`-o media=<value>`. It applies to every print request this service submits -
+there is no per-request override (`POST /print` has no paper-size field).
+
+The value is a bare media keyword, not a CUPS option string: it must match
+only letters, digits, `_`, `.`, and `-`, which rejects anything that could
+smuggle extra `-o` options through the flag (e.g. `A4,sides=two-sided-long-edge`
+or a value containing a space or `=`). An explicit `""` for either the env
+var or the file key is rejected the same way - same treatment as
+`resource/printgateway.logLevel`, not the "suppress the env value"
+convention some other file keys use - since an unset paper size has no
+value to fall back to at the `lp` call site.
+
+**CUPS must actually support the requested value.** This service does not
+validate the keyword against the target queue's PPD; it only validates the
+string's shape. Setting a media name the queue's PPD doesn't advertise makes
+CUPS silently fall back to the queue's own configured default media rather
+than failing the print - confirm the value with `lpoptions -p <queue> -l`
+(the `PageSize`/`media` option's supported list) before relying on it.
 
 ### Timeouts, limits, and shutdown
 

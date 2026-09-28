@@ -18,12 +18,16 @@ import (
 // stdin makes it report "(0 file(s))" even though it printed one; this corrects that count.
 var lpFileCountRe = regexp.MustCompile(`\(\d+ file\(s\)\)`)
 
-// LPSubmitter hands a spooled file to CUPS via `lp -d <printer> -t <title>`,
+// LPSubmitter hands a spooled file to CUPS via `lp -d <printer> -t <title> -o media=<paperSize>`,
 // with the document piped on stdin rather than passed as a path argument
 // (so the spool path can't be mistaken for a flag or leak via `ps`/lp errors).
-type LPSubmitter struct{}
+type LPSubmitter struct {
+	paperSize string
+}
 
-func NewLPSubmitter() *LPSubmitter { return &LPSubmitter{} }
+// NewLPSubmitter builds an LPSubmitter that requests paperSize (a CUPS media keyword) on every
+// job. Callers must supply an already-validated, non-empty value - see config.validatePaperSize.
+func NewLPSubmitter(paperSize string) *LPSubmitter { return &LPSubmitter{paperSize: paperSize} }
 
 func (s *LPSubmitter) Submit(ctx context.Context, job printgw.SubmitJob) (printgw.SubmitResult, error) {
 	f, err := os.Open(job.Path)
@@ -36,7 +40,7 @@ func (s *LPSubmitter) Submit(ctx context.Context, job printgw.SubmitJob) (printg
 	}
 	defer f.Close()
 
-	argv := []string{"-d", job.Printer, "-t", job.Title}
+	argv := []string{"-d", job.Printer, "-t", job.Title, "-o", "media=" + s.paperSize}
 	if job.Copies > 1 {
 		argv = append(argv, "-n", strconv.Itoa(job.Copies))
 	}

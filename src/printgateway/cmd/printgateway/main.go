@@ -139,8 +139,10 @@ func run(ctx context.Context, stopSignals func(), getenv func(string) string, re
 		presigner = store
 	}
 
+	logger.LogInfo(fmt.Sprintf("paper size %q (%s)", cfg.PaperSize, cfg.Source(config.PaperSizeEnv)), startupMeta)
+
 	fetcher := fetch.NewSafeFetcher(cfg.AllowPrivateTargets, cfg.FetchAllowedHosts, cfg.FetchMaxBytes)
-	svc := printgw.NewService(cups.NewLPSubmitter(), fetcher, objectGetter,
+	svc := printgw.NewService(cups.NewLPSubmitter(cfg.PaperSize), fetcher, objectGetter,
 		printgw.Timeouts{Submit: cfg.SubmitTimeout, Fetch: cfg.FetchTimeout, S3: cfg.S3Timeout}, cfg.S3MaxBytes)
 	api := httpapi.New(cfg, logger, svc, presigner)
 	server := httpapi.NewServer(api)
