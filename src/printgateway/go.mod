@@ -47,7 +47,7 @@ require (
 )
 
 require (
-	github.com/LabOS-co/go-packages/cloud_storage v1.0.4
+	github.com/LabOS-co/go-packages/cloud_storage v1.0.5-0.20260918133019-46dd498031a0
 	github.com/LabOS-co/go-packages/encryption v1.1.1
 	github.com/LabOS-co/go-packages/secret_store v1.3.4
 	github.com/LabOS-co/go-packages/shared v1.2.1 // indirect
@@ -60,12 +60,3 @@ require (
 	golang.org/x/sys v0.46.0 // indirect
 	golang.org/x/text v0.38.0 // indirect
 )
-
-// cloud_storage's PresignGetURL/PresignPutURL aren't tagged yet - see
-// go-packages' feature/cloud_storage/LAB-16894-presign-minimal branch (built
-// off main, adding only the two presign methods plus the Region/Insecure
-// settings fields and not-found classification this module needs - not the
-// larger, unmerged feature/cloud_storage/LAB-16894—Add_presign_and_streaming_support
-// branch). Remove this and bump the require above to a real tag once
-// presign is merged/tagged on main.
-replace github.com/LabOS-co/go-packages/cloud_storage => ../../../go-packages/cloud_storage

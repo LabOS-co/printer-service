@@ -5,38 +5,14 @@
 #   docker build -t printgateway:latest src/printgateway
 #
 # ---------------------------------------------------------------------------
-# PREREQUISITE, READ BEFORE BUILDING: two dependencies are not on a tagged
-# release yet (see README.md's "labOS shared library" section) —
-#
-#   github.com/LabOS-co/go-packages/cloud_storage  (feature/cloud_storage/...)
-#   github.com/LabOS-co/go-packages/secret_store   (feature/secret_store/...)
-#
-# go.mod resolves both via a local `replace` directive pointing OUTSIDE this
-# repo (../../../go-packages/..., ../../../go-packages-secret_store-wt/...).
-# Those paths do not exist inside a Docker build context, a fresh CI checkout
-# of just this repo, or anyone else's machine — `go build`/`go mod download`
-# fail hard the moment they're needed. This is not a hypothetical: it was
-# verified by attempting exactly that build.
-#
-# Until both branches are merged and tagged (at which point the `replace`
-# lines in go.mod go away entirely and this whole prerequisite disappears),
-# this image is built from a VENDORED, self-contained snapshot instead:
-#
-#   cd src/printgateway
-#   go mod vendor          # run on a machine that HAS both sibling checkouts
-#   docker build -t printgateway:latest .
-#
-# `go mod vendor` resolves the replace directives once, copying their actual
-# source into vendor/, and this Dockerfile builds with `-mod=vendor` — so the
-# resulting image is reproducible without needing those sibling repos ever
-# again. Verified: a vendored build compiles clean for linux/amd64.
-#
-# vendor/ is not committed by default (see .gitignore) since it embeds source
-# from two unpublished branches; regenerate it per release, or commit it
-# deliberately if you want a build that needs no local sibling checkouts at
-# all — that decision belongs to whoever owns the release process, not this
-# Dockerfile. Once both branches are tagged, drop `-mod=vendor` below, delete
-# vendor/, and a plain `go mod download` takes over.
+# All github.com/LabOS-co/go-packages/* dependencies are plain module
+# requires in go.mod (no local `replace`, no vendor/ snapshot), so a bump
+# there — including cloud_storage's current pseudo-version pinned to a
+# go-packages main commit, ahead of its last tag — is picked up by
+# `go get github.com/LabOS-co/go-packages/<pkg>@<version-or-branch>` and a
+# `go.mod`/`go.sum` diff, same as any other dependency. `go mod download`
+# below fetches straight from go-packages over the network; no sibling
+# checkout of that repo is needed on the build machine.
 # ---------------------------------------------------------------------------
 
 # --- build stage -------------------------------------------------------
@@ -53,11 +29,11 @@ FROM golang:1.25-bookworm AS build
 
 WORKDIR /src
 
-# go.mod/go.sum (and vendor/, if present) copied before the rest of the
-# source: this layer is only invalidated when dependencies change, not on
-# every source edit, which is most of the point of a multi-stage Dockerfile.
+# go.mod/go.sum copied before the rest of the source: this layer is only
+# invalidated when dependencies change, not on every source edit, which is
+# most of the point of a multi-stage Dockerfile.
 COPY go.mod go.sum ./
-COPY vendor/ ./vendor/
+RUN go mod download
 
 COPY cmd/ ./cmd/
 COPY internal/ ./internal/
@@ -77,7 +53,7 @@ ARG COMMIT=unknown
 # lets the runtime stage below be debian-slim rather than needing glibc's full
 # dynamic-linking machinery matched exactly between stages.
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -mod=vendor -trimpath -ldflags="-s -w \
+    go build -trimpath -ldflags="-s -w \
       -X github.com/version-go/ldflags.buildVersion=${VERSION} \
       -X github.com/version-go/ldflags.buildTime=${BUILD_TIME} \
       -X github.com/version-go/ldflags.buildHash=${COMMIT}" \

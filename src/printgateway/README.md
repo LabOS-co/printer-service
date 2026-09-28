@@ -520,10 +520,10 @@ version, not an oversight.
   so host networking would put the container in the *wrong* network
   namespace; `host.docker.internal` is the address Docker Desktop always
   routes to the real host regardless of which distro/VM anything runs in.
-  Requires `go mod vendor` to have been run first (see the `Dockerfile`'s
-  own header comment) and, of course, that `printservice.config.local.json`
-  actually exists — `docker compose up` fails fast naming the missing path
-  otherwise. On a native Linux Docker Engine (no Desktop layer),
+  Requires network access to fetch Go modules during the build (see the
+  `Dockerfile`'s own header comment) and, of course, that
+  `printservice.config.local.json` actually exists — `docker compose up`
+  fails fast naming the missing path otherwise. On a native Linux Docker Engine (no Desktop layer),
   `host.docker.internal` needs `extra_hosts: ["host.docker.internal:host-gateway"]`
   added to the compose file, or `CUPS_HOST` pointed at the host's real
   address instead.
@@ -991,37 +991,28 @@ monorepo (each package there is its own Go module, versioned with its own
   `errorMessage`) as every other labOS Go service, and every failure is logged
   automatically as it's handled.
 - `github.com/LabOS-co/go-packages/secret_store` — `internal/secrets` uses its
-  `Vault(...)` client plus `GetSecretString` to resolve the print token,
-  logstash address, and S3 credentials when `SECRET_STORE_URL` is set (see
-  "Secrets (Vault)" above). **Not yet on a tagged release**: the two
-  functions this depends on (`GetSecretString`/`GetSecretStringWithFallback`)
-  live on the unpushed branch
-  `feature/secret_store/LAB-16894—Add_secret_fallback_helpers` in the
-  `go-packages` repo, checked out into a separate **git worktree** (not the
-  main `go-packages` checkout — see the `cloud_storage` entry below for why),
-  so `go.mod` currently carries a local
-  `replace github.com/LabOS-co/go-packages/secret_store =>
-  ../../../go-packages-secret_store-wt/secret_store` pointing at it. Remove
-  the `replace` and bump the `require` to a real tag once that branch is
-  merged and tagged.
+  `Vault(...)` client plus a local unexported `getSecretString` helper
+  (`internal/secrets/secrets.go`, wraps `client.GetSecretValue`) to resolve
+  the print token, logstash address, and S3 credentials when
+  `SECRET_STORE_URL` is set (see "Secrets (Vault)" above). Real tagged
+  release, `v1.3.4`, no local `replace` — `GetSecretValue` is a `main`
+  primitive, so this package never depended on the unmerged
+  `feature/secret_store/LAB-16894—Add_secret_fallback_helpers` branch's
+  fallback helpers in the first place.
 - `github.com/LabOS-co/go-packages/encryption` — `internal/secrets` uses
   `Decrypt` on `SECRET_STORE_PASSWORD`, matching the convention
   `go-packages/settings` already applies to that variable (see the table
   above). A real tagged release (`v1.1.1`), no local `replace` needed.
 - `github.com/LabOS-co/go-packages/cloud_storage` — `internal/objstore`
-  adapts its `CloudStorageStreamingClient` (presigning + ctx-cancellable
-  streaming Get/Put) to this service's own `printgw.ObjectStore` port (see
-  "S3/MinIO object storage" above). **Not yet on a tagged release**: those
-  methods live on the unpushed branch
-  `feature/cloud_storage/LAB-16894—Add_presign_and_streaming_support` in the
-  `go-packages` repo — currently the *main* `go-packages` checkout (which is
-  why `secret_store`, above, needed its own separate worktree instead: one
-  working directory can only be on one branch at a time), so `go.mod` carries
-  `replace github.com/LabOS-co/go-packages/cloud_storage =>
-  ../../../go-packages/cloud_storage`. Remove the `replace` and bump the
-  `require` to a real tag once that branch is merged and tagged — and note
-  that whichever of these two branches merges first should let the other
-  drop its worktree and rejoin the main checkout.
+  adapts its `CloudStorageClient` (`PresignGetURL`/`PresignPutURL` plus
+  `GetDownloadObject`) to this service's own `printgw.ObjectStore` port (see
+  "S3/MinIO object storage" above). The presign methods merged to
+  `go-packages` `main` but aren't tagged yet, so `go.mod` pins a
+  **pseudo-version** (`v1.0.5-0.<timestamp>-<commit>`) instead of a real tag
+  — still a plain module require, no local `replace` and no vendoring.
+  Bump it the same way as any other dependency:
+  `go get github.com/LabOS-co/go-packages/cloud_storage@main`. Switch to a
+  real tag once one exists that includes the presign methods.
 - `github.com/LabOS-co/go-packages/system_api` — `internal/httpapi.NewServer`
   calls `system_api.Status` directly to mount `GET /status`; `main.go`'s
   `run()` separately calls `system_api.Register` (see "Health check" above)

@@ -46,5 +46,10 @@ Thumbs.db
 # is pointed here — build cache, not source.
 /pkg/
 
+# go-packages is consumed as a real module dependency (go.mod require, no
+# local replace) so it can be upgraded with a go.mod version bump instead of
+# a vendor-tree sync. Never commit a vendor/ snapshot of it.
+/src/printgateway/vendor/
+
 # Generated Postman/Newman run output from tests/scripts — not source.
 /tests/reports/

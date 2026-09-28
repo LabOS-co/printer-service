@@ -1,4 +1,4 @@
-# printer-server/src — status (last updated 2026-09-14)
+# printer-server/src — status (last updated 2026-09-24)
 
 Continuation of LAB-16894 under `src/` (this repo's working copy is at
 `C:\GitProjects\printer-server`). The original POC at the repo root is
@@ -642,3 +642,28 @@ reasons to add it anyway. `printgateway.nomad` gained a commented-out
 rendered-file model (Nomad's own `template{}` + `vault{}` integration
 instead of a separate Vault Agent), left inactive by default for the same
 reason `install-services.sh` leaves it inactive.
+
+## Twelfth phase (2026-09-24): dropped the committed `vendor/` snapshot
+
+`src/printgateway/vendor/` (1234 files, every `go-packages` dependency's
+source) had been committed to git — contradicting the Dockerfile's own
+comment claiming it was gitignored and not committed by default. This meant
+a `go-packages` change could only reach printer-server via a full vendor-tree
+resync, not a version bump. Fixed: `secret_store` was already resolvable as
+a plain tagged require (`v1.3.4`, no `replace` — confirmed
+[[secret-resolver-state-2026-08-25]] is accurate, `internal/secrets` never
+actually needed the unmerged fallback-helpers branch). `cloud_storage`'s
+presign branch (PR #347,
+`feature/cloud_storage/LAB-16894-presign-minimal`) had since merged to
+`go-packages` `main` but wasn't tagged, so its local `replace` was dropped
+and the `require` bumped to a pseudo-version anchored to `main`
+(`go get github.com/LabOS-co/go-packages/cloud_storage@main`) instead —
+still a plain module require, no local path, no vendoring. `vendor/` was
+untracked and added to `.gitignore`; the Dockerfile no longer copies it or
+builds with `-mod=vendor` (`go mod download` inside the build stage instead);
+`DEPLOYMENT.md` and `README.md`'s "labOS shared library" section updated to
+match. Verified: `go mod tidy` and `go build ./cmd/printgateway` both succeed
+with no local worktree and no vendor directory present. Future
+`go-packages` changes now need only a `go get .../pkg@<version>` + go.mod/
+go.sum diff, the same as any other dependency — no code change in this
+repo beyond that.

@@ -38,42 +38,29 @@ reachable the way the target infrastructure expects.
    Nomad client in the production case, since the job spec below uses
    Nomad's `docker` task driver.
 3. **A Go 1.25 toolchain**, only on the machine that builds the image (not on
-   any machine that just runs the resulting container) — needed for the
-   `go mod vendor` step in §1 below.
+   any machine that just runs the resulting container) — needed if you build
+   outside Docker; the Docker build itself only needs Docker.
 4. **Decide your auth posture up front**: will this deployment set
    `PRINT_GATEWAY_REQUIRE_AUTH=true` and issue a real `PRINT_GATEWAY_TOKEN`
    (or wire Vault)? Production should. See `README.md`'s "Access control"
    and "Secrets (Vault)" sections. Have the token (or Vault address/creds)
    ready before §4 (production) below — the process refuses to start with
    auth required and no token resolvable from anywhere.
-5. **Two Go dependencies are on unpublished branches**, not a tagged
-   release, as of this writing (`README.md`'s "labOS shared library"
-   section has the full detail): `go-packages/cloud_storage` and
-   `go-packages/secret_store`. This is why the build in §1 vendors them —
-   until both are merged and tagged, building this image requires having
-   both sibling branches checked out next to this repo (see §1). If they
-   have since been merged and tagged, `go.mod`'s `replace` lines will be
-   gone and `go mod vendor` becomes unnecessary — check `go.mod` for a
-   `replace github.com/LabOS-co/go-packages/...` line before assuming this
-   step is still needed.
+5. **Network access to github.com** on the machine that builds the image:
+   `go.mod` resolves every `github.com/LabOS-co/go-packages/...` dependency
+   as a plain module require (no local `replace`, no vendored copy), so
+   `docker build` fetches them straight from go-packages the same way it
+   fetches any other Go module. No sibling checkout of that repo is needed.
 
 ---
 
 ## 1. Build the image (every environment starts here)
 
-Run this on a machine that has this repo **and**, until the two branches in
-prerequisite 5 above are tagged, both sibling checkouts `go.mod` currently
-points its `replace` lines at (`../../../go-packages/cloud_storage`,
-`../../../go-packages-secret_store-wt/secret_store`).
+Run this on a machine that has this repo and network access to fetch Go
+modules (see prerequisite 5 above) — no other local checkout is needed.
 
 ```bash
 cd src/printgateway
-
-# Vendors the replace-directive source so the Docker build context is
-# self-contained (Dockerfile builds with -mod=vendor). Skip this step only
-# once go.mod no longer has any `replace github.com/LabOS-co/go-packages/...`
-# line — at that point `go mod download` inside the Dockerfile is enough.
-go mod vendor
 
 VERSION=$(git describe --tags --always)
 BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -402,5 +389,5 @@ is additive and off by default, not a deployment error.
 | `/print` returns 500, "No file in print request" or a `lp` error | `printer` doesn't name a real CUPS queue reachable from where this container's `CUPS_HOST` points — run `lpstat -p` against that CUPS host directly to confirm the queue exists. |
 | Consul shows the service `critical` | See C3 above — usually a mismatch between the advertised address and where the health check is actually reachable from, or `-consul-register` combined with a loopback bind host. |
 | Process refuses to start, "no token" error | `PRINT_GATEWAY_REQUIRE_AUTH=true` with no `PRINT_GATEWAY_TOKEN` and no working Vault path — see `README.md`'s "Fallback policy". |
-| `docker build` fails resolving `go-packages/cloud_storage` or `secret_store` | Prerequisite 5 / §1 — those two packages aren't tagged yet; `go mod vendor` must run on a machine with both sibling branches checked out first. |
+| `docker build` fails resolving `go-packages/cloud_storage` or `secret_store` | Prerequisite 5 — the build machine needs network access to github.com to fetch these as plain Go modules. |
 | A previously-working config file now fails startup with "unknown field" | See "Rollback" in `README.md`'s "Configuration file" section — roll the file and binary forward/back together, never independently. |
