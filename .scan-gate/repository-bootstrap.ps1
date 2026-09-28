@@ -68,7 +68,7 @@ Write-Host "  init.templateDir: $(git config --global --get init.templateDir)"
 Write-Host "  pre-commit: $((& pre-commit --version 2>$null) -join ' ')"
 Write-Host "  trufflehog: $(((& trufflehog --version 2>$null) | Select-Object -First 1))"
 Write-Host ""
-Write-Host "Later clones of repos with .scan-gate/ will auto-run install (Husky repos skip pre-commit install)."
+Write-Host "Run this again after each new clone. Tool install is skipped if already present. Husky repos skip pre-commit install."
 
 if ($SkipHooks) {
     Write-Host "Skipped hook install (-SkipHooks). From a repo root: .scan-gate\repository-bootstrap.ps1"

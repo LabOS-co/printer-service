@@ -5,9 +5,9 @@ usage() {
   cat <<'EOF'
 Usage: .scan-gate/repository-bootstrap.sh [--skip-hooks]
 
-Run from the repository root. Safe to re-run. Does all of:
-  - Install pre-commit + trufflehog if missing (user-local)
-  - Set git init.templateDir (~/.labos-git-template) for later clones
+Run from the repository root after every clone. Safe to re-run. Does all of:
+  - Install pre-commit + trufflehog if missing (skipped when already present)
+  - Set git init.templateDir (~/.labos-git-template) as a fallback
   - Register hooks in THIS clone (Husky repos skip pre-commit install)
 
 Options:
@@ -87,7 +87,7 @@ echo "  init.templateDir: $(git config --global --get init.templateDir)"
 echo "  pre-commit: $(pre-commit --version 2>/dev/null || echo 'not runnable')"
 echo "  trufflehog: $(trufflehog --version 2>/dev/null | head -n 1 || echo 'not runnable')"
 echo ""
-echo "Later clones of repos with .scan-gate/ will auto-run install (Husky repos skip pre-commit install)."
+echo "Run this again after each new clone. Tool install is skipped if already present. Husky repos skip pre-commit install."
 
 if [ "$INSTALL_HOOKS" -eq 1 ]; then
   if [ -f ".scan-gate/install-hooks.sh" ]; then
