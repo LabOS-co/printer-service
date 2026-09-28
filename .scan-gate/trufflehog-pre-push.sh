@@ -7,9 +7,12 @@ set -euo pipefail
 # Never fall back to the repo root commit (too slow/noisy).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || pwd)"
+# Parent of .scan-gate. git -C is wrong while a hook has GIT_DIR set: toplevel becomes .scan-gate.
+ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$ROOT"
 export PATH="${HOME}/.local/bin:${HOME}/bin:${PATH}"
+# shellcheck source=trufflehog-excludes.sh
+. "$SCRIPT_DIR/trufflehog-excludes.sh"
 
 if ! command -v trufflehog >/dev/null 2>&1; then
   if [ -f "${ROOT}/.scan-gate/ensure-tools.sh" ]; then
@@ -29,11 +32,12 @@ zero_ref="0000000000000000000000000000000000000000"
 scan_since() {
   local base="$1"
   echo "Running TruffleHog git scan since ${base}..."
-  trufflehog git file://. \
+  # shellcheck disable=SC2046
+  trufflehog_run git file://. \
     --config .trufflehog.yaml \
+    $(trufflehog_exclude_cli_args) \
     --since-commit "$base" \
     --results=verified,unknown,unverified \
-    --fail \
     --no-update
 }
 

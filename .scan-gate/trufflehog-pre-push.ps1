@@ -8,6 +8,8 @@ if ($repoRoot) {
     Set-Location $repoRoot.Trim()
 }
 
+. (Join-Path $PSScriptRoot "trufflehog-excludes.ps1")
+
 $userBin = Join-Path $env:USERPROFILE "bin"
 $localBin = Join-Path $env:USERPROFILE ".local\bin"
 $env:PATH = "$userBin;$localBin;$env:PATH"
@@ -30,13 +32,16 @@ $zeroRef = "0000000000000000000000000000000000000000"
 
 function Invoke-ScanSince([string]$Base) {
     Write-Host "Running TruffleHog git scan since $Base..."
-    & trufflehog git file://. `
-        --config .trufflehog.yaml `
-        --since-commit $Base `
-        --results=verified,unknown,unverified `
-        --fail `
-        --no-update
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $thArgs = @(
+        "git", "file://.",
+        "--config", ".trufflehog.yaml"
+    ) + @(Get-TrufflehogExcludeCliArgs) + @(
+        "--since-commit", $Base,
+        "--results=verified,unknown,unverified",
+        "--no-update"
+    )
+    $code = Invoke-TrufflehogFiltered -ArgumentList $thArgs
+    if ($code -ne 0) { exit $code }
 }
 
 $fromRef = $env:PRE_COMMIT_FROM_REF

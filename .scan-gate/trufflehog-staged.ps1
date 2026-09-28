@@ -16,14 +16,21 @@ if (-not (Get-Command trufflehog -ErrorAction SilentlyContinue)) {
     exit 127
 }
 
+. (Join-Path $PSScriptRoot "trufflehog-excludes.ps1")
+
+$kept = @(Select-TrufflehogPaths -Files $Files)
+if ($kept.Count -eq 0) {
+    exit 0
+}
+
 $arguments = @(
     "filesystem",
-    "--config", ".trufflehog.yaml",
+    "--config", ".trufflehog.yaml"
+) + @(Get-TrufflehogExcludeCliArgs) + @(
     "--results=verified,unknown,unverified",
-    "--fail",
     "--no-update",
     "--force-skip-binaries"
-) + $Files
+) + $kept
 
-& trufflehog @arguments
-exit $LASTEXITCODE
+$code = Invoke-TrufflehogFiltered -ArgumentList $arguments
+exit $code

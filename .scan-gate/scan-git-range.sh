@@ -11,9 +11,14 @@ if ! command -v trufflehog >/dev/null 2>&1; then
   exit 127
 fi
 
-trufflehog git file://. \
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=trufflehog-excludes.sh
+. "$SCRIPT_DIR/trufflehog-excludes.sh"
+
+# shellcheck disable=SC2046
+trufflehog_run git file://. \
   --config .trufflehog.yaml \
+  $(trufflehog_exclude_cli_args) \
   --since-commit "$1" \
   --results=verified,unknown,unverified \
-  --fail \
   --no-update

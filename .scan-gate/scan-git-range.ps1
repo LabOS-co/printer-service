@@ -16,11 +16,15 @@ if (-not (Get-Command trufflehog -ErrorAction SilentlyContinue)) {
     exit 127
 }
 
-& trufflehog git file://. `
-    --config .trufflehog.yaml `
-    --since-commit "$SinceRef" `
-    --results=verified,unknown,unverified `
-    --fail `
-    --no-update
+. (Join-Path $PSScriptRoot "trufflehog-excludes.ps1")
 
-exit $LASTEXITCODE
+$thArgs = @(
+    "git", "file://.",
+    "--config", ".trufflehog.yaml"
+) + @(Get-TrufflehogExcludeCliArgs) + @(
+    "--since-commit", $SinceRef,
+    "--results=verified,unknown,unverified",
+    "--no-update"
+)
+$code = Invoke-TrufflehogFiltered -ArgumentList $thArgs
+exit $code
